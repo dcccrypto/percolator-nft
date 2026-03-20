@@ -370,6 +370,13 @@ fn process_settle_funding(_program_id: &Pubkey, accounts: &[AccountInfo]) -> Pro
         return Err(ProgramError::MissingRequiredSignature);
     }
 
+    // GH#14 fix: Verify holder_ata is owned by Token-2022 program before
+    // trusting its byte layout. Without this, an attacker can pass a crafted
+    // 72-byte account that satisfies the balance/owner/mint checks below.
+    if *holder_ata.owner != token2022::TOKEN_2022_PROGRAM_ID {
+        return Err(NftError::NotNftHolder.into());
+    }
+
     verify_slab_owner(slab)?;
 
     let mut pda_data = nft_pda.try_borrow_mut_data()?;

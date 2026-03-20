@@ -226,15 +226,18 @@ fn test_position_data_collateral_is_separate_from_size() {
     use solana_sdk::pubkey::Pubkey;
     let pd = PositionData {
         owner: Pubkey::default(),
-        collateral: 100_000_000,   // 100 USDC collateral
-        size: 1_000_000_000,       // 1000 USDC notional (10× leverage)
+        collateral: 100_000_000,        // 100 USDC collateral
+        size: 1_000_000_000,            // 1000 USDC notional (10× leverage)
         entry_price_e6: 50_000_000_000, // $50,000 entry
         is_long: 1,
         global_funding_index_e18: 0,
         engine_off: 0,
     };
     // collateral ≠ size — using size as collateral would be 10× inflated
-    assert_ne!(pd.collateral, pd.size, "collateral and size must be distinct");
+    assert_ne!(
+        pd.collateral, pd.size,
+        "collateral and size must be distinct"
+    );
     assert_eq!(pd.collateral, 100_000_000);
     assert_eq!(pd.size, 1_000_000_000);
 }
