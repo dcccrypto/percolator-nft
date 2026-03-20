@@ -38,8 +38,8 @@ use crate::{
 pub const EXECUTE_DISCRIMINATOR: [u8; 8] = [105, 37, 101, 197, 75, 251, 102, 26];
 
 /// Instruction tag for TransferPositionOwnership in percolator-prog.
-/// This must be added to percolator-prog as tag 53.
-pub const TAG_TRANSFER_POSITION_OWNERSHIP: u8 = 53;
+/// Added to percolator-prog as tag 64.
+pub const TAG_TRANSFER_POSITION_OWNERSHIP: u8 = 64;
 
 // ═══════════════════════════════════════════════════════════════
 // Margin check — verify position is not in liquidation zone
