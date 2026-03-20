@@ -310,6 +310,14 @@ fn process_burn_position_nft(_program_id: &Pubkey, accounts: &[AccountInfo]) -> 
     drop(pda_data);
 
     // ── Verify holder owns the NFT (check ATA balance) ──
+    // GH#15 / GH#16: Verify holder_ata is owned by Token-2022 program before
+    // reading raw bytes. Mirrors GH#14 fix applied to process_settle_funding().
+    // Without this, a crafted 72-byte account could satisfy the balance/owner/
+    // mint byte-offset checks; the burn CPI would reject it, but this adds
+    // defense-in-depth and consistency across all instructions.
+    if *holder_ata.owner != token2022::TOKEN_2022_PROGRAM_ID {
+        return Err(NftError::NotNftHolder.into());
+    }
     let ata_data = holder_ata.try_borrow_data()?;
     if ata_data.len() < 72 {
         return Err(NftError::NotNftHolder.into());
