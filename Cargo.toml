@@ -1,0 +1,25 @@
+[package]
+name = "percolator-nft"
+version = "0.1.0"
+edition = "2021"
+description = "Position NFT wrapper for Percolator — mint transferable NFTs representing open perpetual positions"
+
+[features]
+no-entrypoint = []
+test = []
+
+[dependencies]
+solana-program = "=2.2.1"
+# We construct Token-2022 instructions manually (same pattern as percolator-stake)
+# to avoid version conflicts between spl-token-2022 (solana 2.1) and our solana 2.2.1.
+bytemuck = { version = "1.14", features = ["derive"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dev-dependencies]
+solana-sdk = "=2.2.1"
+proptest = "1.4"
