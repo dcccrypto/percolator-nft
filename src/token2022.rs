@@ -105,6 +105,52 @@ pub fn get_associated_token_address(
     .0
 }
 
+// ═══════════════════════════════════════════════════════════════
+// Token Metadata (spl_token_metadata_interface)
+// ═══════════════════════════════════════════════════════════════
+
+/// Token metadata program discriminator for Initialize.
+/// SHA256("spl_token_metadata_interface:initialize_account")[:8]
+const METADATA_INIT_DISCRIMINATOR: [u8; 8] = [210, 225, 30, 162, 88, 184, 238, 125];
+
+/// Encode a string as borsh: u32 LE length + utf8 bytes.
+fn borsh_string(s: &str) -> Vec<u8> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(4 + bytes.len());
+    out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    out.extend_from_slice(bytes);
+    out
+}
+
+/// Build Token-2022 metadata initialize instruction.
+/// This uses the embedded metadata extension (no separate Metaplex program needed).
+///
+/// Accounts: [mint(w), update_authority, mint_authority(s)]
+pub fn initialize_token_metadata(
+    mint: &Pubkey,
+    update_authority: &Pubkey,
+    mint_authority: &Pubkey,
+    name: &str,
+    symbol: &str,
+    uri: &str,
+) -> Instruction {
+    let mut data = Vec::with_capacity(8 + 12 + name.len() + symbol.len() + uri.len());
+    data.extend_from_slice(&METADATA_INIT_DISCRIMINATOR);
+    data.extend(borsh_string(name));
+    data.extend(borsh_string(symbol));
+    data.extend(borsh_string(uri));
+
+    Instruction {
+        program_id: TOKEN_2022_PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new(*mint, false),
+            AccountMeta::new_readonly(*update_authority, false),
+            AccountMeta::new_readonly(*mint_authority, true),
+        ],
+        data,
+    }
+}
+
 /// Build CreateAssociatedTokenAccount instruction for Token-2022.
 pub fn create_associated_token_account(
     payer: &Pubkey,

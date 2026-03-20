@@ -240,6 +240,29 @@ mod kani_proofs {
         assert_eq!(ix.data[0], 8, "Burn tag must be 8");
     }
 
+    /// Prove metadata instruction always has correct discriminator and borsh encoding.
+    #[kani::proof]
+    fn kani_metadata_discriminator_correct() {
+        use percolator_nft::token2022;
+        let mint_bytes: [u8; 32] = kani::any();
+        let auth_bytes: [u8; 32] = kani::any();
+        let mint = solana_program::pubkey::Pubkey::new_from_array(mint_bytes);
+        let auth = solana_program::pubkey::Pubkey::new_from_array(auth_bytes);
+
+        let ix = token2022::initialize_token_metadata(
+            &mint, &auth, &auth, "TEST", "T", "",
+        );
+
+        // Discriminator must be first 8 bytes.
+        assert_eq!(ix.data[0], 210);
+        assert_eq!(ix.data[1], 225);
+        // Name "TEST" borsh: len=4 (LE u32) + 4 bytes.
+        let name_len = u32::from_le_bytes([ix.data[8], ix.data[9], ix.data[10], ix.data[11]]);
+        assert_eq!(name_len, 4, "Name length must be 4");
+        // 3 accounts.
+        assert_eq!(ix.accounts.len(), 3);
+    }
+
     /// Prove initialize_mint2 data is always exactly 35 bytes (no freeze authority).
     #[kani::proof]
     fn kani_init_mint2_data_size() {

@@ -114,6 +114,43 @@ fn test_nft_error_codes() {
 }
 
 #[test]
+fn test_metadata_init_instruction_structure() {
+    use percolator_nft::token2022;
+    let mint = solana_sdk::pubkey::Pubkey::new_unique();
+    let auth = solana_sdk::pubkey::Pubkey::new_unique();
+
+    let ix = token2022::initialize_token_metadata(
+        &mint, &auth, &auth,
+        "PERP LONG GGU89iQL @148.5000",
+        "PERP-LONG",
+        "",
+    );
+
+    // Discriminator is 8 bytes
+    assert_eq!(&ix.data[..8], &[210, 225, 30, 162, 88, 184, 238, 125]);
+    // 3 accounts: mint(w), update_authority, mint_authority(s)
+    assert_eq!(ix.accounts.len(), 3);
+    assert!(ix.accounts[0].is_writable);
+    assert!(ix.accounts[2].is_signer);
+}
+
+#[test]
+fn test_metadata_empty_uri() {
+    use percolator_nft::token2022;
+    let mint = solana_sdk::pubkey::Pubkey::new_unique();
+    let auth = solana_sdk::pubkey::Pubkey::new_unique();
+
+    let ix = token2022::initialize_token_metadata(
+        &mint, &auth, &auth, "Test", "TST", "",
+    );
+
+    // Data should contain: discriminator(8) + name borsh + symbol borsh + uri borsh("")
+    // uri borsh("") = 4 bytes (len=0) + 0 bytes = 4 bytes
+    let expected_min = 8 + (4 + 4) + (4 + 3) + (4 + 0); // 27
+    assert!(ix.data.len() >= expected_min);
+}
+
+#[test]
 fn test_bytemuck_zeroed_is_valid() {
     let zeroed: PositionNft = bytemuck::Zeroable::zeroed();
     assert_eq!(zeroed.magic, 0);

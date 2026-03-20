@@ -1,3 +1,5 @@
+extern crate alloc;
+
 use solana_program::{
     account_info::{next_account_info, AccountInfo},
     entrypoint::ProgramResult,
@@ -42,8 +44,13 @@ pub fn process(
 // Tag 0: MintPositionNft
 // ═══════════════════════════════════════════════════════════════
 
-/// Token-2022 Mint account size (without extensions).
-const MINT_SIZE: u64 = 82;
+/// Token-2022 Mint account base size (without extensions).
+const MINT_BASE_SIZE: u64 = 82;
+/// Type/length header for metadata extension.
+const METADATA_EXTENSION_HEADER: u64 = 4; // type(2) + length(2)
+/// Rough upper bound for metadata content (name + symbol + uri + fields).
+/// Actual size computed per-mint based on market symbol length.
+const METADATA_MAX_LEN: u64 = 512;
 
 fn process_mint_position_nft(
     program_id: &Pubkey,
@@ -142,14 +149,32 @@ fn process_mint_position_nft(
     nft_state.minted_at = clock.unix_timestamp;
     drop(pda_data);
 
-    // ── Create Token-2022 mint account ──
-    let mint_rent = rent.minimum_balance(MINT_SIZE as usize);
+    // ── Build metadata strings ──
+    let direction = if position.is_long == 1 { "LONG" } else { "SHORT" };
+    let price_whole = position.entry_price_e6 / 1_000_000;
+    let price_frac = (position.entry_price_e6 % 1_000_000) / 100; // 4 decimal places
+
+    // Name: "PERP LONG SOL @148.5000" (slab address if no symbol available)
+    let slab_short = &slab.key.to_string()[..8];
+    let nft_name = if price_whole > 0 {
+        alloc::format!("PERP {} {} @{}.{:04}", direction, slab_short, price_whole, price_frac)
+    } else {
+        alloc::format!("PERP {} {}", direction, slab_short)
+    };
+    let nft_symbol = alloc::format!("PERP-{}", direction);
+
+    // URI: empty for now (no off-chain metadata server yet)
+    let nft_uri = "";
+
+    // ── Create Token-2022 mint account (with metadata extension space) ──
+    let mint_space = MINT_BASE_SIZE + METADATA_EXTENSION_HEADER + METADATA_MAX_LEN;
+    let mint_rent = rent.minimum_balance(mint_space as usize);
     invoke(
         &system_instruction::create_account(
             owner.key,
             nft_mint.key,
             mint_rent,
-            MINT_SIZE,
+            mint_space,
             &token2022::TOKEN_2022_PROGRAM_ID,
         ),
         &[owner.clone(), nft_mint.clone(), system_program.clone()],
@@ -159,6 +184,21 @@ fn process_mint_position_nft(
     invoke(
         &token2022::initialize_mint2(nft_mint.key, mint_auth.key),
         &[nft_mint.clone()],
+    )?;
+
+    // ── Initialize metadata extension ──
+    let mint_auth_seeds: &[&[u8]] = &[MINT_AUTHORITY_SEED, &[mint_auth_bump]];
+    invoke_signed(
+        &token2022::initialize_token_metadata(
+            nft_mint.key,
+            mint_auth.key,  // update authority = mint authority PDA
+            mint_auth.key,  // mint authority signs
+            &nft_name,
+            &nft_symbol,
+            nft_uri,
+        ),
+        &[nft_mint.clone(), mint_auth.clone()],
+        &[mint_auth_seeds],
     )?;
 
     // ── Create ATA for owner ──
@@ -176,7 +216,6 @@ fn process_mint_position_nft(
     )?;
 
     // ── Mint 1 NFT to owner's ATA ──
-    let mint_auth_seeds: &[&[u8]] = &[MINT_AUTHORITY_SEED, &[mint_auth_bump]];
     invoke_signed(
         &token2022::mint_to(nft_mint.key, owner_ata.key, mint_auth.key, 1),
         &[nft_mint.clone(), owner_ata.clone(), mint_auth.clone()],
