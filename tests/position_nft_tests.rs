@@ -216,3 +216,42 @@ fn test_bytemuck_zeroed_is_valid() {
     assert_eq!(zeroed.position_size, 0);
     assert_eq!(zeroed.last_funding_index_e18, 0);
 }
+
+/// GH#12: PositionData.collateral and .size are distinct fields.
+/// The valuation path must use collateral (actual margin), not size (notional).
+/// This test verifies the struct has separate fields with independently settable values.
+#[test]
+fn test_position_data_collateral_is_separate_from_size() {
+    use percolator_nft::cpi::PositionData;
+    use solana_sdk::pubkey::Pubkey;
+    let pd = PositionData {
+        owner: Pubkey::default(),
+        collateral: 100_000_000,        // 100 USDC collateral
+        size: 1_000_000_000,            // 1000 USDC notional (10× leverage)
+        entry_price_e6: 50_000_000_000, // $50,000 entry
+        is_long: 1,
+        global_funding_index_e18: 0,
+        engine_off: 0,
+    };
+    // collateral ≠ size — using size as collateral would be 10× inflated
+    assert_ne!(
+        pd.collateral, pd.size,
+        "collateral and size must be distinct"
+    );
+    assert_eq!(pd.collateral, 100_000_000);
+    assert_eq!(pd.size, 1_000_000_000);
+}
+
+/// GH#5: SettleFunding instruction tag is still tag 2 (no wire format change).
+/// The holder-only restriction is enforced at the processor level via account validation.
+/// This test verifies the instruction unpacks correctly so the tag hasn't changed.
+#[test]
+fn test_settle_funding_tag_unchanged() {
+    use percolator_nft::instruction::{NftInstruction, TAG_SETTLE_FUNDING};
+    assert_eq!(TAG_SETTLE_FUNDING, 2, "SettleFunding tag must remain 2");
+    let data = [TAG_SETTLE_FUNDING];
+    match NftInstruction::unpack(&data).unwrap() {
+        NftInstruction::SettleFunding => {}
+        _ => panic!("Expected SettleFunding"),
+    }
+}

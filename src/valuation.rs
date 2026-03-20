@@ -72,9 +72,6 @@ const ENGINE_MARK_PRICE_OFF: usize = 0; // u64
 const ENGINE_ORACLE_PRICE_OFF: usize = 8; // u64
 const ENGINE_MAINT_MARGIN_OFF: usize = 96; // u128
 
-// Account layout offsets (from account start)
-const ACCT_COLLATERAL_OFF: usize = 32; // u64 at offset 32
-
 /// Process GetPositionValue instruction.
 ///
 /// Accounts:
@@ -123,11 +120,11 @@ pub fn process_get_position_value(_program_id: &Pubkey, accounts: &[AccountInfo]
         0
     };
 
-    // Read collateral from account slot.
-    // Account struct offset depends on layout — use position.size as proxy.
-    let collateral = position.size; // In practice, collateral is a separate field.
-                                    // For accurate collateral, we'd need the full account struct offset.
-                                    // Using position.size as a conservative estimate for now.
+    // Read collateral from position data.
+    // position.collateral is the actual deposited margin (slab acct_off + ACCT_COLLATERAL_OFF).
+    // Do NOT use position.size here — size is the notional trade value, which for a leveraged
+    // position is size = collateral × leverage.  Using size inflates equity by the leverage factor.
+    let collateral = position.collateral;
 
     // Compute unrealized PnL.
     // PnL = size * (mark_price - entry_price) / entry_price [for longs]

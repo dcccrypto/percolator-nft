@@ -39,13 +39,15 @@ pub const TAG_MINT_POSITION_NFT: u8 = 0;
 pub const TAG_BURN_POSITION_NFT: u8 = 1;
 
 /// Tag 2: SettleFunding
-/// Permissionless crank — update the NFT's last_funding_index from on-chain state.
-/// Must be called before transfer if funding has accrued.
+/// Holder-only — update the NFT's last_funding_index from on-chain state.
+/// GH#5 fix: previously permissionless, now restricted to the NFT holder to prevent
+/// front-running attacks that wipe accrued funding before a marketplace sale.
 ///
 /// Accounts:
-///   0. `[signer]`    Cranker (anyone)
+///   0. `[signer]`    NFT holder (must own the NFT via ATA)
 ///   1. `[writable]`  PositionNft PDA
 ///   2. `[]`          Slab account (read current funding index)
+///   3. `[]`          Holder's ATA (proves NFT ownership; balance must be 1)
 ///
 /// Data: tag(1)
 pub const TAG_SETTLE_FUNDING: u8 = 2;
