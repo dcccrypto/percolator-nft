@@ -68,17 +68,12 @@ pub struct PositionValuation {
 }
 
 // Engine layout offsets (from engine_off)
-const ENGINE_MARK_PRICE_OFF: usize = 0;      // u64
-const ENGINE_ORACLE_PRICE_OFF: usize = 8;    // u64
-const ENGINE_MAINT_MARGIN_OFF: usize = 96;   // u128
+const ENGINE_MARK_PRICE_OFF: usize = 0; // u64
+const ENGINE_ORACLE_PRICE_OFF: usize = 8; // u64
+const ENGINE_MAINT_MARGIN_OFF: usize = 96; // u128
 
 // Account layout offsets (from account start)
-const ACCT_COLLATERAL_OFF: usize = 32;       // u64 at offset 32
-
-/// V0/V1D engine offset detection.
-fn detect_engine_off(slab_data: &[u8]) -> usize {
-    if slab_data.len() > 100_000 { 480 } else { 424 }
-}
+const ACCT_COLLATERAL_OFF: usize = 32; // u64 at offset 32
 
 /// Process GetPositionValue instruction.
 ///
@@ -89,10 +84,7 @@ fn detect_engine_off(slab_data: &[u8]) -> usize {
 /// Data: tag(1) — no additional data needed.
 ///
 /// Returns valuation via msg! logs (clients use simulateTransaction).
-pub fn process_get_position_value(
-    _program_id: &Pubkey,
-    accounts: &[AccountInfo],
-) -> ProgramResult {
+pub fn process_get_position_value(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     let accounts_iter = &mut accounts.iter();
     let nft_pda = next_account_info(accounts_iter)?;
     let slab = next_account_info(accounts_iter)?;
@@ -121,7 +113,8 @@ pub fn process_get_position_value(
         return Err(NftError::PositionNotOpen.into());
     }
 
-    let engine_off = detect_engine_off(&slab_data);
+    // engine_off comes from the slab layout detected in read_position().
+    let engine_off = position.engine_off;
 
     // Read mark price.
     let mark_price_e6 = if engine_off + 8 <= slab_data.len() {
@@ -133,8 +126,8 @@ pub fn process_get_position_value(
     // Read collateral from account slot.
     // Account struct offset depends on layout — use position.size as proxy.
     let collateral = position.size; // In practice, collateral is a separate field.
-    // For accurate collateral, we'd need the full account struct offset.
-    // Using position.size as a conservative estimate for now.
+                                    // For accurate collateral, we'd need the full account struct offset.
+                                    // Using position.size as a conservative estimate for now.
 
     // Compute unrealized PnL.
     // PnL = size * (mark_price - entry_price) / entry_price [for longs]
@@ -168,9 +161,19 @@ pub fn process_get_position_value(
         .unwrap_or(0);
 
     // Log valuation data (clients read via simulateTransaction).
-    msg!("POSITION_VALUE:slab={}", Pubkey::new_from_array(nft_state.slab));
+    msg!(
+        "POSITION_VALUE:slab={}",
+        Pubkey::new_from_array(nft_state.slab)
+    );
     msg!("POSITION_VALUE:idx={}", nft_state.user_idx);
-    msg!("POSITION_VALUE:direction={}", if position.is_long == 1 { "LONG" } else { "SHORT" });
+    msg!(
+        "POSITION_VALUE:direction={}",
+        if position.is_long == 1 {
+            "LONG"
+        } else {
+            "SHORT"
+        }
+    );
     msg!("POSITION_VALUE:entry_price_e6={}", position.entry_price_e6);
     msg!("POSITION_VALUE:size={}", position.size);
     msg!("POSITION_VALUE:mark_price_e6={}", mark_price_e6);

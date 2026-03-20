@@ -18,18 +18,14 @@ use crate::{
     error::NftError,
     instruction::NftInstruction,
     state::{
-        mint_authority_pda, position_nft_pda, PositionNft, MINT_AUTHORITY_SEED,
-        POSITION_NFT_LEN, POSITION_NFT_MAGIC, POSITION_NFT_SEED, POSITION_NFT_VERSION,
+        mint_authority_pda, position_nft_pda, PositionNft, MINT_AUTHORITY_SEED, POSITION_NFT_LEN,
+        POSITION_NFT_MAGIC, POSITION_NFT_SEED, POSITION_NFT_VERSION,
     },
     token2022,
 };
 
 /// Main instruction router.
-pub fn process(
-    program_id: &Pubkey,
-    accounts: &[AccountInfo],
-    data: &[u8],
-) -> ProgramResult {
+pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     let ix = NftInstruction::unpack(data)?;
     match ix {
         NftInstruction::MintPositionNft { user_idx } => {
@@ -65,14 +61,14 @@ fn process_mint_position_nft(
 ) -> ProgramResult {
     let accounts_iter = &mut accounts.iter();
 
-    let owner = next_account_info(accounts_iter)?;          // 0: signer, position owner
-    let nft_pda = next_account_info(accounts_iter)?;        // 1: PositionNft PDA (writable)
-    let nft_mint = next_account_info(accounts_iter)?;       // 2: NFT mint (writable, Token-2022)
-    let owner_ata = next_account_info(accounts_iter)?;      // 3: Owner's ATA (writable)
-    let slab = next_account_info(accounts_iter)?;           // 4: Slab account (read-only)
-    let mint_auth = next_account_info(accounts_iter)?;      // 5: Mint authority PDA
-    let token_program = next_account_info(accounts_iter)?;  // 6: Token-2022 program
-    let ata_program = next_account_info(accounts_iter)?;    // 7: ATA program
+    let owner = next_account_info(accounts_iter)?; // 0: signer, position owner
+    let nft_pda = next_account_info(accounts_iter)?; // 1: PositionNft PDA (writable)
+    let nft_mint = next_account_info(accounts_iter)?; // 2: NFT mint (writable, Token-2022)
+    let owner_ata = next_account_info(accounts_iter)?; // 3: Owner's ATA (writable)
+    let slab = next_account_info(accounts_iter)?; // 4: Slab account (read-only)
+    let mint_auth = next_account_info(accounts_iter)?; // 5: Mint authority PDA
+    let token_program = next_account_info(accounts_iter)?; // 6: Token-2022 program
+    let ata_program = next_account_info(accounts_iter)?; // 7: ATA program
     let system_program = next_account_info(accounts_iter)?; // 8: System program
 
     // ── Verify signer ──
@@ -90,7 +86,11 @@ fn process_mint_position_nft(
 
     // ── Verify caller owns this position ──
     if position.owner != *owner.key {
-        msg!("Position owner mismatch: expected {}, got {}", position.owner, owner.key);
+        msg!(
+            "Position owner mismatch: expected {}, got {}",
+            position.owner,
+            owner.key
+        );
         return Err(ProgramError::InvalidAccountData);
     }
 
@@ -156,14 +156,24 @@ fn process_mint_position_nft(
     drop(pda_data);
 
     // ── Build metadata strings ──
-    let direction = if position.is_long == 1 { "LONG" } else { "SHORT" };
+    let direction = if position.is_long == 1 {
+        "LONG"
+    } else {
+        "SHORT"
+    };
     let price_whole = position.entry_price_e6 / 1_000_000;
     let price_frac = (position.entry_price_e6 % 1_000_000) / 100; // 4 decimal places
 
     // Name: "PERP LONG SOL @148.5000" (slab address if no symbol available)
     let slab_short = &slab.key.to_string()[..8];
     let nft_name = if price_whole > 0 {
-        alloc::format!("PERP {} {} @{}.{:04}", direction, slab_short, price_whole, price_frac)
+        alloc::format!(
+            "PERP {} {} @{}.{:04}",
+            direction,
+            slab_short,
+            price_whole,
+            price_frac
+        )
     } else {
         alloc::format!("PERP {} {}", direction, slab_short)
     };
@@ -174,7 +184,8 @@ fn process_mint_position_nft(
 
     // ── Create Token-2022 mint account (with metadata + transfer hook extensions) ──
     let mint_space = MINT_BASE_SIZE
-        + METADATA_EXTENSION_HEADER + METADATA_MAX_LEN
+        + METADATA_EXTENSION_HEADER
+        + METADATA_MAX_LEN
         + token2022::TRANSFER_HOOK_EXTENSION_SIZE;
     let mint_rent = rent.minimum_balance(mint_space as usize);
     invoke(
@@ -206,8 +217,8 @@ fn process_mint_position_nft(
     invoke_signed(
         &token2022::initialize_token_metadata(
             nft_mint.key,
-            mint_auth.key,  // update authority = mint authority PDA
-            mint_auth.key,  // mint authority signs
+            mint_auth.key, // update authority = mint authority PDA
+            mint_auth.key, // mint authority signs
             &nft_name,
             &nft_symbol,
             nft_uri,
@@ -237,7 +248,12 @@ fn process_mint_position_nft(
         &[mint_auth_seeds],
     )?;
 
-    msg!("PositionNft minted: slab={}, idx={}, mint={}", slab.key, user_idx, nft_mint.key);
+    msg!(
+        "PositionNft minted: slab={}, idx={}, mint={}",
+        slab.key,
+        user_idx,
+        nft_mint.key
+    );
     Ok(())
 }
 
@@ -245,18 +261,15 @@ fn process_mint_position_nft(
 // Tag 1: BurnPositionNft
 // ═══════════════════════════════════════════════════════════════
 
-fn process_burn_position_nft(
-    _program_id: &Pubkey,
-    accounts: &[AccountInfo],
-) -> ProgramResult {
+fn process_burn_position_nft(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     let accounts_iter = &mut accounts.iter();
 
-    let holder = next_account_info(accounts_iter)?;         // 0: signer (NFT holder)
-    let nft_pda = next_account_info(accounts_iter)?;        // 1: PositionNft PDA (writable)
-    let nft_mint = next_account_info(accounts_iter)?;       // 2: NFT mint (writable)
-    let holder_ata = next_account_info(accounts_iter)?;     // 3: Holder's ATA (writable)
-    let slab = next_account_info(accounts_iter)?;           // 4: Slab (verify)
-    let _mint_auth = next_account_info(accounts_iter)?;     // 5: Mint authority PDA
+    let holder = next_account_info(accounts_iter)?; // 0: signer (NFT holder)
+    let nft_pda = next_account_info(accounts_iter)?; // 1: PositionNft PDA (writable)
+    let nft_mint = next_account_info(accounts_iter)?; // 2: NFT mint (writable)
+    let holder_ata = next_account_info(accounts_iter)?; // 3: Holder's ATA (writable)
+    let slab = next_account_info(accounts_iter)?; // 4: Slab (verify)
+    let _mint_auth = next_account_info(accounts_iter)?; // 5: Mint authority PDA
     let _token_program = next_account_info(accounts_iter)?; // 6: Token-2022
 
     if !holder.is_signer {
@@ -274,6 +287,13 @@ fn process_burn_position_nft(
     }
     if nft_state.slab != slab.key.to_bytes() {
         return Err(ProgramError::InvalidAccountData);
+    }
+    // GH#3: Verify the nft_mint account matches the mint recorded in the PDA.
+    // Without this check a caller could supply a different mint (with a balance of 1)
+    // to pass the ATA balance check and burn/close the wrong NFT PDA.
+    if nft_state.nft_mint != nft_mint.key.to_bytes() {
+        msg!("Burn rejected: nft_mint does not match PDA's recorded mint");
+        return Err(NftError::InvalidNftPda.into());
     }
     let user_idx = nft_state.user_idx;
     drop(pda_data);
@@ -316,15 +336,12 @@ fn process_burn_position_nft(
 // Tag 2: SettleFunding
 // ═══════════════════════════════════════════════════════════════
 
-fn process_settle_funding(
-    _program_id: &Pubkey,
-    accounts: &[AccountInfo],
-) -> ProgramResult {
+fn process_settle_funding(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     let accounts_iter = &mut accounts.iter();
 
-    let _cranker = next_account_info(accounts_iter)?;  // 0: signer (anyone)
-    let nft_pda = next_account_info(accounts_iter)?;   // 1: PositionNft PDA (writable)
-    let slab = next_account_info(accounts_iter)?;      // 2: Slab (read funding index)
+    let _cranker = next_account_info(accounts_iter)?; // 0: signer (anyone)
+    let nft_pda = next_account_info(accounts_iter)?; // 1: PositionNft PDA (writable)
+    let slab = next_account_info(accounts_iter)?; // 2: Slab (read funding index)
 
     verify_slab_owner(slab)?;
 
@@ -343,6 +360,10 @@ fn process_settle_funding(
 
     nft_state.last_funding_index_e18 = position.global_funding_index_e18;
 
-    msg!("Funding settled: slab={}, idx={}", slab.key, nft_state.user_idx);
+    msg!(
+        "Funding settled: slab={}, idx={}",
+        slab.key,
+        nft_state.user_idx
+    );
     Ok(())
 }

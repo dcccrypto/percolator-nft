@@ -2,7 +2,10 @@ use percolator_nft::state::*;
 
 #[test]
 fn test_position_nft_struct_size() {
-    assert_eq!(POSITION_NFT_LEN, 208, "PositionNft struct must be exactly 208 bytes");
+    assert_eq!(
+        POSITION_NFT_LEN, 208,
+        "PositionNft struct must be exactly 208 bytes"
+    );
 }
 
 #[test]
@@ -120,7 +123,9 @@ fn test_metadata_init_instruction_structure() {
     let auth = solana_sdk::pubkey::Pubkey::new_unique();
 
     let ix = token2022::initialize_token_metadata(
-        &mint, &auth, &auth,
+        &mint,
+        &auth,
+        &auth,
         "PERP LONG GGU89iQL @148.5000",
         "PERP-LONG",
         "",
@@ -140,9 +145,7 @@ fn test_metadata_empty_uri() {
     let mint = solana_sdk::pubkey::Pubkey::new_unique();
     let auth = solana_sdk::pubkey::Pubkey::new_unique();
 
-    let ix = token2022::initialize_token_metadata(
-        &mint, &auth, &auth, "Test", "TST", "",
-    );
+    let ix = token2022::initialize_token_metadata(&mint, &auth, &auth, "Test", "TST", "");
 
     // Data should contain: discriminator(8) + name borsh + symbol borsh + uri borsh("")
     // uri borsh("") = 4 bytes (len=0) + 0 bytes = 4 bytes

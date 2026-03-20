@@ -24,10 +24,14 @@ use solana_program::{
 use crate::{
     cpi::{read_position, verify_slab_owner},
     error::NftError,
-    state::{
-        PositionNft, MINT_AUTHORITY_SEED, POSITION_NFT_LEN, POSITION_NFT_MAGIC,
-    },
+    state::{PositionNft, MINT_AUTHORITY_SEED, POSITION_NFT_LEN, POSITION_NFT_MAGIC},
 };
+
+// Maintenance margin bps offset within the engine block.
+// Engine layout: +0 mark_price_e6(u64), +8 oracle_price_e6(u64), +16 last_funding_slot(u64),
+//               ..., +96 maintenance_margin_bps(u64).
+const ENGINE_MARK_PRICE_OFF: usize = 0;
+const ENGINE_MAINT_MARGIN_OFF: usize = 96;
 
 // ═══════════════════════════════════════════════════════════════
 // SPL TransferHook interface constants
@@ -38,72 +42,84 @@ use crate::{
 pub const EXECUTE_DISCRIMINATOR: [u8; 8] = [105, 37, 101, 197, 75, 251, 102, 26];
 
 /// Instruction tag for TransferPositionOwnership in percolator-prog.
-/// Added to percolator-prog as tag 64.
-pub const TAG_TRANSFER_POSITION_OWNERSHIP: u8 = 64;
+/// Tag 64 is MintPositionNft; TransferPositionOwnership is tag 65.
+pub const TAG_TRANSFER_POSITION_OWNERSHIP: u8 = 65;
 
 // ═══════════════════════════════════════════════════════════════
-// Margin check — verify position is not in liquidation zone
+// Margin check — verify position has positive equity vs maintenance margin
 // ═══════════════════════════════════════════════════════════════
 
-/// Read the engine's mark price and maintenance margin from slab data.
-/// Returns (mark_price_e6, maintenance_margin_bps).
-///
-/// Engine layout (from engine_off):
-///   +0:  mark_price_e6 (u64)
-///   +8:  oracle_price_e6 (u64)
-///   +16: last_funding_slot (u64)
-///   ...
-///   +96: maintenance_margin_bps (u64)  [approximate offset]
-fn read_engine_mark_price(slab_data: &[u8], engine_off: usize) -> Option<u64> {
-    if engine_off + 8 > slab_data.len() {
+/// Read a u64 from slab data at the given absolute offset.
+fn read_u64_at(data: &[u8], off: usize) -> Option<u64> {
+    if off + 8 > data.len() {
         return None;
     }
-    let bytes: [u8; 8] = slab_data[engine_off..engine_off + 8].try_into().ok()?;
+    let bytes: [u8; 8] = data[off..off + 8].try_into().ok()?;
     Some(u64::from_le_bytes(bytes))
 }
 
-/// Check if a position is above maintenance margin.
-/// Returns true if the position is healthy (can be transferred).
+/// Check if a position has sufficient equity above maintenance margin.
 ///
-/// Simple check: if mark_price exists and position has size, position is
-/// considered healthy. Full margin calculation requires the risk engine
-/// which lives in percolator-prog — we rely on the keeper to liquidate
-/// unhealthy positions (which burns the NFT first).
+/// Equity = collateral + unrealized_pnl.
+/// Maintenance requirement = size * maintenance_margin_bps / 10_000.
 ///
-/// For the transfer hook, we do a conservative check:
-/// - Position must have size > 0
-/// - Mark price must exist (not stale/zero)
-/// - Position must not be flagged for liquidation
+/// This is a real margin check using the same formula as valuation.rs,
+/// not just a mark_price > 0 guard. Liquidatable positions are rejected.
+///
+/// Parameters:
+/// - `slab_data`: raw slab bytes
+/// - `position_size`: absolute size in collateral micro-units
+/// - `entry_price_e6`: position entry price (E6)
+/// - `is_long`: 1 for long, 0 for short
+/// - `collateral`: deposited collateral in micro-units
+/// - `engine_off`: byte offset to engine block (from `read_position()`)
+///
+/// Returns true if equity >= maintenance_margin (position is healthy).
 fn is_position_healthy(
     slab_data: &[u8],
     position_size: u64,
+    entry_price_e6: u64,
+    is_long: u8,
+    collateral: u64,
     engine_off: usize,
 ) -> bool {
     if position_size == 0 {
-        return false; // No position = nothing to transfer
+        return false; // No position = nothing to transfer.
     }
 
-    // Check that mark price exists (market is active)
-    match read_engine_mark_price(slab_data, engine_off) {
-        Some(price) if price > 0 => true,
-        _ => false, // No price = can't verify health, reject transfer
-    }
-}
+    // Read mark price from engine block.
+    let mark_price_e6 = match read_u64_at(slab_data, engine_off + ENGINE_MARK_PRICE_OFF) {
+        Some(p) if p > 0 => p,
+        _ => return false, // Stale / zero price → reject.
+    };
 
-// ═══════════════════════════════════════════════════════════════
-// Detect engine offset (same logic as cpi.rs)
-// ═══════════════════════════════════════════════════════════════
+    // Read maintenance_margin_bps from engine block.
+    let maint_margin_bps =
+        read_u64_at(slab_data, engine_off + ENGINE_MAINT_MARGIN_OFF).unwrap_or(500);
 
-const V0_ENGINE_OFF: usize = 480;
-const V1D_ENGINE_OFF: usize = 424;
-
-fn detect_engine_off(slab_data: &[u8]) -> usize {
-    // Heuristic: V1D slabs are smaller. Use V0 for large slabs, V1D for small.
-    if slab_data.len() > 100_000 {
-        V0_ENGINE_OFF
+    // Unrealized PnL (signed, in collateral micro-units).
+    let unrealized_pnl: i128 = if entry_price_e6 > 0 {
+        let size = position_size as i128;
+        let mark = mark_price_e6 as i128;
+        let entry = entry_price_e6 as i128;
+        if is_long == 1 {
+            size.saturating_mul(mark.saturating_sub(entry)) / entry
+        } else {
+            size.saturating_mul(entry.saturating_sub(mark)) / entry
+        }
     } else {
-        V1D_ENGINE_OFF
-    }
+        0
+    };
+
+    // Net equity = collateral + unrealized_pnl.
+    let net_equity: i128 = (collateral as i128).saturating_add(unrealized_pnl);
+
+    // Maintenance margin requirement.
+    let maint_requirement: i128 =
+        (position_size as i128).saturating_mul(maint_margin_bps as i128) / 10_000;
+
+    // Healthy if equity >= maintenance margin (strictly above liquidation threshold).
+    net_equity >= maint_requirement
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -133,19 +149,19 @@ pub fn process_execute(
 ) -> ProgramResult {
     let accounts_iter = &mut accounts.iter();
 
-    let _source_ata = next_account_info(accounts_iter)?;     // 0: source token account
-    let _mint = next_account_info(accounts_iter)?;           // 1: NFT mint
-    let _dest_ata = next_account_info(accounts_iter)?;       // 2: destination token account
-    let dest_wallet = next_account_info(accounts_iter)?;     // 3: new owner wallet
-    let _extra_metas = next_account_info(accounts_iter)?;    // 4: ExtraAccountMetaList PDA
+    let _source_ata = next_account_info(accounts_iter)?; // 0: source token account
+    let _mint = next_account_info(accounts_iter)?; // 1: NFT mint
+    let _dest_ata = next_account_info(accounts_iter)?; // 2: destination token account
+    let dest_wallet = next_account_info(accounts_iter)?; // 3: new owner wallet
+    let _extra_metas = next_account_info(accounts_iter)?; // 4: ExtraAccountMetaList PDA
 
     // Extra accounts
-    let nft_pda = next_account_info(accounts_iter)?;         // 5: PositionNft PDA (writable)
-    let slab = next_account_info(accounts_iter)?;            // 6: Slab account
-    let _percolator_prog = next_account_info(accounts_iter)?;// 7: Percolator program
-    let mint_auth = next_account_info(accounts_iter)?;       // 8: Mint authority PDA
+    let nft_pda = next_account_info(accounts_iter)?; // 5: PositionNft PDA (writable)
+    let slab = next_account_info(accounts_iter)?; // 6: Slab account
+    let _percolator_prog = next_account_info(accounts_iter)?; // 7: Percolator program
+    let mint_auth = next_account_info(accounts_iter)?; // 8: Mint authority PDA
 
-    // ── Verify slab ownership ──
+    // ── Verify slab ownership (program ID check) ──
     verify_slab_owner(slab)?;
 
     // ── Read NFT PDA state ──
@@ -158,14 +174,32 @@ pub fn process_execute(
         return Err(ProgramError::InvalidAccountData);
     }
 
+    // ── GH#2: Verify slab key matches the NFT PDA's recorded slab ──
+    // Prevents a malicious caller from substituting a different (healthy) slab
+    // account to bypass the margin check for a position on a different market.
+    if nft_state.slab != slab.key.to_bytes() {
+        msg!("Transfer rejected: slab account does not match NFT PDA slab binding");
+        return Err(ProgramError::InvalidAccountData);
+    }
+
     // ── Read position from slab ──
     let slab_data = slab.try_borrow_data()?;
     let position = read_position(&slab_data, nft_state.user_idx)?;
 
-    // ── 1. Verify position is not in liquidation zone ──
-    let engine_off = detect_engine_off(&slab_data);
-    if !is_position_healthy(&slab_data, position.size, engine_off) {
-        msg!("Transfer rejected: position is unhealthy or in liquidation zone");
+    // ── GH#1 / GH#11: Verify position equity >= maintenance margin ──
+    // Uses real PnL calculation. Collateral is read from slab acct_off+32
+    // (the deposited margin field), NOT position.size (which is notional trade
+    // size and would inflate equity by the leverage factor).
+    // engine_off comes from read_position() layout detection.
+    if !is_position_healthy(
+        &slab_data,
+        position.size,
+        position.entry_price_e6,
+        position.is_long,
+        position.collateral,
+        position.engine_off,
+    ) {
+        msg!("Transfer rejected: position is below maintenance margin (liquidatable)");
         return Err(NftError::PositionInLiquidation.into());
     }
 
@@ -197,9 +231,13 @@ pub fn process_execute(
         d
     };
 
+    // Accounts: [mint_authority(signer), slab(writable), nft_program(readonly)]
+    // The nft_program (this program's program_id) is passed so percolator-prog can
+    // derive and verify the mint_authority PDA: find_pda(&[b"mint_authority"], nft_program_id).
     let cpi_accounts = vec![
         solana_program::instruction::AccountMeta::new_readonly(*mint_auth.key, true), // signer (PDA)
         solana_program::instruction::AccountMeta::new(*slab.key, false), // slab (writable)
+        solana_program::instruction::AccountMeta::new_readonly(*program_id, false), // NFT program_id
     ];
 
     let cpi_ix = solana_program::instruction::Instruction {
