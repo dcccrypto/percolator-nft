@@ -94,7 +94,9 @@ impl NftInstruction {
             }
         }
 
-        let (&tag, rest) = data.split_first().ok_or(ProgramError::InvalidInstructionData)?;
+        let (&tag, rest) = data
+            .split_first()
+            .ok_or(ProgramError::InvalidInstructionData)?;
         match tag {
             TAG_MINT_POSITION_NFT => {
                 if rest.len() < 2 {

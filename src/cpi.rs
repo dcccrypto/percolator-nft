@@ -135,23 +135,23 @@ pub struct PositionData {
     pub is_long: u8,
     /// Current global funding index (E18) from engine.
     pub global_funding_index_e18: i128,
+    /// Byte offset to the engine block within slab data (layout-dependent).
+    /// Callers can use this to read further engine fields (e.g. mark_price).
+    pub engine_off: usize,
 }
 
 /// Account struct field offsets within each account slot.
 /// These must match percolator-prog Account struct layout.
-const ACCT_OWNER_OFF: usize = 0;       // Pubkey (32 bytes)
-const ACCT_SIZE_OFF: usize = 40;       // u64 at offset 40
+const ACCT_OWNER_OFF: usize = 0; // Pubkey (32 bytes)
+const ACCT_SIZE_OFF: usize = 40; // u64 at offset 40
 const ACCT_ENTRY_PRICE_OFF: usize = 48; // u64 at offset 48
-const ACCT_IS_LONG_OFF: usize = 56;    // u8 at offset 56
+const ACCT_IS_LONG_OFF: usize = 56; // u8 at offset 56
 
 /// Engine mark price offset from engine_off.
 const ENGINE_FUNDING_INDEX_OFF: usize = 64; // i128 at engine + 64
 
 /// Read position data for a given user_idx from slab account data.
-pub fn read_position(
-    slab_data: &[u8],
-    user_idx: u16,
-) -> Result<PositionData, ProgramError> {
+pub fn read_position(slab_data: &[u8], user_idx: u16) -> Result<PositionData, ProgramError> {
     let layout = detect_layout(slab_data)?;
 
     let idx = user_idx as usize;
@@ -198,5 +198,6 @@ pub fn read_position(
         entry_price_e6,
         is_long,
         global_funding_index_e18,
+        engine_off: layout.engine_off,
     })
 }

@@ -24,10 +24,7 @@ const IX_BURN: u8 = 8;
 
 /// Build InitializeMint2 instruction (Token-2022).
 /// decimals=0, mint_authority=authority, freeze_authority=None.
-pub fn initialize_mint2(
-    mint: &Pubkey,
-    authority: &Pubkey,
-) -> Instruction {
+pub fn initialize_mint2(mint: &Pubkey, authority: &Pubkey) -> Instruction {
     // Layout: tag(1) + decimals(1) + mint_authority(32) + freeze_option(1) [+ freeze_authority(32)]
     let mut data = Vec::with_capacity(35);
     data.push(IX_INITIALIZE_MINT2);
@@ -37,9 +34,7 @@ pub fn initialize_mint2(
 
     Instruction {
         program_id: TOKEN_2022_PROGRAM_ID,
-        accounts: vec![
-            AccountMeta::new(*mint, false),
-        ],
+        accounts: vec![AccountMeta::new(*mint, false)],
         data,
     }
 }
@@ -68,12 +63,7 @@ pub fn mint_to(
 }
 
 /// Build Burn instruction (Token-2022).
-pub fn burn(
-    account: &Pubkey,
-    mint: &Pubkey,
-    owner: &Pubkey,
-    amount: u64,
-) -> Instruction {
+pub fn burn(account: &Pubkey, mint: &Pubkey, owner: &Pubkey, amount: u64) -> Instruction {
     let mut data = Vec::with_capacity(9);
     data.push(IX_BURN);
     data.extend_from_slice(&amount.to_le_bytes());
@@ -90,10 +80,7 @@ pub fn burn(
 }
 
 /// Derive the associated token account address for Token-2022.
-pub fn get_associated_token_address(
-    wallet: &Pubkey,
-    mint: &Pubkey,
-) -> Pubkey {
+pub fn get_associated_token_address(wallet: &Pubkey, mint: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(
         &[
             wallet.as_ref(),

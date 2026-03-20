@@ -7,8 +7,8 @@
 
 #[cfg(kani)]
 mod kani_proofs {
-    use percolator_nft::state::*;
     use percolator_nft::instruction::NftInstruction;
+    use percolator_nft::state::*;
 
     // ═══════════════════════════════════════════════════════════
     // State struct invariants
@@ -70,7 +70,10 @@ mod kani_proofs {
         // We verify the seeds are distinct, which is sufficient.
         let seeds_a = [POSITION_NFT_SEED, slab_bytes.as_ref(), &idx_a.to_le_bytes()];
         let seeds_b = [POSITION_NFT_SEED, slab_bytes.as_ref(), &idx_b.to_le_bytes()];
-        assert_ne!(seeds_a[2], seeds_b[2], "Different indices must produce different seed bytes");
+        assert_ne!(
+            seeds_a[2], seeds_b[2],
+            "Different indices must produce different seed bytes"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -139,10 +142,7 @@ mod kani_proofs {
         // 0x5045524343E46_5400
         // Let's just verify it's nonzero and unique.
         assert_ne!(POSITION_NFT_MAGIC, 0, "Magic must be nonzero");
-        assert_ne!(
-            POSITION_NFT_MAGIC, u64::MAX,
-            "Magic must not be all-ones"
-        );
+        assert_ne!(POSITION_NFT_MAGIC, u64::MAX, "Magic must not be all-ones");
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -218,7 +218,11 @@ mod kani_proofs {
         let auth = solana_program::pubkey::Pubkey::new_from_array(auth_bytes);
 
         let ix = token2022::mint_to(&mint, &dest, &auth, amount);
-        assert_eq!(ix.data.len(), 9, "MintTo data must be tag(1) + amount(8) = 9 bytes");
+        assert_eq!(
+            ix.data.len(),
+            9,
+            "MintTo data must be tag(1) + amount(8) = 9 bytes"
+        );
         assert_eq!(ix.data[0], 7, "MintTo tag must be 7");
     }
 
@@ -236,7 +240,11 @@ mod kani_proofs {
         let owner = solana_program::pubkey::Pubkey::new_from_array(owner_bytes);
 
         let ix = token2022::burn(&acct, &mint, &owner, amount);
-        assert_eq!(ix.data.len(), 9, "Burn data must be tag(1) + amount(8) = 9 bytes");
+        assert_eq!(
+            ix.data.len(),
+            9,
+            "Burn data must be tag(1) + amount(8) = 9 bytes"
+        );
         assert_eq!(ix.data[0], 8, "Burn tag must be 8");
     }
 
@@ -249,9 +257,7 @@ mod kani_proofs {
         let mint = solana_program::pubkey::Pubkey::new_from_array(mint_bytes);
         let auth = solana_program::pubkey::Pubkey::new_from_array(auth_bytes);
 
-        let ix = token2022::initialize_token_metadata(
-            &mint, &auth, &auth, "TEST", "T", "",
-        );
+        let ix = token2022::initialize_token_metadata(&mint, &auth, &auth, "TEST", "T", "");
 
         // Discriminator must be first 8 bytes.
         assert_eq!(ix.data[0], 210);
