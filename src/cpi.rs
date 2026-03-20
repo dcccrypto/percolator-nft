@@ -125,16 +125,17 @@ fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
 
 /// Position data read from a slab account.
 pub struct PositionData {
-    /// Owner pubkey of this account slot.
+    /// Owner pubkey of this account slot (at slab acct_off+184).
     pub owner: Pubkey,
-    /// Deposited margin (collateral) in micro-units — the actual margin at risk.
-    /// This is at slab acct_off+32, distinct from `size` (notional trade size).
+    /// Deposited margin (capital) in micro-units — lo-word of capital: U128 at acct_off+8.
+    /// This is the actual collateral at risk, NOT the notional trade size.
     pub collateral: u64,
-    /// Notional trade size in micro-units (NOT the deposited margin).
+    /// Notional trade size — absolute value of position_size: I128 lo-word at acct_off+80.
     pub size: u64,
-    /// Entry price (E6 fixed-point).
+    /// Entry price (E6 fixed-point) at acct_off+96.
     pub entry_price_e6: u64,
-    /// 1 = long, 0 = short.
+    /// 1 = long (position_size ≥ 0), 0 = short (position_size < 0).
+    /// Derived from the sign of position_size.I128 hi-word at acct_off+88.
     pub is_long: u8,
     /// Current global funding index (E18) from engine.
     pub global_funding_index_e18: i128,
@@ -144,12 +145,27 @@ pub struct PositionData {
 }
 
 /// Account struct field offsets within each account slot.
-/// These must match percolator-prog Account struct layout.
-const ACCT_OWNER_OFF: usize = 0; // Pubkey (32 bytes)
-const ACCT_COLLATERAL_OFF: usize = 32; // u64 deposited margin (NOT notional size)
-const ACCT_SIZE_OFF: usize = 40; // u64 notional trade size
-const ACCT_ENTRY_PRICE_OFF: usize = 48; // u64 at offset 48
-const ACCT_IS_LONG_OFF: usize = 56; // u8 at offset 56
+/// These must match percolator-prog Account struct layout (repr(C), 240 bytes):
+///   account_id: u64          →  +0   (8 bytes)
+///   capital: U128            →  +8   (16 bytes) — deposited collateral
+///   kind: AccountKind        →  +24  (4 bytes, repr(C) enum)
+///   pnl: I128                →  +28  (16 bytes)
+///   reserved_pnl: u64        →  +48  (8 bytes)
+///   warmup_started_at_slot   →  +56  (8 bytes)
+///   warmup_slope_per_step    →  +64  (16 bytes)
+///   position_size: I128      →  +80  (16 bytes) — signed notional size
+///   entry_price: u64         →  +96  (8 bytes)
+///   funding_index: I128      →  +104 (16 bytes)
+///   matcher_program: [u8;32] →  +120 (32 bytes)
+///   matcher_context: [u8;32] →  +152 (32 bytes)
+///   owner: [u8;32]           →  +184 (32 bytes)
+///   fee_credits: I128        →  +216 (16 bytes)
+///   last_fee_slot: u64       →  +232 (8 bytes)
+const ACCT_OWNER_OFF: usize = 184; // owner pubkey (32 bytes)
+const ACCT_COLLATERAL_OFF: usize = 8; // capital: U128 lo-word — deposited margin
+const ACCT_POS_SIZE_LO_OFF: usize = 80; // position_size: I128 lo-word (absolute magnitude u64)
+const ACCT_POS_SIZE_HI_OFF: usize = 88; // position_size: I128 hi-word (negative hi-word → short)
+const ACCT_ENTRY_PRICE_OFF: usize = 96; // entry_price: u64
 
 /// Engine mark price offset from engine_off.
 const ENGINE_FUNDING_INDEX_OFF: usize = 64; // i128 at engine + 64
@@ -185,9 +201,11 @@ pub fn read_position(slab_data: &[u8], user_idx: u16) -> Result<PositionData, Pr
     );
 
     let collateral = read_u64(slab_data, acct_off + ACCT_COLLATERAL_OFF);
-    let size = read_u64(slab_data, acct_off + ACCT_SIZE_OFF);
+    // position_size is I128 = [lo: u64, hi: u64]. Absolute size = lo-word; sign = hi-word MSB.
+    let size = read_u64(slab_data, acct_off + ACCT_POS_SIZE_LO_OFF);
+    let pos_hi = read_u64(slab_data, acct_off + ACCT_POS_SIZE_HI_OFF);
+    let is_long: u8 = if (pos_hi as i64) < 0 { 0 } else { 1 };
     let entry_price_e6 = read_u64(slab_data, acct_off + ACCT_ENTRY_PRICE_OFF);
-    let is_long = slab_data[acct_off + ACCT_IS_LONG_OFF];
 
     // Read global funding index from engine.
     let funding_off = layout.engine_off + ENGINE_FUNDING_INDEX_OFF;

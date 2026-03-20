@@ -231,9 +231,13 @@ pub fn process_execute(
         d
     };
 
+    // Accounts: [mint_authority(signer), slab(writable), nft_program(readonly)]
+    // The nft_program (this program's program_id) is passed so percolator-prog can
+    // derive and verify the mint_authority PDA: find_pda(&[b"mint_authority"], nft_program_id).
     let cpi_accounts = vec![
         solana_program::instruction::AccountMeta::new_readonly(*mint_auth.key, true), // signer (PDA)
         solana_program::instruction::AccountMeta::new(*slab.key, false), // slab (writable)
+        solana_program::instruction::AccountMeta::new_readonly(*program_id, false), // NFT program_id
     ];
 
     let cpi_ix = solana_program::instruction::Instruction {
