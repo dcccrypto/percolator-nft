@@ -110,6 +110,17 @@ fn process_mint_position_nft(
         return Err(NftError::NftAlreadyMinted.into());
     }
 
+    // ── GH#7: Verify nft_mint is a fresh, uninitialized account ──
+    // nft_mint is a caller-supplied keypair (not a PDA). Without this check an
+    // attacker can front-run the mint call by pre-funding the address so that
+    // our create_account CPI fails, or supply a pre-initialized mint where
+    // they hold the update authority.
+    // A freshly-generated keypair has zero lamports and empty data — enforce that.
+    if nft_mint.lamports() != 0 || !nft_mint.data_is_empty() {
+        msg!("MintPositionNft: nft_mint account is not a fresh keypair (already funded or initialized)");
+        return Err(NftError::NftAlreadyMinted.into());
+    }
+
     // ── Verify mint authority PDA ──
     let (expected_mint_auth, mint_auth_bump) = mint_authority_pda(program_id);
     if *mint_auth.key != expected_mint_auth {
@@ -339,9 +350,25 @@ fn process_burn_position_nft(_program_id: &Pubkey, accounts: &[AccountInfo]) -> 
 fn process_settle_funding(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     let accounts_iter = &mut accounts.iter();
 
-    let _cranker = next_account_info(accounts_iter)?; // 0: signer (anyone)
+    // GH#5 fix: SettleFunding is now restricted to the current NFT holder.
+    // Previously this was permissionless, allowing any caller to snap the
+    // last_funding_index to the current global value immediately before a
+    // marketplace sale, wiping the seller's accrued funding claim.
+    //
+    // Accounts:
+    //   0. `[signer]`  NFT holder (must own the NFT)
+    //   1. `[writable]` PositionNft PDA
+    //   2. `[]`         Slab account (read funding index)
+    //   3. `[]`         Holder's ATA (proves NFT ownership)
+    let holder = next_account_info(accounts_iter)?; // 0: signer — must hold the NFT
     let nft_pda = next_account_info(accounts_iter)?; // 1: PositionNft PDA (writable)
     let slab = next_account_info(accounts_iter)?; // 2: Slab (read funding index)
+    let holder_ata = next_account_info(accounts_iter)?; // 3: Holder's ATA (verify balance)
+
+    // ── Require holder to sign ──
+    if !holder.is_signer {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
 
     verify_slab_owner(slab)?;
 
@@ -352,6 +379,30 @@ fn process_settle_funding(_program_id: &Pubkey, accounts: &[AccountInfo]) -> Pro
     let nft_state = bytemuck::from_bytes_mut::<PositionNft>(&mut pda_data[..POSITION_NFT_LEN]);
     if nft_state.magic != POSITION_NFT_MAGIC {
         return Err(ProgramError::InvalidAccountData);
+    }
+    if nft_state.slab != slab.key.to_bytes() {
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    // ── Verify holder owns the NFT (ATA balance = 1, owner = holder) ──
+    let ata_data = holder_ata.try_borrow_data()?;
+    if ata_data.len() < 72 {
+        return Err(NftError::NotNftHolder.into());
+    }
+    let ata_amount = u64::from_le_bytes(ata_data[64..72].try_into().unwrap());
+    let ata_owner = Pubkey::new_from_array(ata_data[32..64].try_into().unwrap());
+    // ATA[0..32] = mint address
+    let ata_mint = Pubkey::new_from_array(ata_data[0..32].try_into().unwrap());
+    drop(ata_data);
+
+    if ata_amount != 1 || ata_owner != *holder.key {
+        msg!("SettleFunding: caller does not hold the NFT");
+        return Err(NftError::NotNftHolder.into());
+    }
+    // Verify the ATA mint matches the NFT PDA's recorded mint.
+    if ata_mint.to_bytes() != nft_state.nft_mint {
+        msg!("SettleFunding: ATA mint does not match PDA nft_mint");
+        return Err(NftError::InvalidNftPda.into());
     }
 
     let slab_data = slab.try_borrow_data()?;
