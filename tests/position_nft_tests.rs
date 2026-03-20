@@ -151,6 +151,60 @@ fn test_metadata_empty_uri() {
 }
 
 #[test]
+fn test_transfer_hook_discriminator() {
+    assert_eq!(
+        percolator_nft::transfer_hook::EXECUTE_DISCRIMINATOR,
+        [105, 37, 101, 197, 75, 251, 102, 26]
+    );
+}
+
+#[test]
+fn test_transfer_hook_execute_decodes() {
+    use percolator_nft::instruction::NftInstruction;
+    // TransferHook Execute: discriminator(8) + amount(8)
+    let mut data = vec![105, 37, 101, 197, 75, 251, 102, 26]; // discriminator
+    data.extend_from_slice(&1u64.to_le_bytes()); // amount = 1
+    match NftInstruction::unpack(&data).unwrap() {
+        NftInstruction::ExecuteTransferHook { amount } => assert_eq!(amount, 1),
+        _ => panic!("Expected ExecuteTransferHook"),
+    }
+}
+
+#[test]
+fn test_get_position_value_decodes() {
+    use percolator_nft::instruction::NftInstruction;
+    let data = [3u8]; // tag = 3
+    match NftInstruction::unpack(&data).unwrap() {
+        NftInstruction::GetPositionValue => {}
+        _ => panic!("Expected GetPositionValue"),
+    }
+}
+
+#[test]
+fn test_extra_account_metas_pda() {
+    use percolator_nft::transfer_hook::extra_account_metas_pda;
+    let mint = solana_sdk::pubkey::Pubkey::new_unique();
+    let program_id = solana_sdk::pubkey::Pubkey::new_unique();
+    let (pda1, b1) = extra_account_metas_pda(&mint, &program_id);
+    let (pda2, b2) = extra_account_metas_pda(&mint, &program_id);
+    assert_eq!(pda1, pda2);
+    assert_eq!(b1, b2);
+}
+
+#[test]
+fn test_transfer_hook_extension_init() {
+    use percolator_nft::token2022;
+    let mint = solana_sdk::pubkey::Pubkey::new_unique();
+    let auth = solana_sdk::pubkey::Pubkey::new_unique();
+    let hook_prog = solana_sdk::pubkey::Pubkey::new_unique();
+
+    let ix = token2022::initialize_transfer_hook(&mint, &auth, &hook_prog);
+    assert_eq!(ix.data[0], 36); // InitializeTransferHook tag
+    assert_eq!(ix.data.len(), 65); // tag(1) + authority(32) + program_id(32)
+    assert_eq!(ix.accounts.len(), 1);
+}
+
+#[test]
 fn test_bytemuck_zeroed_is_valid() {
     let zeroed: PositionNft = bytemuck::Zeroable::zeroed();
     assert_eq!(zeroed.magic, 0);

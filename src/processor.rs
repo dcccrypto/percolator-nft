@@ -37,6 +37,12 @@ pub fn process(
         }
         NftInstruction::BurnPositionNft => process_burn_position_nft(program_id, accounts),
         NftInstruction::SettleFunding => process_settle_funding(program_id, accounts),
+        NftInstruction::GetPositionValue => {
+            crate::valuation::process_get_position_value(program_id, accounts)
+        }
+        NftInstruction::ExecuteTransferHook { amount } => {
+            crate::transfer_hook::process_execute(program_id, accounts, amount)
+        }
     }
 }
 
@@ -166,8 +172,10 @@ fn process_mint_position_nft(
     // URI: empty for now (no off-chain metadata server yet)
     let nft_uri = "";
 
-    // ── Create Token-2022 mint account (with metadata extension space) ──
-    let mint_space = MINT_BASE_SIZE + METADATA_EXTENSION_HEADER + METADATA_MAX_LEN;
+    // ── Create Token-2022 mint account (with metadata + transfer hook extensions) ──
+    let mint_space = MINT_BASE_SIZE
+        + METADATA_EXTENSION_HEADER + METADATA_MAX_LEN
+        + token2022::TRANSFER_HOOK_EXTENSION_SIZE;
     let mint_rent = rent.minimum_balance(mint_space as usize);
     invoke(
         &system_instruction::create_account(
@@ -178,6 +186,13 @@ fn process_mint_position_nft(
             &token2022::TOKEN_2022_PROGRAM_ID,
         ),
         &[owner.clone(), nft_mint.clone(), system_program.clone()],
+    )?;
+
+    // Initialize TransferHook extension BEFORE InitializeMint2.
+    // Our program is the transfer hook — Token-2022 will call us on every transfer.
+    invoke(
+        &token2022::initialize_transfer_hook(nft_mint.key, mint_auth.key, program_id),
+        &[nft_mint.clone()],
     )?;
 
     // InitializeMint2 (decimals=0, authority=mint_auth PDA, no freeze)

@@ -50,6 +50,24 @@ pub const TAG_BURN_POSITION_NFT: u8 = 1;
 /// Data: tag(1)
 pub const TAG_SETTLE_FUNDING: u8 = 2;
 
+/// Tag 3: GetPositionValue
+/// Read-only valuation for marketplaces and lending protocols.
+/// Returns position value data via transaction logs.
+///
+/// Accounts:
+///   0. `[]`  PositionNft PDA
+///   1. `[]`  Slab account
+///
+/// Data: tag(1)
+pub const TAG_GET_POSITION_VALUE: u8 = 3;
+
+/// Tag 4: ExecuteTransferHook (SPL TransferHook interface)
+/// Called automatically by Token-2022 on every NFT transfer.
+/// DO NOT call directly — Token-2022 invokes this via the TransferHook extension.
+///
+/// Data: discriminator(8) + amount(8) [SPL TransferHook format]
+pub const TAG_EXECUTE_TRANSFER_HOOK: u8 = 4;
+
 /// Decoded instruction for the Position NFT program.
 pub enum NftInstruction {
     /// Mint an NFT for a position.
@@ -58,11 +76,24 @@ pub enum NftInstruction {
     BurnPositionNft,
     /// Settle accrued funding on the NFT state.
     SettleFunding,
+    /// Read-only position valuation (logs output).
+    GetPositionValue,
+    /// TransferHook execute (called by Token-2022, not directly).
+    ExecuteTransferHook { amount: u64 },
 }
 
 impl NftInstruction {
     /// Decode instruction data.
     pub fn unpack(data: &[u8]) -> Result<Self, ProgramError> {
+        // Check for TransferHook Execute discriminator first (8 bytes).
+        if data.len() >= 16 {
+            let disc = &data[..8];
+            if disc == &crate::transfer_hook::EXECUTE_DISCRIMINATOR {
+                let amount = u64::from_le_bytes(data[8..16].try_into().unwrap());
+                return Ok(NftInstruction::ExecuteTransferHook { amount });
+            }
+        }
+
         let (&tag, rest) = data.split_first().ok_or(ProgramError::InvalidInstructionData)?;
         match tag {
             TAG_MINT_POSITION_NFT => {
@@ -74,6 +105,7 @@ impl NftInstruction {
             }
             TAG_BURN_POSITION_NFT => Ok(NftInstruction::BurnPositionNft),
             TAG_SETTLE_FUNDING => Ok(NftInstruction::SettleFunding),
+            TAG_GET_POSITION_VALUE => Ok(NftInstruction::GetPositionValue),
             _ => Err(ProgramError::InvalidInstructionData),
         }
     }

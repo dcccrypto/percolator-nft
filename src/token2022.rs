@@ -151,6 +151,35 @@ pub fn initialize_token_metadata(
     }
 }
 
+// ═══════════════════════════════════════════════════════════════
+// TransferHook Extension
+// ═══════════════════════════════════════════════════════════════
+
+/// Initialize TransferHook extension on a Token-2022 mint.
+/// Must be called BEFORE InitializeMint2.
+///
+/// Instruction tag 36 = InitializeTransferHook (Token-2022 extension).
+/// Data: tag(1) + authority(32) + program_id(32)
+pub fn initialize_transfer_hook(
+    mint: &Pubkey,
+    authority: &Pubkey,
+    hook_program_id: &Pubkey,
+) -> Instruction {
+    let mut data = Vec::with_capacity(65);
+    data.push(36); // InitializeTransferHook instruction tag
+    data.extend_from_slice(authority.as_ref());
+    data.extend_from_slice(hook_program_id.as_ref());
+
+    Instruction {
+        program_id: TOKEN_2022_PROGRAM_ID,
+        accounts: vec![AccountMeta::new(*mint, false)],
+        data,
+    }
+}
+
+/// Size of TransferHook extension data (authority + program_id).
+pub const TRANSFER_HOOK_EXTENSION_SIZE: u64 = 4 + 64; // type(2) + len(2) + authority(32) + program_id(32)
+
 /// Build CreateAssociatedTokenAccount instruction for Token-2022.
 pub fn create_associated_token_account(
     payer: &Pubkey,
