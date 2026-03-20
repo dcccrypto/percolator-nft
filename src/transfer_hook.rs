@@ -42,8 +42,8 @@ const ENGINE_MAINT_MARGIN_OFF: usize = 96;
 pub const EXECUTE_DISCRIMINATOR: [u8; 8] = [105, 37, 101, 197, 75, 251, 102, 26];
 
 /// Instruction tag for TransferPositionOwnership in percolator-prog.
-/// Added to percolator-prog as tag 64.
-pub const TAG_TRANSFER_POSITION_OWNERSHIP: u8 = 64;
+/// Tag 64 is MintPositionNft; TransferPositionOwnership is tag 65.
+pub const TAG_TRANSFER_POSITION_OWNERSHIP: u8 = 65;
 
 // ═══════════════════════════════════════════════════════════════
 // Margin check — verify position has positive equity vs maintenance margin
@@ -186,17 +186,17 @@ pub fn process_execute(
     let slab_data = slab.try_borrow_data()?;
     let position = read_position(&slab_data, nft_state.user_idx)?;
 
-    // ── GH#1: Verify position equity >= maintenance margin ──
-    // Uses real PnL calculation; collateral read from nft_state.position_size
-    // (snapshot) as a conservative lower bound until the full account struct
-    // collateral field is confirmed. engine_off comes from read_position() layout detection.
-    let collateral = nft_state.position_size; // conservative: collateral ≥ snapshot size
+    // ── GH#1 / GH#11: Verify position equity >= maintenance margin ──
+    // Uses real PnL calculation. Collateral is read from slab acct_off+32
+    // (the deposited margin field), NOT position.size (which is notional trade
+    // size and would inflate equity by the leverage factor).
+    // engine_off comes from read_position() layout detection.
     if !is_position_healthy(
         &slab_data,
         position.size,
         position.entry_price_e6,
         position.is_long,
-        collateral,
+        position.collateral,
         position.engine_off,
     ) {
         msg!("Transfer rejected: position is below maintenance margin (liquidatable)");

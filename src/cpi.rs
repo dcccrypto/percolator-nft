@@ -127,7 +127,10 @@ fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
 pub struct PositionData {
     /// Owner pubkey of this account slot.
     pub owner: Pubkey,
-    /// Position size in collateral micro-units (0 = no position).
+    /// Deposited margin (collateral) in micro-units — the actual margin at risk.
+    /// This is at slab acct_off+32, distinct from `size` (notional trade size).
+    pub collateral: u64,
+    /// Notional trade size in micro-units (NOT the deposited margin).
     pub size: u64,
     /// Entry price (E6 fixed-point).
     pub entry_price_e6: u64,
@@ -143,7 +146,8 @@ pub struct PositionData {
 /// Account struct field offsets within each account slot.
 /// These must match percolator-prog Account struct layout.
 const ACCT_OWNER_OFF: usize = 0; // Pubkey (32 bytes)
-const ACCT_SIZE_OFF: usize = 40; // u64 at offset 40
+const ACCT_COLLATERAL_OFF: usize = 32; // u64 deposited margin (NOT notional size)
+const ACCT_SIZE_OFF: usize = 40; // u64 notional trade size
 const ACCT_ENTRY_PRICE_OFF: usize = 48; // u64 at offset 48
 const ACCT_IS_LONG_OFF: usize = 56; // u8 at offset 56
 
@@ -180,6 +184,7 @@ pub fn read_position(slab_data: &[u8], user_idx: u16) -> Result<PositionData, Pr
             .unwrap(),
     );
 
+    let collateral = read_u64(slab_data, acct_off + ACCT_COLLATERAL_OFF);
     let size = read_u64(slab_data, acct_off + ACCT_SIZE_OFF);
     let entry_price_e6 = read_u64(slab_data, acct_off + ACCT_ENTRY_PRICE_OFF);
     let is_long = slab_data[acct_off + ACCT_IS_LONG_OFF];
@@ -194,6 +199,7 @@ pub fn read_position(slab_data: &[u8], user_idx: u16) -> Result<PositionData, Pr
 
     Ok(PositionData {
         owner,
+        collateral,
         size,
         entry_price_e6,
         is_long,
