@@ -275,7 +275,10 @@ fn test_settle_funding_tag_unchanged() {
 /// Build a minimal valid PositionNft PDA data blob.
 /// Sets magic, slab, nft_mint, and user_idx so the processor passes all
 /// pre-ATA checks and reaches the holder_ata.owner guard.
-fn make_pda_data(slab_key: &solana_sdk::pubkey::Pubkey, nft_mint_key: &solana_sdk::pubkey::Pubkey) -> Vec<u8> {
+fn make_pda_data(
+    slab_key: &solana_sdk::pubkey::Pubkey,
+    nft_mint_key: &solana_sdk::pubkey::Pubkey,
+) -> Vec<u8> {
     let mut buf = vec![0u8; POSITION_NFT_LEN];
     // magic (bytes 0..8)
     buf[..8].copy_from_slice(&POSITION_NFT_MAGIC.to_le_bytes());
@@ -291,17 +294,13 @@ fn make_pda_data(slab_key: &solana_sdk::pubkey::Pubkey, nft_mint_key: &solana_sd
 /// GH#18 primary: holder_ata owned by System Program → NotNftHolder.
 #[test]
 fn test_burn_not_nftholder_ata_wrong_owner_system_program() {
-    use percolator_nft::{
-        error::NftError,
-        processor::process,
-        token2022::TOKEN_2022_PROGRAM_ID,
-    };
-    use solana_program::{account_info::AccountInfo, pubkey::Pubkey, program_error::ProgramError};
+    use percolator_nft::{error::NftError, processor::process, token2022::TOKEN_2022_PROGRAM_ID};
+    use solana_program::{account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey};
     use solana_sdk::pubkey::Pubkey as SdkPubkey;
 
-    let program_id   = SdkPubkey::new_unique();
-    let holder_key   = SdkPubkey::new_unique();
-    let slab_key     = SdkPubkey::new_unique();
+    let program_id = SdkPubkey::new_unique();
+    let holder_key = SdkPubkey::new_unique();
+    let slab_key = SdkPubkey::new_unique();
     let nft_mint_key = SdkPubkey::new_unique();
     let mint_auth_key = SdkPubkey::new_unique();
 
@@ -310,46 +309,118 @@ fn test_burn_not_nftholder_ata_wrong_owner_system_program() {
 
     // ── account data ──
     let mut holder_lamports: u64 = 1_000_000;
-    let mut pda_lamports: u64    = 1_000_000;
-    let mut mint_lamports: u64   = 1_000_000;
-    let mut ata_lamports: u64    = 1_000_000;
-    let mut slab_lamports: u64   = 1_000_000;
-    let mut auth_lamports: u64   = 0;
-    let mut token_lamports: u64  = 0;
+    let mut pda_lamports: u64 = 1_000_000;
+    let mut mint_lamports: u64 = 1_000_000;
+    let mut ata_lamports: u64 = 1_000_000;
+    let mut slab_lamports: u64 = 1_000_000;
+    let mut auth_lamports: u64 = 0;
+    let mut token_lamports: u64 = 0;
 
-    let mut holder_data: Vec<u8>  = vec![];
-    let mut pda_data              = make_pda_data(&slab_key, &nft_mint_key);
-    let mut mint_data: Vec<u8>    = vec![0u8; 82];
-    let mut ata_data: Vec<u8>     = vec![0u8; 72];
-    let mut slab_data: Vec<u8>    = vec![];
-    let mut auth_data: Vec<u8>    = vec![];
-    let mut token_data: Vec<u8>   = vec![];
+    let mut holder_data: Vec<u8> = vec![];
+    let mut pda_data = make_pda_data(&slab_key, &nft_mint_key);
+    let mut mint_data: Vec<u8> = vec![0u8; 82];
+    let mut ata_data: Vec<u8> = vec![0u8; 72];
+    let mut slab_data: Vec<u8> = vec![];
+    let mut auth_data: Vec<u8> = vec![];
+    let mut token_data: Vec<u8> = vec![];
 
     // ATA owner is System Program (wrong — should be Token-2022)
     let system_program_id = solana_program::system_program::id();
-    let token_prog_id     = Pubkey::new_from_array(TOKEN_2022_PROGRAM_ID.to_bytes());
-    let prog_id_pk        = Pubkey::new_from_array(program_id.to_bytes());
-    let holder_pk         = Pubkey::new_from_array(holder_key.to_bytes());
-    let pda_pk            = Pubkey::new_from_array(pda_key.to_bytes());
-    let nft_mint_pk       = Pubkey::new_from_array(nft_mint_key.to_bytes());
-    let slab_pk           = Pubkey::new_from_array(slab_key.to_bytes());
-    let mint_auth_pk      = Pubkey::new_from_array(mint_auth_key.to_bytes());
+    let token_prog_id = Pubkey::new_from_array(TOKEN_2022_PROGRAM_ID.to_bytes());
+    let prog_id_pk = Pubkey::new_from_array(program_id.to_bytes());
+    let holder_pk = Pubkey::new_from_array(holder_key.to_bytes());
+    let pda_pk = Pubkey::new_from_array(pda_key.to_bytes());
+    let nft_mint_pk = Pubkey::new_from_array(nft_mint_key.to_bytes());
+    let slab_pk = Pubkey::new_from_array(slab_key.to_bytes());
+    let mint_auth_pk = Pubkey::new_from_array(mint_auth_key.to_bytes());
 
-    let holder_ai   = AccountInfo::new(&holder_pk,    true,  false, &mut holder_lamports,  &mut holder_data, &system_program_id, false, 0);
-    let pda_ai      = AccountInfo::new(&pda_pk,       false, true,  &mut pda_lamports,     &mut pda_data,    &prog_id_pk,         false, 0);
-    let nft_mint_ai = AccountInfo::new(&nft_mint_pk,  false, true,  &mut mint_lamports,    &mut mint_data,   &token_prog_id,      false, 0);
+    let holder_ai = AccountInfo::new(
+        &holder_pk,
+        true,
+        false,
+        &mut holder_lamports,
+        &mut holder_data,
+        &system_program_id,
+        false,
+        0,
+    );
+    let pda_ai = AccountInfo::new(
+        &pda_pk,
+        false,
+        true,
+        &mut pda_lamports,
+        &mut pda_data,
+        &prog_id_pk,
+        false,
+        0,
+    );
+    let nft_mint_ai = AccountInfo::new(
+        &nft_mint_pk,
+        false,
+        true,
+        &mut mint_lamports,
+        &mut mint_data,
+        &token_prog_id,
+        false,
+        0,
+    );
     // holder_ata: owner = system program (NOT Token-2022) — this is what triggers NotNftHolder
-    let ata_ai      = AccountInfo::new(&holder_pk,    false, true,  &mut ata_lamports,     &mut ata_data,    &system_program_id,  false, 0);
-    let slab_ai     = AccountInfo::new(&slab_pk,      false, false, &mut slab_lamports,    &mut slab_data,   &system_program_id,  false, 0);
-    let auth_ai     = AccountInfo::new(&mint_auth_pk, false, false, &mut auth_lamports,    &mut auth_data,   &system_program_id,  false, 0);
-    let token_ai    = AccountInfo::new(&token_prog_id,false, false, &mut token_lamports,   &mut token_data,  &system_program_id,  false, 0);
+    let ata_ai = AccountInfo::new(
+        &holder_pk,
+        false,
+        true,
+        &mut ata_lamports,
+        &mut ata_data,
+        &system_program_id,
+        false,
+        0,
+    );
+    let slab_ai = AccountInfo::new(
+        &slab_pk,
+        false,
+        false,
+        &mut slab_lamports,
+        &mut slab_data,
+        &system_program_id,
+        false,
+        0,
+    );
+    let auth_ai = AccountInfo::new(
+        &mint_auth_pk,
+        false,
+        false,
+        &mut auth_lamports,
+        &mut auth_data,
+        &system_program_id,
+        false,
+        0,
+    );
+    let token_ai = AccountInfo::new(
+        &token_prog_id,
+        false,
+        false,
+        &mut token_lamports,
+        &mut token_data,
+        &system_program_id,
+        false,
+        0,
+    );
 
-    let accounts = [holder_ai, pda_ai, nft_mint_ai, ata_ai, slab_ai, auth_ai, token_ai];
+    let accounts = [
+        holder_ai,
+        pda_ai,
+        nft_mint_ai,
+        ata_ai,
+        slab_ai,
+        auth_ai,
+        token_ai,
+    ];
 
     let result = process(&prog_id_pk, &accounts, &[1u8]); // tag=1 = BurnPositionNft
     let expected: ProgramError = NftError::NotNftHolder.into();
     assert_eq!(
-        result.unwrap_err(), expected,
+        result.unwrap_err(),
+        expected,
         "Expected NotNftHolder when holder_ata.owner is System Program"
     );
 }
@@ -357,63 +428,131 @@ fn test_burn_not_nftholder_ata_wrong_owner_system_program() {
 /// GH#18 variant: holder_ata owned by legacy SPL Token (not Token-2022) → NotNftHolder.
 #[test]
 fn test_burn_not_nftholder_ata_wrong_owner_legacy_token() {
-    use percolator_nft::{
-        error::NftError,
-        processor::process,
-        token2022::TOKEN_2022_PROGRAM_ID,
-    };
-    use solana_program::{account_info::AccountInfo, pubkey::Pubkey, program_error::ProgramError};
+    use percolator_nft::{error::NftError, processor::process, token2022::TOKEN_2022_PROGRAM_ID};
+    use solana_program::{account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey};
     use solana_sdk::pubkey::Pubkey as SdkPubkey;
 
-    let program_id   = SdkPubkey::new_unique();
-    let holder_key   = SdkPubkey::new_unique();
-    let slab_key     = SdkPubkey::new_unique();
+    let program_id = SdkPubkey::new_unique();
+    let holder_key = SdkPubkey::new_unique();
+    let slab_key = SdkPubkey::new_unique();
     let nft_mint_key = SdkPubkey::new_unique();
     let mint_auth_key = SdkPubkey::new_unique();
-    let pda_key      = SdkPubkey::new_unique();
+    let pda_key = SdkPubkey::new_unique();
 
     let mut holder_lamports: u64 = 1_000_000;
-    let mut pda_lamports: u64    = 1_000_000;
-    let mut mint_lamports: u64   = 1_000_000;
-    let mut ata_lamports: u64    = 1_000_000;
-    let mut slab_lamports: u64   = 1_000_000;
-    let mut auth_lamports: u64   = 0;
-    let mut token_lamports: u64  = 0;
+    let mut pda_lamports: u64 = 1_000_000;
+    let mut mint_lamports: u64 = 1_000_000;
+    let mut ata_lamports: u64 = 1_000_000;
+    let mut slab_lamports: u64 = 1_000_000;
+    let mut auth_lamports: u64 = 0;
+    let mut token_lamports: u64 = 0;
 
-    let mut holder_data: Vec<u8>  = vec![];
-    let mut pda_data              = make_pda_data(&slab_key, &nft_mint_key);
-    let mut mint_data: Vec<u8>    = vec![0u8; 82];
-    let mut ata_data: Vec<u8>     = vec![0u8; 72];
-    let mut slab_data: Vec<u8>    = vec![];
-    let mut auth_data: Vec<u8>    = vec![];
-    let mut token_data: Vec<u8>   = vec![];
+    let mut holder_data: Vec<u8> = vec![];
+    let mut pda_data = make_pda_data(&slab_key, &nft_mint_key);
+    let mut mint_data: Vec<u8> = vec![0u8; 82];
+    let mut ata_data: Vec<u8> = vec![0u8; 72];
+    let mut slab_data: Vec<u8> = vec![];
+    let mut auth_data: Vec<u8> = vec![];
+    let mut token_data: Vec<u8> = vec![];
 
     let system_program_id = solana_program::system_program::id();
-    let token_prog_id     = Pubkey::new_from_array(TOKEN_2022_PROGRAM_ID.to_bytes());
-    let prog_id_pk        = Pubkey::new_from_array(program_id.to_bytes());
-    let holder_pk         = Pubkey::new_from_array(holder_key.to_bytes());
-    let pda_pk            = Pubkey::new_from_array(pda_key.to_bytes());
-    let nft_mint_pk       = Pubkey::new_from_array(nft_mint_key.to_bytes());
-    let slab_pk           = Pubkey::new_from_array(slab_key.to_bytes());
-    let mint_auth_pk      = Pubkey::new_from_array(mint_auth_key.to_bytes());
+    let token_prog_id = Pubkey::new_from_array(TOKEN_2022_PROGRAM_ID.to_bytes());
+    let prog_id_pk = Pubkey::new_from_array(program_id.to_bytes());
+    let holder_pk = Pubkey::new_from_array(holder_key.to_bytes());
+    let pda_pk = Pubkey::new_from_array(pda_key.to_bytes());
+    let nft_mint_pk = Pubkey::new_from_array(nft_mint_key.to_bytes());
+    let slab_pk = Pubkey::new_from_array(slab_key.to_bytes());
+    let mint_auth_pk = Pubkey::new_from_array(mint_auth_key.to_bytes());
     // Legacy SPL Token program ID
-    let legacy_token_pk   = solana_program::pubkey!("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+    let legacy_token_pk = solana_program::pubkey!("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 
-    let holder_ai   = AccountInfo::new(&holder_pk,    true,  false, &mut holder_lamports,  &mut holder_data, &system_program_id, false, 0);
-    let pda_ai      = AccountInfo::new(&pda_pk,       false, true,  &mut pda_lamports,     &mut pda_data,    &prog_id_pk,         false, 0);
-    let nft_mint_ai = AccountInfo::new(&nft_mint_pk,  false, true,  &mut mint_lamports,    &mut mint_data,   &token_prog_id,      false, 0);
+    let holder_ai = AccountInfo::new(
+        &holder_pk,
+        true,
+        false,
+        &mut holder_lamports,
+        &mut holder_data,
+        &system_program_id,
+        false,
+        0,
+    );
+    let pda_ai = AccountInfo::new(
+        &pda_pk,
+        false,
+        true,
+        &mut pda_lamports,
+        &mut pda_data,
+        &prog_id_pk,
+        false,
+        0,
+    );
+    let nft_mint_ai = AccountInfo::new(
+        &nft_mint_pk,
+        false,
+        true,
+        &mut mint_lamports,
+        &mut mint_data,
+        &token_prog_id,
+        false,
+        0,
+    );
     // holder_ata owned by legacy Token program (still not Token-2022)
-    let ata_ai      = AccountInfo::new(&holder_pk,    false, true,  &mut ata_lamports,     &mut ata_data,    &legacy_token_pk,    false, 0);
-    let slab_ai     = AccountInfo::new(&slab_pk,      false, false, &mut slab_lamports,    &mut slab_data,   &system_program_id,  false, 0);
-    let auth_ai     = AccountInfo::new(&mint_auth_pk, false, false, &mut auth_lamports,    &mut auth_data,   &system_program_id,  false, 0);
-    let token_ai    = AccountInfo::new(&token_prog_id,false, false, &mut token_lamports,   &mut token_data,  &system_program_id,  false, 0);
+    let ata_ai = AccountInfo::new(
+        &holder_pk,
+        false,
+        true,
+        &mut ata_lamports,
+        &mut ata_data,
+        &legacy_token_pk,
+        false,
+        0,
+    );
+    let slab_ai = AccountInfo::new(
+        &slab_pk,
+        false,
+        false,
+        &mut slab_lamports,
+        &mut slab_data,
+        &system_program_id,
+        false,
+        0,
+    );
+    let auth_ai = AccountInfo::new(
+        &mint_auth_pk,
+        false,
+        false,
+        &mut auth_lamports,
+        &mut auth_data,
+        &system_program_id,
+        false,
+        0,
+    );
+    let token_ai = AccountInfo::new(
+        &token_prog_id,
+        false,
+        false,
+        &mut token_lamports,
+        &mut token_data,
+        &system_program_id,
+        false,
+        0,
+    );
 
-    let accounts = [holder_ai, pda_ai, nft_mint_ai, ata_ai, slab_ai, auth_ai, token_ai];
+    let accounts = [
+        holder_ai,
+        pda_ai,
+        nft_mint_ai,
+        ata_ai,
+        slab_ai,
+        auth_ai,
+        token_ai,
+    ];
 
     let result = process(&prog_id_pk, &accounts, &[1u8]);
     let expected: ProgramError = NftError::NotNftHolder.into();
     assert_eq!(
-        result.unwrap_err(), expected,
+        result.unwrap_err(),
+        expected,
         "Expected NotNftHolder when holder_ata.owner is legacy SPL Token"
     );
 }
@@ -422,49 +561,82 @@ fn test_burn_not_nftholder_ata_wrong_owner_legacy_token() {
 /// Verify SettleFunding returns NotNftHolder when holder_ata is not owned by Token-2022.
 #[test]
 fn test_settle_funding_not_nftholder_ata_wrong_owner() {
-    use percolator_nft::{
-        error::NftError,
-        processor::process,
-        token2022::TOKEN_2022_PROGRAM_ID,
-    };
-    use solana_program::{account_info::AccountInfo, pubkey::Pubkey, program_error::ProgramError};
+    use percolator_nft::{error::NftError, processor::process, token2022::TOKEN_2022_PROGRAM_ID};
+    use solana_program::{account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey};
     use solana_sdk::pubkey::Pubkey as SdkPubkey;
 
-    let program_id   = SdkPubkey::new_unique();
-    let holder_key   = SdkPubkey::new_unique();
-    let slab_key     = SdkPubkey::new_unique();
+    let program_id = SdkPubkey::new_unique();
+    let holder_key = SdkPubkey::new_unique();
+    let slab_key = SdkPubkey::new_unique();
     let nft_mint_key = SdkPubkey::new_unique();
-    let pda_key      = SdkPubkey::new_unique();
+    let pda_key = SdkPubkey::new_unique();
 
     let mut holder_lamports: u64 = 1_000_000;
-    let mut pda_lamports: u64    = 1_000_000;
-    let mut slab_lamports: u64   = 1_000_000;
-    let mut ata_lamports: u64    = 1_000_000;
+    let mut pda_lamports: u64 = 1_000_000;
+    let mut slab_lamports: u64 = 1_000_000;
+    let mut ata_lamports: u64 = 1_000_000;
 
-    let mut holder_data: Vec<u8>  = vec![];
-    let mut pda_data              = make_pda_data(&slab_key, &nft_mint_key);
-    let mut slab_data: Vec<u8>    = vec![];
-    let mut ata_data: Vec<u8>     = vec![0u8; 72];
+    let mut holder_data: Vec<u8> = vec![];
+    let mut pda_data = make_pda_data(&slab_key, &nft_mint_key);
+    let mut slab_data: Vec<u8> = vec![];
+    let mut ata_data: Vec<u8> = vec![0u8; 72];
 
     let system_program_id = solana_program::system_program::id();
-    let token_prog_id     = Pubkey::new_from_array(TOKEN_2022_PROGRAM_ID.to_bytes());
-    let prog_id_pk        = Pubkey::new_from_array(program_id.to_bytes());
-    let holder_pk         = Pubkey::new_from_array(holder_key.to_bytes());
-    let pda_pk            = Pubkey::new_from_array(pda_key.to_bytes());
-    let slab_pk           = Pubkey::new_from_array(slab_key.to_bytes());
+    let token_prog_id = Pubkey::new_from_array(TOKEN_2022_PROGRAM_ID.to_bytes());
+    let prog_id_pk = Pubkey::new_from_array(program_id.to_bytes());
+    let holder_pk = Pubkey::new_from_array(holder_key.to_bytes());
+    let pda_pk = Pubkey::new_from_array(pda_key.to_bytes());
+    let slab_pk = Pubkey::new_from_array(slab_key.to_bytes());
 
-    let holder_ai = AccountInfo::new(&holder_pk,   true,  false, &mut holder_lamports, &mut holder_data, &system_program_id, false, 0);
-    let pda_ai    = AccountInfo::new(&pda_pk,      false, true,  &mut pda_lamports,    &mut pda_data,    &prog_id_pk,         false, 0);
-    let slab_ai   = AccountInfo::new(&slab_pk,     false, false, &mut slab_lamports,   &mut slab_data,   &system_program_id,  false, 0);
+    let holder_ai = AccountInfo::new(
+        &holder_pk,
+        true,
+        false,
+        &mut holder_lamports,
+        &mut holder_data,
+        &system_program_id,
+        false,
+        0,
+    );
+    let pda_ai = AccountInfo::new(
+        &pda_pk,
+        false,
+        true,
+        &mut pda_lamports,
+        &mut pda_data,
+        &prog_id_pk,
+        false,
+        0,
+    );
+    let slab_ai = AccountInfo::new(
+        &slab_pk,
+        false,
+        false,
+        &mut slab_lamports,
+        &mut slab_data,
+        &system_program_id,
+        false,
+        0,
+    );
     // holder_ata owner = system program (not Token-2022)
-    let ata_ai    = AccountInfo::new(&holder_pk,   false, false, &mut ata_lamports,    &mut ata_data,    &system_program_id,  false, 0);
+    let ata_ai = AccountInfo::new(
+        &holder_pk,
+        false,
+        false,
+        &mut ata_lamports,
+        &mut ata_data,
+        &system_program_id,
+        false,
+        0,
+    );
 
     let accounts = [holder_ai, pda_ai, slab_ai, ata_ai];
 
     let result = process(&prog_id_pk, &accounts, &[2u8]); // tag=2 = SettleFunding
     let expected: ProgramError = NftError::NotNftHolder.into();
     assert_eq!(
-        result.unwrap_err(), expected,
+        result.unwrap_err(),
+        expected,
         "Expected NotNftHolder when holder_ata.owner is wrong in SettleFunding"
     );
 }
