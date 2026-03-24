@@ -319,13 +319,23 @@ fn process_burn_position_nft(_program_id: &Pubkey, accounts: &[AccountInfo]) -> 
         return Err(NftError::NotNftHolder.into());
     }
     let ata_data = holder_ata.try_borrow_data()?;
-    if ata_data.len() < 72 {
+    // Token-2022 account layout (165 bytes, same offsets as SPL Token):
+    //   [32..64]  owner (Pubkey)
+    //   [64..72]  amount (u64 LE)
+    //   [108]     state (u8: 0=uninit, 1=initialized, 2=frozen)
+    if ata_data.len() < 165 {
         return Err(NftError::NotNftHolder.into());
     }
     let amount = u64::from_le_bytes(ata_data[64..72].try_into().unwrap());
     let ata_owner = Pubkey::new_from_array(ata_data[32..64].try_into().unwrap());
+    // Verify account is initialized using pinocchio-token AccountState discriminants.
+    // Use explicit match instead of From<u8> to avoid panic on invalid values.
+    let ata_initialized = ata_data[108] == pinocchio_token::state::AccountState::Initialized as u8;
     drop(ata_data);
 
+    if !ata_initialized {
+        return Err(NftError::NotNftHolder.into());
+    }
     if amount != 1 || ata_owner != *holder.key {
         return Err(NftError::NotNftHolder.into());
     }
@@ -399,17 +409,27 @@ fn process_settle_funding(_program_id: &Pubkey, accounts: &[AccountInfo]) -> Pro
         return Err(ProgramError::InvalidAccountData);
     }
 
-    // ── Verify holder owns the NFT (ATA balance = 1, owner = holder) ──
+    // ── Verify holder owns the NFT (ATA balance = 1, owner = holder, state = initialized) ──
+    // Token-2022 account layout (165 bytes, same offsets as SPL Token):
+    //   [0..32]  mint (Pubkey)
+    //   [32..64] owner (Pubkey)
+    //   [64..72] amount (u64 LE)
+    //   [108]    state (u8: use pinocchio-token AccountState discriminants)
     let ata_data = holder_ata.try_borrow_data()?;
-    if ata_data.len() < 72 {
+    if ata_data.len() < 165 {
         return Err(NftError::NotNftHolder.into());
     }
     let ata_amount = u64::from_le_bytes(ata_data[64..72].try_into().unwrap());
     let ata_owner = Pubkey::new_from_array(ata_data[32..64].try_into().unwrap());
     // ATA[0..32] = mint address
     let ata_mint = Pubkey::new_from_array(ata_data[0..32].try_into().unwrap());
+    // Verify initialized via pinocchio-token AccountState constant.
+    let ata_initialized = ata_data[108] == pinocchio_token::state::AccountState::Initialized as u8;
     drop(ata_data);
 
+    if !ata_initialized {
+        return Err(NftError::NotNftHolder.into());
+    }
     if ata_amount != 1 || ata_owner != *holder.key {
         msg!("SettleFunding: caller does not hold the NFT");
         return Err(NftError::NotNftHolder.into());
