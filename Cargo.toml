@@ -11,9 +11,10 @@ kani = []
 
 [dependencies]
 solana-program = "=2.2.1"
+# pinocchio-token provides AccountState enum (SPL Token state discriminants, same layout).
+# We use it for token account state validation without pulling in the full spl-token crate.
+# Token-2022 instructions are built manually (no spl-token-2022 dep — avoids solana 2.1 conflict).
 pinocchio-token = "0.5.0"
-# We construct Token-2022 instructions manually (same pattern as percolator-stake)
-# to avoid version conflicts between spl-token-2022 (solana 2.1) and our solana 2.2.1.
 bytemuck = { version = "1.14", features = ["derive"] }
 
 [lints.rust]
