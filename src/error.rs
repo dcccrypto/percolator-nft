@@ -30,6 +30,8 @@ pub enum NftError {
     PositionInLiquidation = 11,
     /// Transfer hook: funding must be settled before transfer.
     FundingNotSettled = 12,
+    /// Transfer hook: account[7] is not a known Percolator program (GH#1687).
+    InvalidPercolatorProgram = 13,
 }
 
 impl From<NftError> for ProgramError {

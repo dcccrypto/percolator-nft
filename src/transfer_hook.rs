@@ -22,7 +22,7 @@ use solana_program::{
 };
 
 use crate::{
-    cpi::{read_position, verify_slab_owner},
+    cpi::{read_position, verify_slab_owner, PERCOLATOR_DEVNET, PERCOLATOR_MAINNET},
     error::NftError,
     state::{PositionNft, MINT_AUTHORITY_SEED, POSITION_NFT_LEN, POSITION_NFT_MAGIC},
 };
@@ -158,8 +158,20 @@ pub fn process_execute(
     // Extra accounts
     let nft_pda = next_account_info(accounts_iter)?; // 5: PositionNft PDA (writable)
     let slab = next_account_info(accounts_iter)?; // 6: Slab account
-    let _percolator_prog = next_account_info(accounts_iter)?; // 7: Percolator program
+    let percolator_prog = next_account_info(accounts_iter)?; // 7: Percolator program
     let mint_auth = next_account_info(accounts_iter)?; // 8: Mint authority PDA
+
+    // ── GH#1687: Validate percolator_prog key against known constants ──
+    // Prevents an attacker from supplying a malicious program as account[7].
+    // Without this check the CPI target is attacker-controlled, allowing them
+    // to complete the NFT transfer while leaving slab position ownership stale.
+    if percolator_prog.key != &PERCOLATOR_DEVNET && percolator_prog.key != &PERCOLATOR_MAINNET {
+        msg!(
+            "Transfer rejected: percolator_prog key {} is not a known Percolator program",
+            percolator_prog.key
+        );
+        return Err(NftError::InvalidPercolatorProgram.into());
+    }
 
     // ── Verify slab ownership (program ID check) ──
     verify_slab_owner(slab)?;
@@ -241,7 +253,7 @@ pub fn process_execute(
     ];
 
     let cpi_ix = solana_program::instruction::Instruction {
-        program_id: *_percolator_prog.key,
+        program_id: *percolator_prog.key,
         accounts: cpi_accounts,
         data: cpi_data,
     };

@@ -640,3 +640,47 @@ fn test_settle_funding_not_nftholder_ata_wrong_owner() {
         "Expected NotNftHolder when holder_ata.owner is wrong in SettleFunding"
     );
 }
+
+// ══════════════════════════════════════════════════════════════════════════════
+// GH#1687 — percolator_prog key validation in TransferHook Execute
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// Verify that InvalidPercolatorProgram error code is 13.
+/// This matches the NftError enum added for GH#1687.
+#[test]
+fn test_invalid_percolator_program_error_code() {
+    use percolator_nft::error::NftError;
+    use solana_sdk::program_error::ProgramError;
+
+    let err: ProgramError = NftError::InvalidPercolatorProgram.into();
+    assert_eq!(
+        err,
+        ProgramError::Custom(13),
+        "InvalidPercolatorProgram must be error code 13"
+    );
+}
+
+/// Confirm PERCOLATOR_DEVNET and PERCOLATOR_MAINNET are distinct known keys.
+/// transfer_hook.rs validates account[7] against these — if they were equal or
+/// zero, the guard would be worthless.
+#[test]
+fn test_percolator_prog_constants_are_distinct_and_nonzero() {
+    use percolator_nft::cpi::{PERCOLATOR_DEVNET, PERCOLATOR_MAINNET};
+    use solana_sdk::pubkey::Pubkey;
+
+    assert_ne!(
+        PERCOLATOR_DEVNET,
+        PERCOLATOR_MAINNET,
+        "Devnet and mainnet program IDs must differ"
+    );
+    assert_ne!(
+        PERCOLATOR_DEVNET,
+        Pubkey::default(),
+        "PERCOLATOR_DEVNET must not be zero key"
+    );
+    assert_ne!(
+        PERCOLATOR_MAINNET,
+        Pubkey::default(),
+        "PERCOLATOR_MAINNET must not be zero key"
+    );
+}
