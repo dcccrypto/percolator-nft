@@ -32,6 +32,8 @@ pub enum NftError {
     FundingNotSettled = 12,
     /// Transfer hook: account[7] is not a known Percolator program (GH#1687).
     InvalidPercolatorProgram = 13,
+    /// BurnPositionNft: position must be fully closed (size=0, collateral=0) before burn (GH#1869).
+    PositionNotClosed = 14,
 }
 
 impl From<NftError> for ProgramError {
