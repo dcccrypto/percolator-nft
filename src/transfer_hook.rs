@@ -41,9 +41,13 @@ const ENGINE_MAINT_MARGIN_OFF: usize = 96;
 /// SHA256("spl-transfer-hook-interface:execute")[:8]
 pub const EXECUTE_DISCRIMINATOR: [u8; 8] = [105, 37, 101, 197, 75, 251, 102, 26];
 
-/// Instruction tag for TransferPositionOwnership in percolator-prog.
-/// Tag 64 is MintPositionNft; TransferPositionOwnership is tag 65.
-pub const TAG_TRANSFER_POSITION_OWNERSHIP: u8 = 65;
+/// Instruction tag for the TransferOwnershipCpi handler in percolator-prog.
+/// Tag 65 is TransferPositionOwnership (user-facing, 8-account flow).
+/// Tag 69 is TransferOwnershipCpi (CPI-only, 3-account flow) — the correct hook target.
+///
+/// GH#1868 (PERC-8221): previous code sent tag 65, which expected 8 accounts and a user
+/// signer — causing AccountBorrowFailed / missing-signer panic on every NFT transfer.
+pub const TAG_TRANSFER_POSITION_OWNERSHIP: u8 = 69;
 
 // ═══════════════════════════════════════════════════════════════
 // Margin check — verify position has positive equity vs maintenance margin

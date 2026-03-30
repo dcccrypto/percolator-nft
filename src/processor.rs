@@ -309,6 +309,24 @@ fn process_burn_position_nft(_program_id: &Pubkey, accounts: &[AccountInfo]) -> 
     let user_idx = nft_state.user_idx;
     drop(pda_data);
 
+    // GH#1869 (PERC-8222): Verify position is fully closed before burning the NFT.
+    // Without this guard an open-position NFT can be burned, orphaning the position
+    // in the slab with no way to recover the collateral (unrecoverable funds).
+    // We read position data directly from the slab using the CPI helper.
+    verify_slab_owner(slab)?;
+    {
+        let slab_data = slab.try_borrow_data()?;
+        let position = read_position(&slab_data, user_idx)?;
+        if position.size != 0 || position.collateral != 0 {
+            msg!(
+                "Burn rejected: position is not fully closed (size={}, collateral={})",
+                position.size,
+                position.collateral,
+            );
+            return Err(NftError::PositionNotClosed.into());
+        }
+    }
+
     // ── Verify holder owns the NFT (check ATA balance) ──
     // GH#15 / GH#16: Verify holder_ata is owned by Token-2022 program before
     // reading raw bytes. Mirrors GH#14 fix applied to process_settle_funding().
