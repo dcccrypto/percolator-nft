@@ -185,6 +185,12 @@ pub fn read_position(slab_data: &[u8], user_idx: u16) -> Result<PositionData, Pr
         return Err(NftError::SlabDataTooShort.into());
     }
 
+    // Verify the allocation bit is set — defence-in-depth against freed/empty slots.
+    let bit_mask = 1u8 << (idx % 8);
+    if slab_data[bitmap_byte] & bit_mask == 0 {
+        return Err(NftError::UserIndexOutOfRange.into());
+    }
+
     let accounts_off = layout.bitmap_off + (layout.max_accounts + 7) / 8;
     let acct_off = accounts_off + idx * layout.account_size;
     let acct_end = acct_off + layout.account_size;
