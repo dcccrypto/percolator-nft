@@ -180,48 +180,65 @@ pub fn process_execute(
     // ── Verify slab ownership (program ID check) ──
     verify_slab_owner(slab)?;
 
-    // ── Read NFT PDA state ──
-    let mut pda_data = nft_pda.try_borrow_mut_data()?;
-    if pda_data.len() < POSITION_NFT_LEN {
-        return Err(ProgramError::InvalidAccountData);
-    }
-    let nft_state = bytemuck::from_bytes_mut::<PositionNft>(&mut pda_data[..POSITION_NFT_LEN]);
-    if nft_state.magic != POSITION_NFT_MAGIC {
-        return Err(ProgramError::InvalidAccountData);
-    }
+    // ── Read NFT PDA state and extract values ──
+    // PERC-9001 / PERC-9002: We must drop ALL account data borrows (both
+    // pda_data and slab_data) before the CPI invoke_signed call below.
+    // Solana runtime checks for outstanding RefCell borrows on every
+    // AccountInfo passed to a CPI. Holding a Ref/RefMut across invoke_signed
+    // causes AccountBorrowFailed, permanently breaking NFT transfers.
+    //
+    // Strategy: read everything we need into local variables, drop borrows,
+    // then perform the CPI and final PDA write in separate scopes.
+    let (pda_user_idx, pda_slab_bytes, old_funding, new_funding);
+    {
+        let pda_data = nft_pda.try_borrow_data()?;
+        if pda_data.len() < POSITION_NFT_LEN {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        let nft_state = bytemuck::from_bytes::<PositionNft>(&pda_data[..POSITION_NFT_LEN]);
+        if nft_state.magic != POSITION_NFT_MAGIC {
+            return Err(ProgramError::InvalidAccountData);
+        }
 
-    // ── GH#2: Verify slab key matches the NFT PDA's recorded slab ──
-    // Prevents a malicious caller from substituting a different (healthy) slab
-    // account to bypass the margin check for a position on a different market.
-    if nft_state.slab != slab.key.to_bytes() {
-        msg!("Transfer rejected: slab account does not match NFT PDA slab binding");
-        return Err(ProgramError::InvalidAccountData);
-    }
+        // ── GH#2: Verify slab key matches the NFT PDA's recorded slab ──
+        if nft_state.slab != slab.key.to_bytes() {
+            msg!("Transfer rejected: slab account does not match NFT PDA slab binding");
+            return Err(ProgramError::InvalidAccountData);
+        }
 
-    // ── Read position from slab ──
-    let slab_data = slab.try_borrow_data()?;
-    let position = read_position(&slab_data, nft_state.user_idx)?;
-
-    // ── GH#1 / GH#11: Verify position equity >= maintenance margin ──
-    // Uses real PnL calculation. Collateral is read from slab acct_off+32
-    // (the deposited margin field), NOT position.size (which is notional trade
-    // size and would inflate equity by the leverage factor).
-    // engine_off comes from read_position() layout detection.
-    if !is_position_healthy(
-        &slab_data,
-        position.size,
-        position.entry_price_e6,
-        position.is_long,
-        position.collateral,
-        position.engine_off,
-    ) {
-        msg!("Transfer rejected: position is below maintenance margin (liquidatable)");
-        return Err(NftError::PositionInLiquidation.into());
+        pda_user_idx = nft_state.user_idx;
+        pda_slab_bytes = nft_state.slab;
+        old_funding = nft_state.last_funding_index_e18;
+        // pda_data (immutable Ref) is dropped here at end of block
     }
 
-    // ── 2. Settle funding (update NFT state with current funding index) ──
-    let old_funding = nft_state.last_funding_index_e18;
-    let new_funding = position.global_funding_index_e18;
+    // ── Read position from slab (scoped borrow) ──
+    let position = {
+        let slab_data = slab.try_borrow_data()?;
+        let pos = read_position(&slab_data, pda_user_idx)?;
+
+        // ── GH#1 / GH#11: Verify position equity >= maintenance margin ──
+        // Uses real PnL calculation. Collateral is read from slab acct_off+32
+        // (the deposited margin field), NOT position.size (which is notional trade
+        // size and would inflate equity by the leverage factor).
+        if !is_position_healthy(
+            &slab_data,
+            pos.size,
+            pos.entry_price_e6,
+            pos.is_long,
+            pos.collateral,
+            pos.engine_off,
+        ) {
+            msg!("Transfer rejected: position is below maintenance margin (liquidatable)");
+            return Err(NftError::PositionInLiquidation.into());
+        }
+
+        pos
+        // slab_data (Ref) is dropped here at end of block
+    };
+
+    // ── 2. Settle funding — compute new index (write happens after CPI) ──
+    new_funding = position.global_funding_index_e18;
     if old_funding != new_funding {
         msg!(
             "Funding settled on transfer: {} → {}",
@@ -229,11 +246,9 @@ pub fn process_execute(
             new_funding
         );
     }
-    nft_state.last_funding_index_e18 = new_funding;
 
     // ── 3. Update position owner in slab via CPI ──
-    // This requires percolator-prog to have a TransferPositionOwnership
-    // instruction (tag 53) that:
+    // percolator-prog tag 69 (TransferOwnershipCpi):
     //   - Verifies caller is the NFT program's mint authority PDA
     //   - Changes account[user_idx].owner to the new wallet
     //
@@ -242,18 +257,16 @@ pub fn process_execute(
     let cpi_data = {
         let mut d = Vec::with_capacity(35);
         d.push(TAG_TRANSFER_POSITION_OWNERSHIP);
-        d.extend_from_slice(&nft_state.user_idx.to_le_bytes());
+        d.extend_from_slice(&pda_user_idx.to_le_bytes());
         d.extend_from_slice(dest_wallet.key.as_ref());
         d
     };
 
     // Accounts: [mint_authority(signer), slab(writable), nft_program(readonly)]
-    // The nft_program (this program's program_id) is passed so percolator-prog can
-    // derive and verify the mint_authority PDA: find_pda(&[b"mint_authority"], nft_program_id).
     let cpi_accounts = vec![
-        solana_program::instruction::AccountMeta::new_readonly(*mint_auth.key, true), // signer (PDA)
-        solana_program::instruction::AccountMeta::new(*slab.key, false), // slab (writable)
-        solana_program::instruction::AccountMeta::new_readonly(*program_id, false), // NFT program_id
+        solana_program::instruction::AccountMeta::new_readonly(*mint_auth.key, true),
+        solana_program::instruction::AccountMeta::new(*slab.key, false),
+        solana_program::instruction::AccountMeta::new_readonly(*program_id, false),
     ];
 
     let cpi_ix = solana_program::instruction::Instruction {
@@ -263,18 +276,26 @@ pub fn process_execute(
     };
 
     let mint_auth_seeds: &[&[u8]] = &[MINT_AUTHORITY_SEED, &[mint_auth_bump]];
+
+    // All borrows (slab_data, pda_data) are now dropped — CPI is safe.
     invoke_signed(
         &cpi_ix,
         &[mint_auth.clone(), slab.clone()],
         &[mint_auth_seeds],
     )?;
 
-    drop(slab_data);
+    // ── 4. Write updated funding index to PDA (after CPI completes) ──
+    {
+        let mut pda_data = nft_pda.try_borrow_mut_data()?;
+        let nft_state =
+            bytemuck::from_bytes_mut::<PositionNft>(&mut pda_data[..POSITION_NFT_LEN]);
+        nft_state.last_funding_index_e18 = new_funding;
+    }
 
     msg!(
         "Position transferred: slab={}, idx={}, new_owner={}",
-        Pubkey::new_from_array(nft_state.slab),
-        nft_state.user_idx,
+        Pubkey::new_from_array(pda_slab_bytes),
+        pda_user_idx,
         dest_wallet.key
     );
 
