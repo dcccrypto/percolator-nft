@@ -89,6 +89,11 @@ pub fn process_get_position_value(_program_id: &Pubkey, accounts: &[AccountInfo]
     // Verify slab ownership.
     verify_slab_owner(slab)?;
 
+    // ── PERC-9003: Verify PDA is owned by this program ──
+    if nft_pda.owner != _program_id {
+        return Err(ProgramError::IllegalOwner);
+    }
+
     // Read NFT PDA.
     let pda_data = nft_pda.try_borrow_data()?;
     if pda_data.len() < POSITION_NFT_LEN {

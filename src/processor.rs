@@ -287,6 +287,16 @@ fn process_burn_position_nft(_program_id: &Pubkey, accounts: &[AccountInfo]) -> 
         return Err(ProgramError::MissingRequiredSignature);
     }
 
+    // ── PERC-9003: Verify PDA is owned by this program ──
+    // Without this check an attacker can craft a 208-byte account (owned by
+    // any program) with matching magic/slab/mint bytes and pass it as nft_pda.
+    // The subsequent magic and slab checks alone are insufficient because any
+    // program can write those byte patterns into its own accounts.
+    if nft_pda.owner != program_id {
+        msg!("Burn rejected: PositionNft PDA not owned by this program");
+        return Err(ProgramError::IllegalOwner);
+    }
+
     // ── Verify PDA state ──
     let pda_data = nft_pda.try_borrow_data()?;
     if pda_data.len() < POSITION_NFT_LEN {
@@ -411,6 +421,12 @@ fn process_settle_funding(_program_id: &Pubkey, accounts: &[AccountInfo]) -> Pro
     // 72-byte account that satisfies the balance/owner/mint checks below.
     if *holder_ata.owner != token2022::TOKEN_2022_PROGRAM_ID {
         return Err(NftError::NotNftHolder.into());
+    }
+
+    // ── PERC-9003: Verify PDA is owned by this program ──
+    if nft_pda.owner != program_id {
+        msg!("SettleFunding rejected: PositionNft PDA not owned by this program");
+        return Err(ProgramError::IllegalOwner);
     }
 
     verify_slab_owner(slab)?;

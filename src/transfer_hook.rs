@@ -180,6 +180,14 @@ pub fn process_execute(
     // ── Verify slab ownership (program ID check) ──
     verify_slab_owner(slab)?;
 
+    // ── PERC-9003: Verify PDA is owned by this program ──
+    // Without this an attacker can pass a crafted account with matching magic
+    // bytes but owned by a different program, bypassing all state checks.
+    if nft_pda.owner != program_id {
+        msg!("Transfer rejected: PositionNft PDA not owned by this program");
+        return Err(ProgramError::IllegalOwner);
+    }
+
     // ── Read NFT PDA state ──
     let mut pda_data = nft_pda.try_borrow_mut_data()?;
     if pda_data.len() < POSITION_NFT_LEN {
