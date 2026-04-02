@@ -86,44 +86,61 @@ fn is_position_healthy(
     is_long: u8,
     collateral: u64,
     engine_off: usize,
-) -> bool {
+) -> Result<bool, ProgramError> {
     if position_size == 0 {
-        return false; // No position = nothing to transfer.
+        return Ok(false); // No position = nothing to transfer.
+    }
+
+    // PERC-9009: Reject if entry_price_e6 is zero — this would make PnL=0
+    // regardless of mark price, potentially letting an unhealthy position
+    // pass the margin check if collateral alone covers maintenance.
+    if entry_price_e6 == 0 {
+        return Ok(false);
     }
 
     // Read mark price from engine block.
     let mark_price_e6 = match read_u64_at(slab_data, engine_off + ENGINE_MARK_PRICE_OFF) {
         Some(p) if p > 0 => p,
-        _ => return false, // Stale / zero price → reject.
+        _ => return Ok(false), // Stale / zero price → reject.
     };
 
     // Read maintenance_margin_bps from engine block.
-    let maint_margin_bps =
-        read_u64_at(slab_data, engine_off + ENGINE_MAINT_MARGIN_OFF).unwrap_or(500);
+    // PERC-9010: Reject instead of defaulting to 500bps if the read fails.
+    // An attacker could craft slab data truncated before offset 96 to force
+    // a lenient 500bps default instead of the actual (possibly higher) value.
+    let maint_margin_bps = read_u64_at(slab_data, engine_off + ENGINE_MAINT_MARGIN_OFF)
+        .ok_or(NftError::SlabDataTooShort)?;
 
-    // Unrealized PnL (signed, in collateral micro-units).
-    let unrealized_pnl: i128 = if entry_price_e6 > 0 {
-        let size = position_size as i128;
-        let mark = mark_price_e6 as i128;
-        let entry = entry_price_e6 as i128;
-        if is_long == 1 {
-            size.saturating_mul(mark.saturating_sub(entry)) / entry
-        } else {
-            size.saturating_mul(entry.saturating_sub(mark)) / entry
-        }
+    // PERC-9009: Use checked arithmetic instead of saturating to detect
+    // overflow. Saturating silently clamps to i128::MAX or 0, which can
+    // make an unhealthy position appear healthy (or vice versa).
+    let size = position_size as i128;
+    let mark = mark_price_e6 as i128;
+    let entry = entry_price_e6 as i128;
+
+    let price_diff = if is_long == 1 {
+        mark.checked_sub(entry).ok_or(ProgramError::ArithmeticOverflow)?
     } else {
-        0
+        entry.checked_sub(mark).ok_or(ProgramError::ArithmeticOverflow)?
     };
 
-    // Net equity = collateral + unrealized_pnl.
-    let net_equity: i128 = (collateral as i128).saturating_add(unrealized_pnl);
+    let unrealized_pnl = size
+        .checked_mul(price_diff)
+        .ok_or(ProgramError::ArithmeticOverflow)?
+        .checked_div(entry)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
 
-    // Maintenance margin requirement.
-    let maint_requirement: i128 =
-        (position_size as i128).saturating_mul(maint_margin_bps as i128) / 10_000;
+    let net_equity = (collateral as i128)
+        .checked_add(unrealized_pnl)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
 
-    // Healthy if equity >= maintenance margin (strictly above liquidation threshold).
-    net_equity >= maint_requirement
+    let maint_requirement = (position_size as i128)
+        .checked_mul(maint_margin_bps as i128)
+        .ok_or(ProgramError::ArithmeticOverflow)?
+        / 10_000;
+
+    // Healthy if equity >= maintenance margin.
+    Ok(net_equity >= maint_requirement)
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -214,7 +231,7 @@ pub fn process_execute(
         position.is_long,
         position.collateral,
         position.engine_off,
-    ) {
+    )? {
         msg!("Transfer rejected: position is below maintenance margin (liquidatable)");
         return Err(NftError::PositionInLiquidation.into());
     }
@@ -292,4 +309,68 @@ pub const EXTRA_METAS_SEED: &[u8] = b"extra-account-metas";
 /// Derive the ExtraAccountMetaList PDA for a given mint.
 pub fn extra_account_metas_pda(mint: &Pubkey, program_id: &Pubkey) -> (Pubkey, u8) {
     Pubkey::find_program_address(&[EXTRA_METAS_SEED, mint.as_ref()], program_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build minimal slab data with engine block at the given offset.
+    fn make_slab_for_margin(engine_off: usize, mark_price: u64, maint_bps: u64) -> Vec<u8> {
+        let needed = engine_off + ENGINE_MAINT_MARGIN_OFF + 8;
+        let mut data = vec![0u8; needed];
+        // mark price at engine_off + 0
+        data[engine_off..engine_off + 8].copy_from_slice(&mark_price.to_le_bytes());
+        // maint_margin_bps at engine_off + 96
+        data[engine_off + ENGINE_MAINT_MARGIN_OFF..engine_off + ENGINE_MAINT_MARGIN_OFF + 8]
+            .copy_from_slice(&maint_bps.to_le_bytes());
+        data
+    }
+
+    /// PERC-9009: is_position_healthy must return Err on arithmetic overflow
+    /// instead of silently clamping with saturating_mul.
+    #[test]
+    fn test_margin_check_rejects_overflow() {
+        let slab = make_slab_for_margin(0, u64::MAX, 500);
+        // Extreme values that would overflow i128 in size * price_diff
+        let result = is_position_healthy(&slab, u64::MAX, 1, 1, 0, 0);
+        // Should return error, not silently pass or fail
+        assert!(result.is_err(), "Expected ArithmeticOverflow for extreme values");
+    }
+
+    /// PERC-9009: Zero entry price must return false (not divide-by-zero).
+    #[test]
+    fn test_margin_check_zero_entry_price() {
+        let slab = make_slab_for_margin(0, 100_000_000, 500);
+        let result = is_position_healthy(&slab, 1_000_000, 0, 1, 100_000, 0);
+        assert_eq!(result.unwrap(), false, "Zero entry price must reject");
+    }
+
+    /// PERC-9010: Missing maint_margin_bps must return error, not default to 500.
+    #[test]
+    fn test_margin_check_rejects_truncated_engine() {
+        // Slab data too short to read maint_margin_bps
+        let slab = make_slab_for_margin(0, 100_000_000, 500);
+        let short_slab = &slab[..ENGINE_MAINT_MARGIN_OFF]; // truncated before maint margin
+        let result = is_position_healthy(short_slab, 1_000_000, 100_000_000, 1, 100_000, 0);
+        assert!(result.is_err(), "Expected SlabDataTooShort for truncated engine");
+    }
+
+    /// Normal healthy position passes.
+    #[test]
+    fn test_margin_check_healthy_position() {
+        // mark=100, entry=100, no PnL, collateral=1000, maint=50 (5% of 1000 size)
+        let slab = make_slab_for_margin(0, 100_000_000, 500);
+        let result = is_position_healthy(&slab, 1_000_000_000, 100_000_000, 1, 100_000_000, 0);
+        assert_eq!(result.unwrap(), true);
+    }
+
+    /// Unhealthy position (underwater long) fails.
+    #[test]
+    fn test_margin_check_unhealthy_position() {
+        // entry=100, mark=50 → PnL = -50% of size. collateral=10, maint=50
+        let slab = make_slab_for_margin(0, 50_000_000, 500);
+        let result = is_position_healthy(&slab, 1_000_000_000, 100_000_000, 1, 10_000_000, 0);
+        assert_eq!(result.unwrap(), false);
+    }
 }
