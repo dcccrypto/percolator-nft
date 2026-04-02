@@ -154,7 +154,7 @@ pub fn process_execute(
     let accounts_iter = &mut accounts.iter();
 
     let _source_ata = next_account_info(accounts_iter)?; // 0: source token account
-    let _mint = next_account_info(accounts_iter)?; // 1: NFT mint
+    let mint = next_account_info(accounts_iter)?; // 1: NFT mint
     let _dest_ata = next_account_info(accounts_iter)?; // 2: destination token account
     let dest_wallet = next_account_info(accounts_iter)?; // 3: new owner wallet
     let _extra_metas = next_account_info(accounts_iter)?; // 4: ExtraAccountMetaList PDA
@@ -166,15 +166,24 @@ pub fn process_execute(
     let mint_auth = next_account_info(accounts_iter)?; // 8: Mint authority PDA
 
     // ── GH#1687: Validate percolator_prog key against known constants ──
-    // Prevents an attacker from supplying a malicious program as account[7].
-    // Without this check the CPI target is attacker-controlled, allowing them
-    // to complete the NFT transfer while leaving slab position ownership stale.
     if percolator_prog.key != &PERCOLATOR_DEVNET && percolator_prog.key != &PERCOLATOR_MAINNET {
         msg!(
             "Transfer rejected: percolator_prog key {} is not a known Percolator program",
             percolator_prog.key
         );
         return Err(NftError::InvalidPercolatorProgram.into());
+    }
+
+    // ── PERC-9006: Validate mint authority PDA ──
+    // The mint_auth account is used as the CPI signer for
+    // TransferOwnershipCpi. Without verification an attacker could pass a
+    // different PDA or keypair, causing the CPI signature to fail (best case)
+    // or — if percolator-prog doesn't re-derive the PDA — allowing an
+    // unauthorized ownership transfer (worst case).
+    let (expected_mint_auth, _) = crate::state::mint_authority_pda(program_id);
+    if *mint_auth.key != expected_mint_auth {
+        msg!("Transfer rejected: invalid mint authority PDA");
+        return Err(NftError::InvalidMintAuthority.into());
     }
 
     // ── Verify slab ownership (program ID check) ──
@@ -191,11 +200,17 @@ pub fn process_execute(
     }
 
     // ── GH#2: Verify slab key matches the NFT PDA's recorded slab ──
-    // Prevents a malicious caller from substituting a different (healthy) slab
-    // account to bypass the margin check for a position on a different market.
     if nft_state.slab != slab.key.to_bytes() {
         msg!("Transfer rejected: slab account does not match NFT PDA slab binding");
         return Err(ProgramError::InvalidAccountData);
+    }
+
+    // ── PERC-9006: Verify mint account matches the PDA's recorded mint ──
+    // Without this check the hook could operate on a PDA that belongs to a
+    // different mint, allowing cross-mint state confusion.
+    if nft_state.nft_mint != mint.key.to_bytes() {
+        msg!("Transfer rejected: mint does not match NFT PDA nft_mint binding");
+        return Err(NftError::InvalidNftPda.into());
     }
 
     // ── Read position from slab ──
