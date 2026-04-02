@@ -2,7 +2,7 @@
 ///
 /// Defence-in-depth: read_position() must reject slots where the bitmap bit is 0
 /// (unallocated / freed) even if the account data bytes are otherwise valid.
-use percolator_nft::cpi::read_position;
+use percolator_nft::cpi::{read_position, SLAB_MAGIC};
 use percolator_nft::error::NftError;
 use solana_program::program_error::ProgramError;
 
@@ -30,6 +30,9 @@ fn build_v0_slab(max_accounts: u16, set_bits: &[usize]) -> Vec<u8> {
     let total = accounts_off + max * V0_ACCOUNT_SIZE;
 
     let mut buf = vec![0u8; total];
+
+    // PERC-9023: Write slab magic at offset 0 (now validated by detect_layout).
+    buf[0..8].copy_from_slice(&SLAB_MAGIC.to_le_bytes());
 
     // Write max_accounts at offset 8 (u16 LE).
     buf[8] = (max_accounts & 0xff) as u8;
@@ -112,6 +115,38 @@ fn test_full_byte_all_slots_allocated() {
     let slab = build_v0_slab(8, &[0, 1, 2, 3, 4, 5, 6, 7]);
     for idx in 0u16..8 {
         assert!(read_position(&slab, idx).is_ok(), "slot {idx} should be allocated and readable");
+    }
+}
+
+/// PERC-9023: Slab without SLAB_MAGIC header → UnrecognizedSlabLayout.
+#[test]
+fn test_missing_slab_magic_rejected() {
+    let mut slab = build_v0_slab(4, &[0]);
+    // Zero out the magic bytes
+    slab[0..8].copy_from_slice(&[0u8; 8]);
+    match read_position(&slab, 0) {
+        Err(e) => assert_eq!(
+            e,
+            ProgramError::Custom(NftError::UnrecognizedSlabLayout as u32),
+            "missing SLAB_MAGIC → UnrecognizedSlabLayout"
+        ),
+        Ok(_) => panic!("expected error for missing slab magic"),
+    }
+}
+
+/// PERC-9023: Slab with wrong magic → UnrecognizedSlabLayout.
+#[test]
+fn test_wrong_slab_magic_rejected() {
+    let mut slab = build_v0_slab(4, &[0]);
+    // Write wrong magic
+    slab[0..8].copy_from_slice(&0xDEADBEEF_u64.to_le_bytes());
+    match read_position(&slab, 0) {
+        Err(e) => assert_eq!(
+            e,
+            ProgramError::Custom(NftError::UnrecognizedSlabLayout as u32),
+            "wrong SLAB_MAGIC → UnrecognizedSlabLayout"
+        ),
+        Ok(_) => panic!("expected error for wrong slab magic"),
     }
 }
 
