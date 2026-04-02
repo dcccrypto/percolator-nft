@@ -81,6 +81,15 @@ fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
         return Err(NftError::SlabDataTooShort.into());
     }
 
+    // PERC-9023: Verify slab magic before trusting any other header fields.
+    // SLAB_MAGIC was defined but never checked, allowing any Percolator-owned
+    // account (e.g. a config account) that happens to match the size heuristic
+    // to be parsed as a slab, reading garbage position data.
+    let magic = read_u64(data, 0);
+    if magic != SLAB_MAGIC {
+        return Err(NftError::UnrecognizedSlabLayout.into());
+    }
+
     // Read max_accounts from header offset 8.
     let max_accounts = read_u16(data, 8) as usize;
     if max_accounts == 0 {
