@@ -92,7 +92,13 @@ fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
     let v0_accounts_off = V0_BITMAP_OFF + v0_bitmap_bytes;
     let v0_total = v0_accounts_off + max_accounts * V0_ACCOUNT_SIZE;
 
-    if data.len() == v0_total || data.len() == v0_total + 8 {
+    // PERC-9039: Use >= instead of == for layout size matching.
+    // The original exact-match (==) breaks if Percolator adds even 1 byte
+    // to the slab (e.g. a trailing version field or padding). Using >= with
+    // a minimum size threshold is forward-compatible — we only need the data
+    // to be at least as large as our layout requires. The magic + max_accounts
+    // checks above already validate the header.
+    if data.len() >= v0_total && data.len() <= v0_total + 64 {
         return Ok(SlabLayout {
             engine_off: V0_ENGINE_OFF,
             account_size: V0_ACCOUNT_SIZE,
@@ -106,8 +112,7 @@ fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
     let v1d_accounts_off = V1D_BITMAP_OFF + v1d_bitmap_bytes;
     let v1d_total = v1d_accounts_off + max_accounts * V1D_ACCOUNT_SIZE;
 
-    // Accept both postBitmap=2 and postBitmap=18 sizes.
-    if data.len() == v1d_total || data.len() == v1d_total + 16 {
+    if data.len() >= v1d_total && data.len() <= v1d_total + 64 {
         return Ok(SlabLayout {
             engine_off: V1D_ENGINE_OFF,
             account_size: V1D_ACCOUNT_SIZE,
