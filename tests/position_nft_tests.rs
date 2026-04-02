@@ -323,7 +323,18 @@ fn test_burn_not_nftholder_ata_wrong_owner_system_program() {
     let mut pda_data = make_pda_data(&slab_key, &nft_mint_key);
     let mut mint_data: Vec<u8> = vec![0u8; 82];
     let mut ata_data: Vec<u8> = vec![0u8; 72];
-    let mut slab_data: Vec<u8> = vec![];
+    // Build minimal V0 slab data so burn's read_position succeeds (position closed: size=0)
+    let max_accounts: u16 = 1;
+    let bitmap_bytes = 1usize;
+    let v0_bitmap_off = 608usize;
+    let v0_total = v0_bitmap_off + bitmap_bytes + (max_accounts as usize) * 240;
+    let mut slab_data = vec![0u8; v0_total];
+    // SLAB_MAGIC at offset 0
+    slab_data[0..8].copy_from_slice(&0x5045_5243_534C_4142u64.to_le_bytes());
+    slab_data[8..10].copy_from_slice(&max_accounts.to_le_bytes());
+    // Set bitmap bit for slot 0
+    slab_data[v0_bitmap_off] = 0x01;
+    // Position data: all zeros = size=0, collateral=0 (closed position)
     let mut auth_data: Vec<u8> = vec![];
     let mut token_data: Vec<u8> = vec![];
 
@@ -459,7 +470,15 @@ fn test_burn_not_nftholder_ata_wrong_owner_legacy_token() {
     let mut pda_data = make_pda_data(&slab_key, &nft_mint_key);
     let mut mint_data: Vec<u8> = vec![0u8; 82];
     let mut ata_data: Vec<u8> = vec![0u8; 72];
-    let mut slab_data: Vec<u8> = vec![];
+    // Build minimal V0 slab data so burn's read_position succeeds (position closed: size=0)
+    let max_accounts: u16 = 1;
+    let bitmap_bytes = 1usize;
+    let v0_bitmap_off = 608usize;
+    let v0_total = v0_bitmap_off + bitmap_bytes + (max_accounts as usize) * 240;
+    let mut slab_data = vec![0u8; v0_total];
+    slab_data[0..8].copy_from_slice(&0x5045_5243_534C_4142u64.to_le_bytes());
+    slab_data[8..10].copy_from_slice(&max_accounts.to_le_bytes());
+    slab_data[v0_bitmap_off] = 0x01;
     let mut auth_data: Vec<u8> = vec![];
     let mut token_data: Vec<u8> = vec![];
 
