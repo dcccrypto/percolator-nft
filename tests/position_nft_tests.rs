@@ -294,7 +294,10 @@ fn make_pda_data(
 /// GH#18 primary: holder_ata owned by System Program → NotNftHolder.
 #[test]
 fn test_burn_not_nftholder_ata_wrong_owner_system_program() {
-    use percolator_nft::{error::NftError, processor::process, token2022::TOKEN_2022_PROGRAM_ID};
+    use percolator_nft::{
+        cpi::PERCOLATOR_MAINNET, error::NftError, processor::process,
+        token2022::TOKEN_2022_PROGRAM_ID,
+    };
     use solana_program::{account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey};
     use solana_sdk::pubkey::Pubkey as SdkPubkey;
 
@@ -327,6 +330,7 @@ fn test_burn_not_nftholder_ata_wrong_owner_system_program() {
     // ATA owner is System Program (wrong — should be Token-2022)
     let system_program_id = solana_program::system_program::id();
     let token_prog_id = Pubkey::new_from_array(TOKEN_2022_PROGRAM_ID.to_bytes());
+    let percolator_pk = Pubkey::new_from_array(PERCOLATOR_MAINNET.to_bytes());
     let prog_id_pk = Pubkey::new_from_array(program_id.to_bytes());
     let holder_pk = Pubkey::new_from_array(holder_key.to_bytes());
     let pda_pk = Pubkey::new_from_array(pda_key.to_bytes());
@@ -375,13 +379,14 @@ fn test_burn_not_nftholder_ata_wrong_owner_system_program() {
         false,
         0,
     );
+    // slab must be owned by known Percolator program to pass verify_slab_owner()
     let slab_ai = AccountInfo::new(
         &slab_pk,
         false,
         false,
         &mut slab_lamports,
         &mut slab_data,
-        &system_program_id,
+        &percolator_pk,
         false,
         0,
     );
@@ -428,7 +433,10 @@ fn test_burn_not_nftholder_ata_wrong_owner_system_program() {
 /// GH#18 variant: holder_ata owned by legacy SPL Token (not Token-2022) → NotNftHolder.
 #[test]
 fn test_burn_not_nftholder_ata_wrong_owner_legacy_token() {
-    use percolator_nft::{error::NftError, processor::process, token2022::TOKEN_2022_PROGRAM_ID};
+    use percolator_nft::{
+        cpi::PERCOLATOR_MAINNET, error::NftError, processor::process,
+        token2022::TOKEN_2022_PROGRAM_ID,
+    };
     use solana_program::{account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey};
     use solana_sdk::pubkey::Pubkey as SdkPubkey;
 
@@ -457,6 +465,7 @@ fn test_burn_not_nftholder_ata_wrong_owner_legacy_token() {
 
     let system_program_id = solana_program::system_program::id();
     let token_prog_id = Pubkey::new_from_array(TOKEN_2022_PROGRAM_ID.to_bytes());
+    let percolator_pk = Pubkey::new_from_array(PERCOLATOR_MAINNET.to_bytes());
     let prog_id_pk = Pubkey::new_from_array(program_id.to_bytes());
     let holder_pk = Pubkey::new_from_array(holder_key.to_bytes());
     let pda_pk = Pubkey::new_from_array(pda_key.to_bytes());
@@ -507,13 +516,14 @@ fn test_burn_not_nftholder_ata_wrong_owner_legacy_token() {
         false,
         0,
     );
+    // slab must be owned by known Percolator program to pass verify_slab_owner()
     let slab_ai = AccountInfo::new(
         &slab_pk,
         false,
         false,
         &mut slab_lamports,
         &mut slab_data,
-        &system_program_id,
+        &percolator_pk,
         false,
         0,
     );
