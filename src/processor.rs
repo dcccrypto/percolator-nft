@@ -85,12 +85,10 @@ fn process_mint_position_nft(
     drop(slab_data);
 
     // ── Verify caller owns this position ──
+    // PERC-9049: Don't log expected/actual pubkeys — leaks account relationships
+    // to transaction log readers who can use this for targeted attacks.
     if position.owner != *owner.key {
-        msg!(
-            "Position owner mismatch: expected {}, got {}",
-            position.owner,
-            owner.key
-        );
+        msg!("MintPositionNft: position owner mismatch");
         return Err(ProgramError::InvalidAccountData);
     }
 
