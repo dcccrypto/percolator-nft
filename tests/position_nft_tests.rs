@@ -294,7 +294,10 @@ fn make_pda_data(
 /// GH#18 primary: holder_ata owned by System Program → NotNftHolder.
 #[test]
 fn test_burn_not_nftholder_ata_wrong_owner_system_program() {
-    use percolator_nft::{error::NftError, processor::process, token2022::TOKEN_2022_PROGRAM_ID};
+    use percolator_nft::{
+        cpi::PERCOLATOR_MAINNET, error::NftError, processor::process,
+        token2022::TOKEN_2022_PROGRAM_ID,
+    };
     use solana_program::{account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey};
     use solana_sdk::pubkey::Pubkey as SdkPubkey;
 
@@ -320,13 +323,25 @@ fn test_burn_not_nftholder_ata_wrong_owner_system_program() {
     let mut pda_data = make_pda_data(&slab_key, &nft_mint_key);
     let mut mint_data: Vec<u8> = vec![0u8; 82];
     let mut ata_data: Vec<u8> = vec![0u8; 72];
-    let mut slab_data: Vec<u8> = vec![];
+    // Build minimal V0 slab data so burn's read_position succeeds (position closed: size=0)
+    let max_accounts: u16 = 1;
+    let bitmap_bytes = 1usize;
+    let v0_bitmap_off = 608usize;
+    let v0_total = v0_bitmap_off + bitmap_bytes + (max_accounts as usize) * 240;
+    let mut slab_data = vec![0u8; v0_total];
+    // SLAB_MAGIC at offset 0
+    slab_data[0..8].copy_from_slice(&0x5045_5243_534C_4142u64.to_le_bytes());
+    slab_data[8..10].copy_from_slice(&max_accounts.to_le_bytes());
+    // Set bitmap bit for slot 0
+    slab_data[v0_bitmap_off] = 0x01;
+    // Position data: all zeros = size=0, collateral=0 (closed position)
     let mut auth_data: Vec<u8> = vec![];
     let mut token_data: Vec<u8> = vec![];
 
     // ATA owner is System Program (wrong — should be Token-2022)
     let system_program_id = solana_program::system_program::id();
     let token_prog_id = Pubkey::new_from_array(TOKEN_2022_PROGRAM_ID.to_bytes());
+    let percolator_pk = Pubkey::new_from_array(PERCOLATOR_MAINNET.to_bytes());
     let prog_id_pk = Pubkey::new_from_array(program_id.to_bytes());
     let holder_pk = Pubkey::new_from_array(holder_key.to_bytes());
     let pda_pk = Pubkey::new_from_array(pda_key.to_bytes());
@@ -375,13 +390,14 @@ fn test_burn_not_nftholder_ata_wrong_owner_system_program() {
         false,
         0,
     );
+    // slab must be owned by known Percolator program to pass verify_slab_owner()
     let slab_ai = AccountInfo::new(
         &slab_pk,
         false,
         false,
         &mut slab_lamports,
         &mut slab_data,
-        &system_program_id,
+        &percolator_pk,
         false,
         0,
     );
@@ -428,7 +444,10 @@ fn test_burn_not_nftholder_ata_wrong_owner_system_program() {
 /// GH#18 variant: holder_ata owned by legacy SPL Token (not Token-2022) → NotNftHolder.
 #[test]
 fn test_burn_not_nftholder_ata_wrong_owner_legacy_token() {
-    use percolator_nft::{error::NftError, processor::process, token2022::TOKEN_2022_PROGRAM_ID};
+    use percolator_nft::{
+        cpi::PERCOLATOR_MAINNET, error::NftError, processor::process,
+        token2022::TOKEN_2022_PROGRAM_ID,
+    };
     use solana_program::{account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey};
     use solana_sdk::pubkey::Pubkey as SdkPubkey;
 
@@ -451,12 +470,21 @@ fn test_burn_not_nftholder_ata_wrong_owner_legacy_token() {
     let mut pda_data = make_pda_data(&slab_key, &nft_mint_key);
     let mut mint_data: Vec<u8> = vec![0u8; 82];
     let mut ata_data: Vec<u8> = vec![0u8; 72];
-    let mut slab_data: Vec<u8> = vec![];
+    // Build minimal V0 slab data so burn's read_position succeeds (position closed: size=0)
+    let max_accounts: u16 = 1;
+    let bitmap_bytes = 1usize;
+    let v0_bitmap_off = 608usize;
+    let v0_total = v0_bitmap_off + bitmap_bytes + (max_accounts as usize) * 240;
+    let mut slab_data = vec![0u8; v0_total];
+    slab_data[0..8].copy_from_slice(&0x5045_5243_534C_4142u64.to_le_bytes());
+    slab_data[8..10].copy_from_slice(&max_accounts.to_le_bytes());
+    slab_data[v0_bitmap_off] = 0x01;
     let mut auth_data: Vec<u8> = vec![];
     let mut token_data: Vec<u8> = vec![];
 
     let system_program_id = solana_program::system_program::id();
     let token_prog_id = Pubkey::new_from_array(TOKEN_2022_PROGRAM_ID.to_bytes());
+    let percolator_pk = Pubkey::new_from_array(PERCOLATOR_MAINNET.to_bytes());
     let prog_id_pk = Pubkey::new_from_array(program_id.to_bytes());
     let holder_pk = Pubkey::new_from_array(holder_key.to_bytes());
     let pda_pk = Pubkey::new_from_array(pda_key.to_bytes());
@@ -507,13 +535,14 @@ fn test_burn_not_nftholder_ata_wrong_owner_legacy_token() {
         false,
         0,
     );
+    // slab must be owned by known Percolator program to pass verify_slab_owner()
     let slab_ai = AccountInfo::new(
         &slab_pk,
         false,
         false,
         &mut slab_lamports,
         &mut slab_data,
-        &system_program_id,
+        &percolator_pk,
         false,
         0,
     );
