@@ -462,6 +462,16 @@ fn process_settle_funding(_program_id: &Pubkey, accounts: &[AccountInfo]) -> Pro
     let position = read_position(&slab_data, nft_state.user_idx)?;
     drop(slab_data);
 
+    // PERC-9029: Reject settling funding on a closed position (size=0).
+    // A closed position has no active funding accrual. Allowing settle on a
+    // closed position could overwrite the last_funding_index with the current
+    // global value, erasing the funding snapshot from when the position was
+    // still open — misrepresenting historical funding to downstream consumers.
+    if position.size == 0 {
+        msg!("SettleFunding rejected: position is closed (size=0)");
+        return Err(NftError::PositionNotOpen.into());
+    }
+
     nft_state.last_funding_index_e18 = position.global_funding_index_e18;
 
     msg!(
