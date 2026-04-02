@@ -101,10 +101,14 @@ pub fn get_associated_token_address(wallet: &Pubkey, mint: &Pubkey) -> Pubkey {
 const METADATA_INIT_DISCRIMINATOR: [u8; 8] = [210, 225, 30, 162, 88, 184, 238, 125];
 
 /// Encode a string as borsh: u32 LE length + utf8 bytes.
+///
+/// PERC-9043: Use u32::try_from to detect strings exceeding u32::MAX.
+/// The original `as u32` cast silently truncates, producing malformed borsh.
 fn borsh_string(s: &str) -> Vec<u8> {
     let bytes = s.as_bytes();
+    let len = u32::try_from(bytes.len()).expect("borsh_string: length exceeds u32::MAX");
     let mut out = Vec::with_capacity(4 + bytes.len());
-    out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    out.extend_from_slice(&len.to_le_bytes());
     out.extend_from_slice(bytes);
     out
 }
