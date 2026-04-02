@@ -206,11 +206,31 @@ pub fn read_position(slab_data: &[u8], user_idx: u16) -> Result<PositionData, Pr
             .unwrap(),
     );
 
+    // PERC-9037: Read collateral as U128 lo-word. The capital field is a
+    // Percolator U128 stored as [lo: u64, hi: u64]. We only use the lo-word,
+    // which is correct for values < 2^64. Verify the hi-word is zero to detect
+    // overflow that would silently truncate the collateral value — a truncated
+    // collateral makes the position appear under-collateralized in margin checks.
     let collateral = read_u64(slab_data, acct_off + ACCT_COLLATERAL_OFF);
-    // position_size is I128 = [lo: u64, hi: u64]. Absolute size = lo-word; sign = hi-word MSB.
+    let collateral_hi = read_u64(slab_data, acct_off + ACCT_COLLATERAL_OFF + 8);
+    if collateral_hi != 0 {
+        solana_program::msg!("read_position: collateral U128 hi-word is non-zero, value exceeds u64");
+        return Err(ProgramError::ArithmeticOverflow);
+    }
+
+    // PERC-9038: Read position_size as I128 = [lo: u64, hi: u64].
+    // Percolator's I128 uses sign+magnitude encoding: lo-word is the absolute
+    // magnitude, hi-word sign bit indicates direction (negative = short).
+    // Verify the hi-word magnitude bits (excluding sign) are zero to detect
+    // position sizes that exceed u64 — which would silently truncate.
     let size = read_u64(slab_data, acct_off + ACCT_POS_SIZE_LO_OFF);
     let pos_hi = read_u64(slab_data, acct_off + ACCT_POS_SIZE_HI_OFF);
     let is_long: u8 = if (pos_hi as i64) < 0 { 0 } else { 1 };
+    // Check magnitude bits of hi-word (mask out sign bit)
+    if pos_hi & 0x7FFF_FFFF_FFFF_FFFF != 0 {
+        solana_program::msg!("read_position: position_size I128 exceeds u64 magnitude");
+        return Err(ProgramError::ArithmeticOverflow);
+    }
     let entry_price_e6 = read_u64(slab_data, acct_off + ACCT_ENTRY_PRICE_OFF);
 
     // Read global funding index from engine.
