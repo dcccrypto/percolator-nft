@@ -18,8 +18,9 @@ use crate::{
     error::NftError,
     instruction::NftInstruction,
     state::{
-        mint_authority_pda, position_nft_pda, PositionNft, MINT_AUTHORITY_SEED, POSITION_NFT_LEN,
-        POSITION_NFT_MAGIC, POSITION_NFT_SEED, POSITION_NFT_VERSION,
+        mint_authority_pda, position_nft_pda, verify_pda_version, PositionNft,
+        MINT_AUTHORITY_SEED, POSITION_NFT_LEN, POSITION_NFT_MAGIC, POSITION_NFT_SEED,
+        POSITION_NFT_VERSION,
     },
     token2022,
 };
@@ -296,6 +297,7 @@ fn process_burn_position_nft(_program_id: &Pubkey, accounts: &[AccountInfo]) -> 
     if nft_state.magic != POSITION_NFT_MAGIC {
         return Err(ProgramError::InvalidAccountData);
     }
+    verify_pda_version(nft_state)?;
     if nft_state.slab != slab.key.to_bytes() {
         return Err(ProgramError::InvalidAccountData);
     }
@@ -423,6 +425,7 @@ fn process_settle_funding(_program_id: &Pubkey, accounts: &[AccountInfo]) -> Pro
     if nft_state.magic != POSITION_NFT_MAGIC {
         return Err(ProgramError::InvalidAccountData);
     }
+    verify_pda_version(nft_state)?;
     if nft_state.slab != slab.key.to_bytes() {
         return Err(ProgramError::InvalidAccountData);
     }

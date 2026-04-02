@@ -20,7 +20,7 @@ use solana_program::{
 use crate::{
     cpi::{read_position, verify_slab_owner},
     error::NftError,
-    state::{PositionNft, POSITION_NFT_LEN, POSITION_NFT_MAGIC},
+    state::{verify_pda_version, PositionNft, POSITION_NFT_LEN, POSITION_NFT_MAGIC},
 };
 
 /// Read a u64 from slab data at offset.
@@ -98,6 +98,7 @@ pub fn process_get_position_value(_program_id: &Pubkey, accounts: &[AccountInfo]
     if nft_state.magic != POSITION_NFT_MAGIC {
         return Err(ProgramError::InvalidAccountData);
     }
+    verify_pda_version(nft_state)?;
     if nft_state.slab != slab.key.to_bytes() {
         return Err(ProgramError::InvalidAccountData);
     }

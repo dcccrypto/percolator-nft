@@ -24,7 +24,7 @@ use solana_program::{
 use crate::{
     cpi::{read_position, verify_slab_owner, PERCOLATOR_DEVNET, PERCOLATOR_MAINNET},
     error::NftError,
-    state::{PositionNft, MINT_AUTHORITY_SEED, POSITION_NFT_LEN, POSITION_NFT_MAGIC},
+    state::{verify_pda_version, PositionNft, MINT_AUTHORITY_SEED, POSITION_NFT_LEN, POSITION_NFT_MAGIC},
 };
 
 // Maintenance margin bps offset within the engine block.
@@ -189,6 +189,7 @@ pub fn process_execute(
     if nft_state.magic != POSITION_NFT_MAGIC {
         return Err(ProgramError::InvalidAccountData);
     }
+    verify_pda_version(nft_state)?;
 
     // ── GH#2: Verify slab key matches the NFT PDA's recorded slab ──
     // Prevents a malicious caller from substituting a different (healthy) slab
