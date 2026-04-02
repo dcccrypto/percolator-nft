@@ -110,12 +110,16 @@ fn process_mint_position_nft(
         return Err(NftError::NftAlreadyMinted.into());
     }
 
+    // ── PERC-9028: Verify nft_mint is a signer ──
+    // nft_mint is a caller-supplied keypair that must sign the transaction
+    // (required by create_account). Checking upfront gives a clear error
+    // instead of a confusing system program failure message.
+    if !nft_mint.is_signer {
+        msg!("MintPositionNft: nft_mint must be a signer");
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+
     // ── GH#7: Verify nft_mint is a fresh, uninitialized account ──
-    // nft_mint is a caller-supplied keypair (not a PDA). Without this check an
-    // attacker can front-run the mint call by pre-funding the address so that
-    // our create_account CPI fails, or supply a pre-initialized mint where
-    // they hold the update authority.
-    // A freshly-generated keypair has zero lamports and empty data — enforce that.
     if nft_mint.lamports() != 0 || !nft_mint.data_is_empty() {
         msg!("MintPositionNft: nft_mint account is not a fresh keypair (already funded or initialized)");
         return Err(NftError::NftAlreadyMinted.into());
