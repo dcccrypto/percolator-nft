@@ -237,29 +237,27 @@ pub fn process_execute(
     //   - Verifies caller is the NFT program's mint authority PDA
     //   - Changes account[user_idx].owner to the new wallet
     //
-    // CPI data: tag(1) + user_idx(2) + new_owner(32)
+    // CPI data: tag(1) + user_idx(2) + new_owner(32) = 35 bytes
+    // PERC-9047: Use fixed-size stack arrays instead of heap Vec allocations.
+    // In the transfer hook hot path, heap allocation under compute budget
+    // pressure can fail. Stack arrays are zero-cost.
     let (_, mint_auth_bump) = crate::state::mint_authority_pda(program_id);
-    let cpi_data = {
-        let mut d = Vec::with_capacity(35);
-        d.push(TAG_TRANSFER_POSITION_OWNERSHIP);
-        d.extend_from_slice(&nft_state.user_idx.to_le_bytes());
-        d.extend_from_slice(dest_wallet.key.as_ref());
-        d
-    };
+    let mut cpi_data = [0u8; 35];
+    cpi_data[0] = TAG_TRANSFER_POSITION_OWNERSHIP;
+    cpi_data[1..3].copy_from_slice(&nft_state.user_idx.to_le_bytes());
+    cpi_data[3..35].copy_from_slice(dest_wallet.key.as_ref());
 
     // Accounts: [mint_authority(signer), slab(writable), nft_program(readonly)]
-    // The nft_program (this program's program_id) is passed so percolator-prog can
-    // derive and verify the mint_authority PDA: find_pda(&[b"mint_authority"], nft_program_id).
-    let cpi_accounts = vec![
-        solana_program::instruction::AccountMeta::new_readonly(*mint_auth.key, true), // signer (PDA)
-        solana_program::instruction::AccountMeta::new(*slab.key, false), // slab (writable)
-        solana_program::instruction::AccountMeta::new_readonly(*program_id, false), // NFT program_id
+    let cpi_accounts = [
+        solana_program::instruction::AccountMeta::new_readonly(*mint_auth.key, true),
+        solana_program::instruction::AccountMeta::new(*slab.key, false),
+        solana_program::instruction::AccountMeta::new_readonly(*program_id, false),
     ];
 
     let cpi_ix = solana_program::instruction::Instruction {
         program_id: *percolator_prog.key,
-        accounts: cpi_accounts,
-        data: cpi_data,
+        accounts: cpi_accounts.to_vec(),
+        data: cpi_data.to_vec(),
     };
 
     let mint_auth_seeds: &[&[u8]] = &[MINT_AUTHORITY_SEED, &[mint_auth_bump]];
