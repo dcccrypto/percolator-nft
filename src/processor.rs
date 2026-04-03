@@ -182,25 +182,12 @@ fn process_mint_position_nft(
     } else {
         "SHORT"
     };
-    let price_whole = position.entry_price_e6 / 1_000_000;
-    let price_frac = (position.entry_price_e6 % 1_000_000) / 100; // 4 decimal places
 
-    // Name: "PERP LONG SOL @148.5000" (slab address if no symbol available)
-    let slab_short = &slab.key.to_string()[..8];
-    let nft_name = if price_whole > 0 {
-        alloc::format!(
-            "PERP {} {} @{}.{:04}",
-            direction,
-            slab_short,
-            price_whole,
-            price_frac
-        )
-    } else {
-        alloc::format!("PERP {} {}", direction, slab_short)
-    };
+    // Name: "Percolator Position — LONG/SHORT" (self-descriptive, immutable)
+    let nft_name = alloc::format!("Percolator Position — {}", direction);
     let nft_symbol = alloc::format!("PERP-{}", direction);
 
-    // URI: empty for now (no off-chain metadata server yet)
+    // URI: Empty — all position data is on-chain in PositionNft PDA
     let nft_uri = "";
 
     // ── Create Token-2022 mint account (with metadata + transfer hook extensions) ──
