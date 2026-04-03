@@ -185,7 +185,7 @@ fn process_mint_position_nft(
 
     // Name: "Percolator Position — LONG/SHORT" (self-descriptive, immutable)
     let nft_name = alloc::format!("Percolator Position — {}", direction);
-    let nft_symbol = alloc::format!("PERP-{}", direction);
+    let nft_symbol = "PERC-POS";
 
     // URI: Empty — all position data is on-chain in PositionNft PDA
     let nft_uri = "";
