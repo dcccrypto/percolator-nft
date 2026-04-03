@@ -39,6 +39,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         NftInstruction::ExecuteTransferHook { amount } => {
             crate::transfer_hook::process_execute(program_id, accounts, amount)
         }
+        NftInstruction::EmergencyBurn => process_emergency_burn(program_id, accounts),
     }
 }
 
@@ -394,6 +395,112 @@ fn process_burn_position_nft(_program_id: &Pubkey, accounts: &[AccountInfo]) -> 
     pda_data.fill(0);
 
     msg!("PositionNft burned: slab={}, idx={}", slab.key, user_idx);
+    Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Tag 5: EmergencyBurn
+// ═══════════════════════════════════════════════════════════════
+
+fn process_emergency_burn(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    let accounts_iter = &mut accounts.iter();
+
+    let holder = next_account_info(accounts_iter)?; // 0: signer (NFT holder)
+    let nft_pda = next_account_info(accounts_iter)?; // 1: PositionNft PDA (writable)
+    let nft_mint = next_account_info(accounts_iter)?; // 2: NFT mint (writable)
+    let holder_ata = next_account_info(accounts_iter)?; // 3: Holder's ATA (writable)
+    let slab = next_account_info(accounts_iter)?; // 4: Slab (verify liquidation)
+    let _mint_auth = next_account_info(accounts_iter)?; // 5: Mint authority PDA
+    let _token_program = next_account_info(accounts_iter)?; // 6: Token-2022
+
+    if !holder.is_signer {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+
+    // ── Verify PDA state ──
+    let pda_data = nft_pda.try_borrow_data()?;
+    if pda_data.len() < POSITION_NFT_LEN {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    let nft_state = bytemuck::from_bytes::<PositionNft>(&pda_data[..POSITION_NFT_LEN]);
+    if nft_state.magic != POSITION_NFT_MAGIC {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    if nft_state.slab != slab.key.to_bytes() {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    if nft_state.nft_mint != nft_mint.key.to_bytes() {
+        msg!("EmergencyBurn rejected: nft_mint does not match PDA's recorded mint");
+        return Err(NftError::InvalidNftPda.into());
+    }
+    let user_idx = nft_state.user_idx;
+    drop(pda_data);
+
+    // ── Verify position is liquidated (position_basis_q == 0) ──
+    // EmergencyBurn is for positions that have been liquidated on-chain.
+    // BurnPositionNft requires size==0 && collateral==0 (fully closed).
+    // EmergencyBurn requires position_basis_q==0 (liquidated/flat, collateral may remain).
+    verify_slab_owner(slab)?;
+    {
+        let slab_data = slab.try_borrow_data()?;
+        let position = read_position(&slab_data, user_idx)?;
+
+        // Verify account_id matches
+        if position.account_id != nft_state.account_id {
+            msg!(
+                "EmergencyBurn rejected: account_id mismatch (stored={}, current={})",
+                nft_state.account_id,
+                position.account_id,
+            );
+            return Err(NftError::InvalidAccountId.into());
+        }
+
+        // Position must be flat (liquidated or closed) — position_basis_q == 0
+        if position.position_basis_q != 0 {
+            msg!(
+                "EmergencyBurn rejected: position is still open (position_basis_q={})",
+                position.position_basis_q,
+            );
+            return Err(NftError::PositionNotOpen.into());
+        }
+    }
+
+    // ── Verify holder owns the NFT ──
+    if *holder_ata.owner != token2022::TOKEN_2022_PROGRAM_ID {
+        return Err(NftError::NotNftHolder.into());
+    }
+    let ata_data = holder_ata.try_borrow_data()?;
+    if ata_data.len() < 165 {
+        return Err(NftError::NotNftHolder.into());
+    }
+    let amount = u64::from_le_bytes(ata_data[64..72].try_into().unwrap());
+    let ata_owner = Pubkey::new_from_array(ata_data[32..64].try_into().unwrap());
+    let ata_mint = Pubkey::new_from_array(ata_data[0..32].try_into().unwrap());
+    let ata_initialized = ata_data[108] == pinocchio_token::state::AccountState::Initialized as u8;
+    drop(ata_data);
+
+    if !ata_initialized || amount != 1 || ata_owner != *holder.key || ata_mint.to_bytes() != nft_state.nft_mint {
+        return Err(NftError::NotNftHolder.into());
+    }
+
+    // ── Burn the NFT ──
+    invoke(
+        &token2022::burn(holder_ata.key, nft_mint.key, holder.key, 1),
+        &[holder_ata.clone(), nft_mint.clone(), holder.clone()],
+    )?;
+
+    // ── Close the PDA (return rent to holder) ──
+    let dest_lamports = holder.lamports();
+    let pda_lamports = nft_pda.lamports();
+    **holder.try_borrow_mut_lamports()? = dest_lamports
+        .checked_add(pda_lamports)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
+    **nft_pda.try_borrow_mut_lamports()? = 0;
+
+    let mut pda_data = nft_pda.try_borrow_mut_data()?;
+    pda_data.fill(0);
+
+    msg!("PositionNft emergency burned: slab={}, idx={}", slab.key, user_idx);
     Ok(())
 }
 
