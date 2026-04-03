@@ -23,7 +23,7 @@ pub const POSITION_NFT_LEN: usize = core::mem::size_of::<PositionNft>();
 /// On-chain state for a Position NFT.
 ///
 /// Uses `[u8; 32]` for pubkey fields (Pubkey doesn't implement Pod/Zeroable).
-/// Layout: 208 bytes total (multiple of 16, required by i128 alignment).
+/// Layout: 216 bytes total (multiple of 8, required by i128 alignment).
 #[derive(Clone, Copy, Pod, Zeroable)]
 #[repr(C)]
 pub struct PositionNft {
@@ -57,12 +57,16 @@ pub struct PositionNft {
     /// Timestamp (unix seconds) when this NFT was minted.
     pub minted_at: i64, // 128..136
 
-    // ── Reserved (72 bytes — includes tail alignment for i128) ──
-    pub _reserved0: [u8; 64], // 136..200
-    pub _reserved1: [u8; 8],  // 200..208
+    // ── Slot reuse protection (8 bytes) ──
+    /// Account ID at mint time — monotonically increasing u64 unique per account.
+    /// Verified on burn/settle to detect if the slab slot was reallocated.
+    pub account_id: u64, // 136..144
+
+    // ── Reserved (72 bytes) ──
+    pub _reserved0: [u8; 72], // 144..216
 }
 
-const _: () = assert!(core::mem::size_of::<PositionNft>() == 208);
+const _: () = assert!(core::mem::size_of::<PositionNft>() == 216);
 
 impl PositionNft {
     /// Get the slab pubkey.

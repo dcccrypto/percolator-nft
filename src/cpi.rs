@@ -49,6 +49,12 @@ fn read_u16(data: &[u8], off: usize) -> u16 {
     u16::from_le_bytes(bytes)
 }
 
+/// Read a u32 from a byte slice at the given offset.
+fn read_u32(data: &[u8], off: usize) -> u32 {
+    let bytes: [u8; 4] = data[off..off + 4].try_into().unwrap();
+    u32::from_le_bytes(bytes)
+}
+
 /// Read an i128 from a byte slice at the given offset.
 fn read_i128(data: &[u8], off: usize) -> i128 {
     let bytes: [u8; 16] = data[off..off + 16].try_into().unwrap();
@@ -125,6 +131,8 @@ fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
 
 /// Position data read from a slab account.
 pub struct PositionData {
+    /// Account ID (at slab acct_off+0) — monotonically increasing, unique per account.
+    pub account_id: u64,
     /// Owner pubkey of this account slot (at slab acct_off+184).
     pub owner: Pubkey,
     /// Deposited margin (capital) in micro-units — lo-word of capital: U128 at acct_off+8.
@@ -137,6 +145,9 @@ pub struct PositionData {
     /// 1 = long (position_size ≥ 0), 0 = short (position_size < 0).
     /// Derived from the sign of position_size.I128 hi-word at acct_off+88.
     pub is_long: u8,
+    /// Account kind: 0 = User (trader), 1 = LP (liquidity provider).
+    /// Only User accounts should get NFTs.
+    pub kind: u32,
     /// Current global funding index (E18) from engine.
     pub global_funding_index_e18: i128,
     /// Byte offset to the engine block within slab data (layout-dependent).
@@ -161,8 +172,10 @@ pub struct PositionData {
 ///   owner: [u8;32]           →  +184 (32 bytes)
 ///   fee_credits: I128        →  +216 (16 bytes)
 ///   last_fee_slot: u64       →  +232 (8 bytes)
+const ACCT_ACCOUNT_ID_OFF: usize = 0; // account_id: u64 (unique per account, monotonically increasing)
 const ACCT_OWNER_OFF: usize = 184; // owner pubkey (32 bytes)
 const ACCT_COLLATERAL_OFF: usize = 8; // capital: U128 lo-word — deposited margin
+const ACCT_KIND_OFF: usize = 24; // kind: AccountKind (0=User, 1=LP) — u32 repr(C)
 const ACCT_POS_SIZE_LO_OFF: usize = 80; // position_size: I128 lo-word (absolute magnitude u64)
 const ACCT_POS_SIZE_HI_OFF: usize = 88; // position_size: I128 hi-word (negative hi-word → short)
 const ACCT_ENTRY_PRICE_OFF: usize = 96; // entry_price: u64
@@ -199,6 +212,9 @@ pub fn read_position(slab_data: &[u8], user_idx: u16) -> Result<PositionData, Pr
         return Err(NftError::SlabDataTooShort.into());
     }
 
+    // Read account_id first.
+    let account_id = read_u64(slab_data, acct_off + ACCT_ACCOUNT_ID_OFF);
+
     // Read owner pubkey.
     let owner = Pubkey::new_from_array(
         slab_data[acct_off + ACCT_OWNER_OFF..acct_off + ACCT_OWNER_OFF + 32]
@@ -207,6 +223,7 @@ pub fn read_position(slab_data: &[u8], user_idx: u16) -> Result<PositionData, Pr
     );
 
     let collateral = read_u64(slab_data, acct_off + ACCT_COLLATERAL_OFF);
+    let kind = read_u32(slab_data, acct_off + ACCT_KIND_OFF);
     // position_size is I128 = [lo: u64, hi: u64]. Absolute size = lo-word; sign = hi-word MSB.
     let size = read_u64(slab_data, acct_off + ACCT_POS_SIZE_LO_OFF);
     let pos_hi = read_u64(slab_data, acct_off + ACCT_POS_SIZE_HI_OFF);
@@ -222,8 +239,10 @@ pub fn read_position(slab_data: &[u8], user_idx: u16) -> Result<PositionData, Pr
     };
 
     Ok(PositionData {
+        account_id,
         owner,
         collateral,
+        kind,
         size,
         entry_price_e6,
         is_long,
