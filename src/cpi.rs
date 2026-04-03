@@ -131,6 +131,8 @@ fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
 
 /// Position data read from a slab account.
 pub struct PositionData {
+    /// Account ID (at slab acct_off+0) — monotonically increasing, unique per account.
+    pub account_id: u64,
     /// Owner pubkey of this account slot (at slab acct_off+184).
     pub owner: Pubkey,
     /// Deposited margin (capital) in micro-units — lo-word of capital: U128 at acct_off+8.
@@ -170,6 +172,7 @@ pub struct PositionData {
 ///   owner: [u8;32]           →  +184 (32 bytes)
 ///   fee_credits: I128        →  +216 (16 bytes)
 ///   last_fee_slot: u64       →  +232 (8 bytes)
+const ACCT_ACCOUNT_ID_OFF: usize = 0; // account_id: u64 (unique per account, monotonically increasing)
 const ACCT_OWNER_OFF: usize = 184; // owner pubkey (32 bytes)
 const ACCT_COLLATERAL_OFF: usize = 8; // capital: U128 lo-word — deposited margin
 const ACCT_KIND_OFF: usize = 24; // kind: AccountKind (0=User, 1=LP) — u32 repr(C)
@@ -209,6 +212,9 @@ pub fn read_position(slab_data: &[u8], user_idx: u16) -> Result<PositionData, Pr
         return Err(NftError::SlabDataTooShort.into());
     }
 
+    // Read account_id first.
+    let account_id = read_u64(slab_data, acct_off + ACCT_ACCOUNT_ID_OFF);
+
     // Read owner pubkey.
     let owner = Pubkey::new_from_array(
         slab_data[acct_off + ACCT_OWNER_OFF..acct_off + ACCT_OWNER_OFF + 32]
@@ -233,6 +239,7 @@ pub fn read_position(slab_data: &[u8], user_idx: u16) -> Result<PositionData, Pr
     };
 
     Ok(PositionData {
+        account_id,
         owner,
         collateral,
         kind,

@@ -36,6 +36,8 @@ pub enum NftError {
     PositionNotClosed = 14,
     /// MintPositionNft: account is an LP account, not a trading account.
     LpAccountNotAllowed = 15,
+    /// Position account_id mismatch — slot was reallocated to a different account.
+    InvalidAccountId = 16,
 }
 
 impl From<NftError> for ProgramError {

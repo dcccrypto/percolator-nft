@@ -166,6 +166,7 @@ fn process_mint_position_nft(
     nft_state.slab = slab.key.to_bytes();
     nft_state.user_idx = user_idx;
     nft_state.nft_mint = nft_mint.key.to_bytes();
+    nft_state.account_id = position.account_id;
     nft_state.entry_price_e6 = position.entry_price_e6;
     nft_state.position_size = position.size;
     nft_state.is_long = position.is_long;
@@ -324,6 +325,15 @@ fn process_burn_position_nft(_program_id: &Pubkey, accounts: &[AccountInfo]) -> 
     {
         let slab_data = slab.try_borrow_data()?;
         let position = read_position(&slab_data, user_idx)?;
+        // Verify account_id matches — if mismatch, the slot was reallocated to a different account
+        if position.account_id != nft_state.account_id {
+            msg!(
+                "Burn rejected: account_id mismatch (stored={}, current={})",
+                nft_state.account_id,
+                position.account_id,
+            );
+            return Err(NftError::InvalidAccountId.into());
+        }
         if position.size != 0 || position.collateral != 0 {
             msg!(
                 "Burn rejected: position is not fully closed (size={}, collateral={})",
@@ -467,6 +477,18 @@ fn process_settle_funding(_program_id: &Pubkey, accounts: &[AccountInfo]) -> Pro
 
     let slab_data = slab.try_borrow_data()?;
     let position = read_position(&slab_data, nft_state.user_idx)?;
+
+    // Verify account_id matches — if mismatch, the slot was reallocated to a different account
+    if position.account_id != nft_state.account_id {
+        msg!(
+            "SettleFunding rejected: account_id mismatch (stored={}, current={})",
+            nft_state.account_id,
+            position.account_id,
+        );
+        drop(slab_data);
+        return Err(NftError::InvalidAccountId.into());
+    }
+
     drop(slab_data);
 
     nft_state.last_funding_index_e18 = position.global_funding_index_e18;
