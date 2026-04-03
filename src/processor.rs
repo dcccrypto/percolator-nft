@@ -170,6 +170,7 @@ fn process_mint_position_nft(
     nft_state.entry_price_e6 = position.entry_price_e6;
     nft_state.position_size = position.size;
     nft_state.is_long = position.is_long;
+    nft_state.position_basis_q = position.position_basis_q;
     nft_state.last_funding_index_e18 = position.global_funding_index_e18;
     nft_state.minted_at = clock.unix_timestamp;
     drop(pda_data);

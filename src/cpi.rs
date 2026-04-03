@@ -138,6 +138,8 @@ pub struct PositionData {
     /// Deposited margin (capital) in micro-units — lo-word of capital: U128 at acct_off+8.
     /// This is the actual collateral at risk, NOT the notional trade size.
     pub collateral: u64,
+    /// Signed position size (I128) from slab — positive=long, negative=short, 0=flat.
+    pub position_basis_q: i128,
     /// Notional trade size — absolute value of position_size: I128 lo-word at acct_off+80.
     pub size: u64,
     /// Entry price (E6 fixed-point) at acct_off+96.
@@ -225,6 +227,8 @@ pub fn read_position(slab_data: &[u8], user_idx: u16) -> Result<PositionData, Pr
     let collateral = read_u64(slab_data, acct_off + ACCT_COLLATERAL_OFF);
     let kind = read_u32(slab_data, acct_off + ACCT_KIND_OFF);
     // position_size is I128 = [lo: u64, hi: u64]. Absolute size = lo-word; sign = hi-word MSB.
+    // position_basis_q is the full signed I128.
+    let position_basis_q = read_i128(slab_data, acct_off + ACCT_POS_SIZE_LO_OFF);
     let size = read_u64(slab_data, acct_off + ACCT_POS_SIZE_LO_OFF);
     let pos_hi = read_u64(slab_data, acct_off + ACCT_POS_SIZE_HI_OFF);
     let is_long: u8 = if (pos_hi as i64) < 0 { 0 } else { 1 };
@@ -242,6 +246,7 @@ pub fn read_position(slab_data: &[u8], user_idx: u16) -> Result<PositionData, Pr
         account_id,
         owner,
         collateral,
+        position_basis_q,
         kind,
         size,
         entry_price_e6,
