@@ -34,6 +34,8 @@ pub enum NftError {
     InvalidPercolatorProgram = 13,
     /// BurnPositionNft: position must be fully closed (size=0, collateral=0) before burn (GH#1869).
     PositionNotClosed = 14,
+    /// MintPositionNft: account is an LP account, not a trading account.
+    LpAccountNotAllowed = 15,
 }
 
 impl From<NftError> for ProgramError {

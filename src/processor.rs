@@ -99,6 +99,13 @@ fn process_mint_position_nft(
         return Err(NftError::PositionNotOpen.into());
     }
 
+    // ── Verify account is a User account, not an LP account ──
+    // kind=0: User (trader), kind=1: LP (liquidity provider)
+    // Only trading accounts should be wrapped as NFTs.
+    if position.kind != 0 {
+        return Err(NftError::LpAccountNotAllowed.into());
+    }
+
     // ── Verify PDA derivation ──
     let (expected_pda, bump) = position_nft_pda(slab.key, user_idx, program_id);
     if *nft_pda.key != expected_pda {
