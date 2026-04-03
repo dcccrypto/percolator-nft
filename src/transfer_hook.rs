@@ -202,6 +202,16 @@ pub fn process_execute(
     let slab_data = slab.try_borrow_data()?;
     let position = read_position(&slab_data, nft_state.user_idx)?;
 
+    // ── Verify account_id matches — slot reuse protection ──
+    if position.account_id != nft_state.account_id {
+        msg!(
+            "Transfer rejected: account_id mismatch (stored={}, current={})",
+            nft_state.account_id,
+            position.account_id,
+        );
+        return Err(NftError::InvalidAccountId.into());
+    }
+
     // ── GH#1 / GH#11: Verify position equity >= maintenance margin ──
     // Uses real PnL calculation. Collateral is read from slab acct_off+32
     // (the deposited margin field), NOT position.size (which is notional trade
