@@ -71,6 +71,24 @@ fn process_mint_position_nft(
     let ata_program = next_account_info(accounts_iter)?; // 7: ATA program
     let system_program = next_account_info(accounts_iter)?; // 8: System program
 
+    // ── PERC-9004: Verify well-known program account keys ──
+    // Without these checks, an attacker can substitute malicious programs for
+    // Token-2022, ATA, or System program. While the downstream CPIs would
+    // likely fail with the wrong program, checking upfront is defence-in-depth
+    // and produces clearer error messages.
+    if *token_program.key != token2022::TOKEN_2022_PROGRAM_ID {
+        msg!("MintPositionNft: invalid Token-2022 program key");
+        return Err(ProgramError::IncorrectProgramId);
+    }
+    if *ata_program.key != token2022::ATA_PROGRAM_ID {
+        msg!("MintPositionNft: invalid ATA program key");
+        return Err(ProgramError::IncorrectProgramId);
+    }
+    if *system_program.key != solana_program::system_program::id() {
+        msg!("MintPositionNft: invalid system program key");
+        return Err(ProgramError::IncorrectProgramId);
+    }
+
     // ── Verify signer ──
     if !owner.is_signer {
         return Err(ProgramError::MissingRequiredSignature);
