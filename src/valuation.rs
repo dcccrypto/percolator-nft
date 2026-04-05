@@ -29,10 +29,13 @@ fn read_u64(data: &[u8], off: usize) -> u64 {
     u64::from_le_bytes(bytes)
 }
 
-/// Read a u128 from slab data at offset.
-fn read_u128(data: &[u8], off: usize) -> u128 {
-    let bytes: [u8; 16] = data[off..off + 16].try_into().unwrap();
-    u128::from_le_bytes(bytes)
+/// Read a u64 from slab data at offset (checked).
+fn read_u64_checked(data: &[u8], off: usize) -> Option<u64> {
+    if off + 8 > data.len() {
+        return None;
+    }
+    let bytes: [u8; 8] = data[off..off + 8].try_into().ok()?;
+    Some(u64::from_le_bytes(bytes))
 }
 
 /// Position valuation data returned by GetPositionValue.
@@ -70,7 +73,7 @@ pub struct PositionValuation {
 // Engine layout offsets (from engine_off)
 const ENGINE_MARK_PRICE_OFF: usize = 0; // u64
 const ENGINE_ORACLE_PRICE_OFF: usize = 8; // u64
-const ENGINE_MAINT_MARGIN_OFF: usize = 96; // u128
+const ENGINE_MAINT_MARGIN_OFF: usize = 96; // u64 (bps)
 
 /// Process GetPositionValue instruction.
 ///
@@ -126,30 +129,51 @@ pub fn process_get_position_value(_program_id: &Pubkey, accounts: &[AccountInfo]
     // position is size = collateral × leverage.  Using size inflates equity by the leverage factor.
     let collateral = position.collateral;
 
-    // Compute unrealized PnL.
-    // PnL = size * (mark_price - entry_price) / entry_price [for longs]
-    // PnL = size * (entry_price - mark_price) / entry_price [for shorts]
+    // PERC-9018: Read maintenance_margin_bps as u64 (consistent with transfer_hook.rs).
+    // Previously the comment said u128 but transfer hook read it as u64. The engine
+    // field is maintenance_margin_bps: u64.
+    let maint_margin_bps: u64 = read_u64_checked(&slab_data, engine_off + ENGINE_MAINT_MARGIN_OFF)
+        .unwrap_or(0);
+
+    // PERC-9019: Compute PnL with checked arithmetic returning explicit errors
+    // instead of silently producing 0 via unwrap_or(0). A silently zeroed PnL
+    // can mislead lending protocols into over-valuing a position.
     let unrealized_pnl: i128 = if position.entry_price_e6 > 0 && mark_price_e6 > 0 {
         let size = position.size as i128;
         let mark = mark_price_e6 as i128;
         let entry = position.entry_price_e6 as i128;
 
-        if position.is_long == 1 {
-            size.checked_mul(mark.checked_sub(entry).unwrap_or(0))
-                .unwrap_or(0)
-                .checked_div(entry)
-                .unwrap_or(0)
+        let price_diff = if position.is_long == 1 {
+            mark.checked_sub(entry)
+                .ok_or(ProgramError::ArithmeticOverflow)?
         } else {
-            size.checked_mul(entry.checked_sub(mark).unwrap_or(0))
-                .unwrap_or(0)
-                .checked_div(entry)
-                .unwrap_or(0)
-        }
+            entry.checked_sub(mark)
+                .ok_or(ProgramError::ArithmeticOverflow)?
+        };
+        size.checked_mul(price_diff)
+            .ok_or(ProgramError::ArithmeticOverflow)?
+            .checked_div(entry)
+            .ok_or(ProgramError::ArithmeticOverflow)?
     } else {
         0
     };
 
-    let net_equity = collateral as i128 + unrealized_pnl;
+    let net_equity = (collateral as i128)
+        .checked_add(unrealized_pnl)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
+
+    // Compute maintenance margin requirement and liquidation distance.
+    let maintenance_margin = (position.size as u128)
+        .checked_mul(maint_margin_bps as u128)
+        .unwrap_or(0) / 10_000;
+    let liquidation_distance_bps: i64 = if net_equity > 0 {
+        let distance = net_equity
+            .checked_sub(maintenance_margin as i128)
+            .unwrap_or(0);
+        ((distance * 10_000) / net_equity) as i64
+    } else {
+        -10_000 // fully liquidatable
+    };
 
     // Funding delta since mint.
     let funding_delta_e18 = position
@@ -177,6 +201,11 @@ pub fn process_get_position_value(_program_id: &Pubkey, accounts: &[AccountInfo]
     msg!("POSITION_VALUE:unrealized_pnl={}", unrealized_pnl);
     msg!("POSITION_VALUE:collateral={}", collateral);
     msg!("POSITION_VALUE:net_equity={}", net_equity);
+    msg!("POSITION_VALUE:maintenance_margin={}", maintenance_margin);
+    msg!(
+        "POSITION_VALUE:liquidation_distance_bps={}",
+        liquidation_distance_bps
+    );
     msg!("POSITION_VALUE:funding_delta_e18={}", funding_delta_e18);
 
     Ok(())
