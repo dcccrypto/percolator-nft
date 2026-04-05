@@ -24,7 +24,7 @@ use solana_program::{
 use crate::{
     cpi::{read_position, verify_slab_owner, PERCOLATOR_DEVNET, PERCOLATOR_MAINNET},
     error::NftError,
-    state::{PositionNft, MINT_AUTHORITY_SEED, POSITION_NFT_LEN, POSITION_NFT_MAGIC},
+    state::{verify_pda_version, PositionNft, MINT_AUTHORITY_SEED, POSITION_NFT_LEN, POSITION_NFT_MAGIC},
 };
 
 // Maintenance margin bps offset within the engine block.
@@ -221,6 +221,7 @@ pub fn process_execute(
         old_funding = nft_state.last_funding_index_e18;
         // pda_data (immutable Ref) is dropped here at end of block
     }
+    verify_pda_version(nft_state)?;
 
     // ── Read position from slab (scoped borrow) ──
     let position = {
