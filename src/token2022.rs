@@ -85,6 +85,23 @@ pub fn burn(account: &Pubkey, mint: &Pubkey, owner: &Pubkey, amount: u64) -> Ins
     }
 }
 
+/// SPL Token CloseAccount instruction tag (same for Token and Token-2022).
+const IX_CLOSE_ACCOUNT: u8 = 9;
+
+/// Build CloseAccount instruction (Token-2022).
+/// PERC-9031/9032: Close a token account or mint, returning rent to destination.
+pub fn close_account(account: &Pubkey, destination: &Pubkey, owner: &Pubkey) -> Instruction {
+    Instruction {
+        program_id: TOKEN_2022_PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new(*account, false),
+            AccountMeta::new(*destination, false),
+            AccountMeta::new_readonly(*owner, true),
+        ],
+        data: vec![IX_CLOSE_ACCOUNT],
+    }
+}
+
 /// Derive the associated token account address for Token-2022.
 pub fn get_associated_token_address(wallet: &Pubkey, mint: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(

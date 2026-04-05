@@ -420,6 +420,13 @@ fn process_burn_position_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
         &[holder_ata.clone(), nft_mint.clone(), holder.clone()],
     )?;
 
+    // ── PERC-9032: Close the ATA (return rent to holder) ──
+    // Without this, the empty ATA remains open with ~0.002 SOL locked.
+    invoke(
+        &token2022::close_account(holder_ata.key, holder.key, holder.key),
+        &[holder_ata.clone(), holder.clone()],
+    )?;
+
     // ── Close the PDA (return rent to holder) ──
     let dest_lamports = holder.lamports();
     let pda_lamports = nft_pda.lamports();
