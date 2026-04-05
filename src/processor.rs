@@ -381,8 +381,12 @@ fn process_burn_position_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
     }
     let amount = u64::from_le_bytes(ata_data[64..72].try_into().unwrap());
     let ata_owner = Pubkey::new_from_array(ata_data[32..64].try_into().unwrap());
+    // PERC-9007: Read ATA mint field [0..32] and verify it matches the NFT mint.
+    // Without this, an attacker who holds ANY Token-2022 token with balance=1
+    // could pass that ATA instead of the real NFT ATA, passing the balance and
+    // owner checks while burning a completely different token.
+    let ata_mint = Pubkey::new_from_array(ata_data[0..32].try_into().unwrap());
     // Verify account is initialized using pinocchio-token AccountState discriminants.
-    // Use explicit match instead of From<u8> to avoid panic on invalid values.
     let ata_initialized = ata_data[108] == pinocchio_token::state::AccountState::Initialized as u8;
     drop(ata_data);
 
@@ -390,6 +394,10 @@ fn process_burn_position_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
         return Err(NftError::NotNftHolder.into());
     }
     if amount != 1 || ata_owner != *holder.key {
+        return Err(NftError::NotNftHolder.into());
+    }
+    if ata_mint != *nft_mint.key {
+        msg!("Burn rejected: ATA mint does not match NFT mint");
         return Err(NftError::NotNftHolder.into());
     }
 
