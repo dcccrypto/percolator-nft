@@ -148,6 +148,18 @@ fn process_mint_position_nft(
         return Err(NftError::InvalidMintAuthority.into());
     }
 
+    // ── PERC-9024: Verify owner_ata matches ATA derivation ──
+    // Re-derive the expected ATA from (owner, nft_mint) and verify it matches
+    // the passed owner_ata. Without this, an attacker can supply an arbitrary
+    // token account as owner_ata — the mint CPI would succeed into a different
+    // account, allowing them to claim ownership of the NFT without holding the
+    // canonical ATA.
+    let expected_ata = token2022::get_associated_token_address(owner.key, nft_mint.key);
+    if *owner_ata.key != expected_ata {
+        msg!("MintPositionNft: owner_ata does not match expected ATA derivation");
+        return Err(NftError::InvalidNftPda.into());
+    }
+
     // ── Create PositionNft PDA account ──
     let rent = Rent::get()?;
     let lamports = rent.minimum_balance(POSITION_NFT_LEN);
@@ -193,25 +205,13 @@ fn process_mint_position_nft(
     } else {
         "SHORT"
     };
-    let price_whole = position.entry_price_e6 / 1_000_000;
-    let price_frac = (position.entry_price_e6 % 1_000_000) / 100; // 4 decimal places
+    // Name: "Percolator Position — LONG/SHORT" (self-descriptive, immutable)
+    let nft_name = alloc::format!("Percolator Position \u{2014} {}", direction);
+    // PERC-9056: Use a constant symbol instead of direction-dependent format!().
+    // "PERC-POS" is stable across transfers; direction is encoded in nft_name.
+    const NFT_SYMBOL: &str = "PERC-POS";
 
-    // Name: "PERP LONG SOL @148.5000" (slab address if no symbol available)
-    let slab_short = &slab.key.to_string()[..8];
-    let nft_name = if price_whole > 0 {
-        alloc::format!(
-            "PERP {} {} @{}.{:04}",
-            direction,
-            slab_short,
-            price_whole,
-            price_frac
-        )
-    } else {
-        alloc::format!("PERP {} {}", direction, slab_short)
-    };
-    let nft_symbol = alloc::format!("PERP-{}", direction);
-
-    // URI: empty for now (no off-chain metadata server yet)
+    // URI: Empty — all position data is on-chain in PositionNft PDA
     let nft_uri = "";
 
     // ── Create Token-2022 mint account (with metadata + transfer hook extensions) ──
@@ -252,7 +252,7 @@ fn process_mint_position_nft(
             mint_auth.key, // update authority = mint authority PDA
             mint_auth.key, // mint authority signs
             &nft_name,
-            &nft_symbol,
+            NFT_SYMBOL,
             nft_uri,
         ),
         &[nft_mint.clone(), mint_auth.clone()],
@@ -306,6 +306,16 @@ fn process_burn_position_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
 
     if !holder.is_signer {
         return Err(ProgramError::MissingRequiredSignature);
+    }
+
+    // ── PERC-9003: Verify PDA is owned by this program ──
+    // Without this check an attacker can craft a 208-byte account (owned by
+    // any program) with matching magic/slab/mint bytes and pass it as nft_pda.
+    // The subsequent magic and slab checks alone are insufficient because any
+    // program can write those byte patterns into its own accounts.
+    if nft_pda.owner != program_id {
+        msg!("Burn rejected: PositionNft PDA not owned by this program");
+        return Err(ProgramError::IllegalOwner);
     }
 
     // ── PERC-9005: Verify Token-2022 program key ──
@@ -474,6 +484,12 @@ fn process_settle_funding(_program_id: &Pubkey, accounts: &[AccountInfo]) -> Pro
     // 72-byte account that satisfies the balance/owner/mint checks below.
     if *holder_ata.owner != token2022::TOKEN_2022_PROGRAM_ID {
         return Err(NftError::NotNftHolder.into());
+    }
+
+    // ── PERC-9003: Verify PDA is owned by this program ──
+    if nft_pda.owner != _program_id {
+        msg!("SettleFunding rejected: PositionNft PDA not owned by this program");
+        return Err(ProgramError::IllegalOwner);
     }
 
     verify_slab_owner(slab)?;

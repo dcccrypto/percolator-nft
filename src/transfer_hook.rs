@@ -86,44 +86,61 @@ fn is_position_healthy(
     is_long: u8,
     collateral: u64,
     engine_off: usize,
-) -> bool {
+) -> Result<bool, ProgramError> {
     if position_size == 0 {
-        return false; // No position = nothing to transfer.
+        return Ok(false); // No position = nothing to transfer.
+    }
+
+    // PERC-9009: Reject if entry_price_e6 is zero — this would make PnL=0
+    // regardless of mark price, potentially letting an unhealthy position
+    // pass the margin check if collateral alone covers maintenance.
+    if entry_price_e6 == 0 {
+        return Ok(false);
     }
 
     // Read mark price from engine block.
     let mark_price_e6 = match read_u64_at(slab_data, engine_off + ENGINE_MARK_PRICE_OFF) {
         Some(p) if p > 0 => p,
-        _ => return false, // Stale / zero price → reject.
+        _ => return Ok(false), // Stale / zero price → reject.
     };
 
     // Read maintenance_margin_bps from engine block.
-    let maint_margin_bps =
-        read_u64_at(slab_data, engine_off + ENGINE_MAINT_MARGIN_OFF).unwrap_or(500);
+    // PERC-9010: Reject instead of defaulting to 500bps if the read fails.
+    // An attacker could craft slab data truncated before offset 96 to force
+    // a lenient 500bps default instead of the actual (possibly higher) value.
+    let maint_margin_bps = read_u64_at(slab_data, engine_off + ENGINE_MAINT_MARGIN_OFF)
+        .ok_or(NftError::SlabDataTooShort)?;
 
-    // Unrealized PnL (signed, in collateral micro-units).
-    let unrealized_pnl: i128 = if entry_price_e6 > 0 {
-        let size = position_size as i128;
-        let mark = mark_price_e6 as i128;
-        let entry = entry_price_e6 as i128;
-        if is_long == 1 {
-            size.saturating_mul(mark.saturating_sub(entry)) / entry
-        } else {
-            size.saturating_mul(entry.saturating_sub(mark)) / entry
-        }
+    // PERC-9009: Use checked arithmetic instead of saturating to detect
+    // overflow. Saturating silently clamps to i128::MAX or 0, which can
+    // make an unhealthy position appear healthy (or vice versa).
+    let size = position_size as i128;
+    let mark = mark_price_e6 as i128;
+    let entry = entry_price_e6 as i128;
+
+    let price_diff = if is_long == 1 {
+        mark.checked_sub(entry).ok_or(ProgramError::ArithmeticOverflow)?
     } else {
-        0
+        entry.checked_sub(mark).ok_or(ProgramError::ArithmeticOverflow)?
     };
 
-    // Net equity = collateral + unrealized_pnl.
-    let net_equity: i128 = (collateral as i128).saturating_add(unrealized_pnl);
+    let unrealized_pnl = size
+        .checked_mul(price_diff)
+        .ok_or(ProgramError::ArithmeticOverflow)?
+        .checked_div(entry)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
 
-    // Maintenance margin requirement.
-    let maint_requirement: i128 =
-        (position_size as i128).saturating_mul(maint_margin_bps as i128) / 10_000;
+    let net_equity = (collateral as i128)
+        .checked_add(unrealized_pnl)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
 
-    // Healthy if equity >= maintenance margin (strictly above liquidation threshold).
-    net_equity >= maint_requirement
+    let maint_requirement = (position_size as i128)
+        .checked_mul(maint_margin_bps as i128)
+        .ok_or(ProgramError::ArithmeticOverflow)?
+        / 10_000;
+
+    // Healthy if equity >= maintenance margin.
+    Ok(net_equity >= maint_requirement)
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -164,7 +181,7 @@ pub fn process_execute(
     let accounts_iter = &mut accounts.iter();
 
     let _source_ata = next_account_info(accounts_iter)?; // 0: source token account
-    let _mint = next_account_info(accounts_iter)?; // 1: NFT mint
+    let mint = next_account_info(accounts_iter)?; // 1: NFT mint
     let _dest_ata = next_account_info(accounts_iter)?; // 2: destination token account
     let dest_wallet = next_account_info(accounts_iter)?; // 3: new owner wallet
     let _extra_metas = next_account_info(accounts_iter)?; // 4: ExtraAccountMetaList PDA
@@ -187,6 +204,17 @@ pub fn process_execute(
         return Err(NftError::InvalidPercolatorProgram.into());
     }
 
+    // ── PERC-9006: Validate mint authority PDA ──
+    // The mint_auth account is used as the CPI signer for TransferOwnershipCpi.
+    // Without verification an attacker could pass a different PDA or keypair,
+    // causing the CPI signature to fail (best case) or — if percolator-prog
+    // doesn't re-derive the PDA — allowing an unauthorized ownership transfer.
+    let (expected_mint_auth, _) = crate::state::mint_authority_pda(program_id);
+    if *mint_auth.key != expected_mint_auth {
+        msg!("Transfer rejected: invalid mint authority PDA");
+        return Err(NftError::InvalidMintAuthority.into());
+    }
+
     // ── Verify slab ownership (program ID check) ──
     verify_slab_owner(slab)?;
 
@@ -201,6 +229,14 @@ pub fn process_execute(
     // then perform the CPI and final PDA write in separate scopes.
     let (pda_user_idx, pda_slab_bytes, old_funding, new_funding);
     {
+        // ── PERC-9003: Verify PDA is owned by this program ──
+        // Without this an attacker can pass a crafted account with matching magic
+        // bytes but owned by a different program, bypassing all state checks.
+        if nft_pda.owner != program_id {
+            msg!("Transfer rejected: PositionNft PDA not owned by this program");
+            return Err(ProgramError::IllegalOwner);
+        }
+
         let pda_data = nft_pda.try_borrow_data()?;
         if pda_data.len() < POSITION_NFT_LEN {
             return Err(ProgramError::InvalidAccountData);
@@ -209,6 +245,7 @@ pub fn process_execute(
         if nft_state.magic != POSITION_NFT_MAGIC {
             return Err(ProgramError::InvalidAccountData);
         }
+        verify_pda_version(nft_state)?;
 
         // ── GH#2: Verify slab key matches the NFT PDA's recorded slab ──
         if nft_state.slab != slab.key.to_bytes() {
@@ -216,12 +253,19 @@ pub fn process_execute(
             return Err(ProgramError::InvalidAccountData);
         }
 
+        // ── PERC-9006: Verify mint account matches the PDA's recorded mint ──
+        // Without this check the hook could operate on a PDA that belongs to a
+        // different mint, allowing cross-mint state confusion.
+        if nft_state.nft_mint != mint.key.to_bytes() {
+            msg!("Transfer rejected: mint does not match NFT PDA nft_mint binding");
+            return Err(NftError::InvalidNftPda.into());
+        }
+
         pda_user_idx = nft_state.user_idx;
         pda_slab_bytes = nft_state.slab;
         old_funding = nft_state.last_funding_index_e18;
         // pda_data (immutable Ref) is dropped here at end of block
     }
-    verify_pda_version(nft_state)?;
 
     // ── Read position from slab (scoped borrow) ──
     let position = {
@@ -239,7 +283,7 @@ pub fn process_execute(
             pos.is_long,
             pos.collateral,
             pos.engine_off,
-        ) {
+        )? {
             msg!("Transfer rejected: position is below maintenance margin (liquidatable)");
             return Err(NftError::PositionInLiquidation.into());
         }
