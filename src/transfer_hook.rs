@@ -149,8 +149,18 @@ fn is_position_healthy(
 pub fn process_execute(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
-    _amount: u64,
+    amount: u64,
 ) -> ProgramResult {
+    // PERC-9036: Validate transfer amount is exactly 1.
+    // This is an NFT (decimals=0, supply=1). Token-2022 enforces supply
+    // constraints, but defense-in-depth: reject any amount != 1 to prevent
+    // unexpected behavior if Token-2022 ever changes semantics or if the
+    // hook is called directly (outside Token-2022 CPI).
+    if amount != 1 {
+        msg!("Transfer rejected: expected amount=1 for NFT, got {}", amount);
+        return Err(ProgramError::InvalidInstructionData);
+    }
+
     let accounts_iter = &mut accounts.iter();
 
     let _source_ata = next_account_info(accounts_iter)?; // 0: source token account
