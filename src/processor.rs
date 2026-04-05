@@ -290,7 +290,7 @@ fn process_mint_position_nft(
 // Tag 1: BurnPositionNft
 // ═══════════════════════════════════════════════════════════════
 
-fn process_burn_position_nft(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+fn process_burn_position_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     let accounts_iter = &mut accounts.iter();
 
     let holder = next_account_info(accounts_iter)?; // 0: signer (NFT holder)
@@ -298,11 +298,28 @@ fn process_burn_position_nft(_program_id: &Pubkey, accounts: &[AccountInfo]) -> 
     let nft_mint = next_account_info(accounts_iter)?; // 2: NFT mint (writable)
     let holder_ata = next_account_info(accounts_iter)?; // 3: Holder's ATA (writable)
     let slab = next_account_info(accounts_iter)?; // 4: Slab (verify)
-    let _mint_auth = next_account_info(accounts_iter)?; // 5: Mint authority PDA
-    let _token_program = next_account_info(accounts_iter)?; // 6: Token-2022
+    let mint_auth = next_account_info(accounts_iter)?; // 5: Mint authority PDA
+    let token_program = next_account_info(accounts_iter)?; // 6: Token-2022
 
     if !holder.is_signer {
         return Err(ProgramError::MissingRequiredSignature);
+    }
+
+    // ── PERC-9005: Verify Token-2022 program key ──
+    // The burn CPI instruction hardcodes TOKEN_2022_PROGRAM_ID, but the
+    // account_infos passed to invoke() must include the actual program.
+    // Without this check an attacker could pass a fake program that accepts
+    // the burn instruction but doesn't actually burn the token.
+    if *token_program.key != token2022::TOKEN_2022_PROGRAM_ID {
+        msg!("BurnPositionNft: invalid Token-2022 program key");
+        return Err(ProgramError::IncorrectProgramId);
+    }
+
+    // ── PERC-9005: Verify mint authority PDA ──
+    let (expected_mint_auth, _) = mint_authority_pda(program_id);
+    if *mint_auth.key != expected_mint_auth {
+        msg!("BurnPositionNft: invalid mint authority PDA");
+        return Err(NftError::InvalidMintAuthority.into());
     }
 
     // ── Verify PDA state ──
