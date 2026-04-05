@@ -335,14 +335,23 @@ fn process_burn_position_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
         return Err(ProgramError::InvalidAccountData);
     }
     // GH#3: Verify the nft_mint account matches the mint recorded in the PDA.
-    // Without this check a caller could supply a different mint (with a balance of 1)
-    // to pass the ATA balance check and burn/close the wrong NFT PDA.
     if nft_state.nft_mint != nft_mint.key.to_bytes() {
         msg!("Burn rejected: nft_mint does not match PDA's recorded mint");
         return Err(NftError::InvalidNftPda.into());
     }
     let user_idx = nft_state.user_idx;
     drop(pda_data);
+
+    // ── PERC-9008: Verify PDA address matches expected derivation ──
+    // The code checks magic, slab, and mint inside the PDA data, but never
+    // verifies that nft_pda.key is the canonical PDA for (slab, user_idx).
+    // Without this, any program-owned account with matching fields could be
+    // substituted. The derivation check is the definitive proof of identity.
+    let (expected_pda, _) = position_nft_pda(slab.key, user_idx, program_id);
+    if *nft_pda.key != expected_pda {
+        msg!("Burn rejected: PDA address does not match expected derivation");
+        return Err(NftError::InvalidNftPda.into());
+    }
 
     // GH#1869 (PERC-8222): Verify position is fully closed before burning the NFT.
     // Without this guard an open-position NFT can be burned, orphaning the position
