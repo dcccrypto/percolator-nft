@@ -23,14 +23,20 @@ const IX_MINT_TO: u8 = 7;
 const IX_BURN: u8 = 8;
 
 /// Build InitializeMint2 instruction (Token-2022).
-/// decimals=0, mint_authority=authority, freeze_authority=None.
+/// decimals=0, mint_authority=authority, freeze_authority=authority (same PDA).
+///
+/// PERC-9033: The freeze authority is set to the mint_authority PDA so that the
+/// program can emergency-freeze NFT token accounts if a vulnerability is
+/// discovered. Without a freeze authority, there is no way to pause transfers
+/// while a fix is deployed — a critical gap in incident response capability.
 pub fn initialize_mint2(mint: &Pubkey, authority: &Pubkey) -> Instruction {
-    // Layout: tag(1) + decimals(1) + mint_authority(32) + freeze_option(1) [+ freeze_authority(32)]
-    let mut data = Vec::with_capacity(35);
+    // Layout: tag(1) + decimals(1) + mint_authority(32) + freeze_option(1) + freeze_authority(32)
+    let mut data = Vec::with_capacity(67);
     data.push(IX_INITIALIZE_MINT2);
     data.push(0); // decimals = 0
     data.extend_from_slice(authority.as_ref()); // mint authority
-    data.push(0); // no freeze authority
+    data.push(1); // has freeze authority
+    data.extend_from_slice(authority.as_ref()); // freeze authority = same PDA
 
     Instruction {
         program_id: TOKEN_2022_PROGRAM_ID,
