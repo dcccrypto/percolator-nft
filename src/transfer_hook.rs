@@ -64,8 +64,14 @@ fn read_u64_at(data: &[u8], off: usize) -> Option<u64> {
 
 /// Check if a position has sufficient equity above maintenance margin.
 ///
-/// Equity = collateral + unrealized_pnl.
+/// Equity = collateral + unrealized_pnl + funding_delta.
 /// Maintenance requirement = size * maintenance_margin_bps / 10_000.
+///
+/// PERC-9050: The funding delta (accrued but unsettled funding) is now
+/// included in the equity calculation. Previously, equity was computed as
+/// `collateral + unrealized_pnl` without funding, which meant a position
+/// with large negative accrued funding could appear healthy and be
+/// transferred — the buyer would inherit the funding debt.
 ///
 /// This is a real margin check using the same formula as valuation.rs,
 /// not just a mark_price > 0 guard. Liquidatable positions are rejected.
@@ -77,6 +83,10 @@ fn read_u64_at(data: &[u8], off: usize) -> Option<u64> {
 /// - `is_long`: 1 for long, 0 for short
 /// - `collateral`: deposited collateral in micro-units
 /// - `engine_off`: byte offset to engine block (from `read_position()`)
+/// - `funding_delta_e18`: accrued funding since last settlement
+///   (global_funding_index_e18 - last_funding_index_e18).
+///   Positive = funding received, negative = funding owed.
+///   Scaled by E18; must be normalized by position size and price.
 ///
 /// Returns true if equity >= maintenance_margin (position is healthy).
 fn is_position_healthy(
@@ -86,6 +96,7 @@ fn is_position_healthy(
     is_long: u8,
     collateral: u64,
     engine_off: usize,
+    funding_delta_e18: i128,
 ) -> Result<bool, ProgramError> {
     if position_size == 0 {
         return Ok(false); // No position = nothing to transfer.
@@ -130,8 +141,33 @@ fn is_position_healthy(
         .checked_div(entry)
         .ok_or(ProgramError::ArithmeticOverflow)?;
 
+    // PERC-9050: Compute funding adjustment in collateral micro-units.
+    // funding_delta_e18 is the index delta (E18-scaled, per unit of position).
+    // Funding payment = position_size * funding_delta_e18 / 1e18.
+    // Sign convention: positive delta = funding received (adds to equity),
+    // negative delta = funding owed (subtracts from equity).
+    // For shorts the funding direction is inverted: if the funding index
+    // increases, longs pay shorts, so a short position receives funding
+    // when delta > 0. We apply the sign flip based on direction.
+    const E18: i128 = 1_000_000_000_000_000_000;
+    let raw_funding = size
+        .checked_mul(funding_delta_e18)
+        .ok_or(ProgramError::ArithmeticOverflow)?
+        .checked_div(E18)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
+    // For longs, positive funding_delta means longs pay → subtract.
+    // For shorts, positive funding_delta means shorts receive → add.
+    // Percolator convention: funding_delta > 0 means longs pay shorts.
+    let funding_adjustment = if is_long == 1 {
+        raw_funding.checked_neg().ok_or(ProgramError::ArithmeticOverflow)?
+    } else {
+        raw_funding
+    };
+
     let net_equity = (collateral as i128)
         .checked_add(unrealized_pnl)
+        .ok_or(ProgramError::ArithmeticOverflow)?
+        .checked_add(funding_adjustment)
         .ok_or(ProgramError::ArithmeticOverflow)?;
 
     let maint_requirement = (position_size as i128)
@@ -276,6 +312,14 @@ pub fn process_execute(
         // Uses real PnL calculation. Collateral is read from slab acct_off+32
         // (the deposited margin field), NOT position.size (which is notional trade
         // size and would inflate equity by the leverage factor).
+        //
+        // PERC-9050: Include unsettled funding delta in the health check.
+        // The funding settlement (PDA update) happens AFTER this check, so we
+        // must account for accrued funding here to prevent transferring positions
+        // that are unhealthy once funding is settled.
+        let funding_delta_e18 = pos.global_funding_index_e18
+            .checked_sub(old_funding)
+            .ok_or(ProgramError::ArithmeticOverflow)?;
         if !is_position_healthy(
             &slab_data,
             pos.size,
@@ -283,6 +327,7 @@ pub fn process_execute(
             pos.is_long,
             pos.collateral,
             pos.engine_off,
+            funding_delta_e18,
         )? {
             msg!("Transfer rejected: position is below maintenance margin (liquidatable)");
             return Err(NftError::PositionInLiquidation.into());
