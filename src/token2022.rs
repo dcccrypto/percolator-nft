@@ -194,6 +194,33 @@ pub fn initialize_transfer_hook(
 /// Size of TransferHook extension data (authority + program_id).
 pub const TRANSFER_HOOK_EXTENSION_SIZE: u64 = 4 + 64; // type(2) + len(2) + authority(32) + program_id(32)
 
+/// Size of MintCloseAuthority extension (TLV header + authority pubkey).
+pub const MINT_CLOSE_AUTHORITY_EXTENSION_SIZE: u64 = 4 + 32; // type(2) + len(2) + authority(32)
+
+/// Initialize MintCloseAuthority extension on a Token-2022 mint.
+/// Must be called BEFORE InitializeMint2.
+///
+/// This extension allows closing the mint account (reclaiming rent) when
+/// supply reaches 0. Without it, Token-2022 rejects CloseAccount on mints.
+///
+/// Instruction tag 25 = InitializeMintCloseAuthority.
+/// Data: tag(1) + option(1) + authority(32)
+pub fn initialize_mint_close_authority(
+    mint: &Pubkey,
+    close_authority: &Pubkey,
+) -> Instruction {
+    let mut data = Vec::with_capacity(34);
+    data.push(25); // InitializeMintCloseAuthority instruction tag
+    data.push(1);  // COption::Some
+    data.extend_from_slice(close_authority.as_ref());
+
+    Instruction {
+        program_id: TOKEN_2022_PROGRAM_ID,
+        accounts: vec![AccountMeta::new(*mint, false)],
+        data,
+    }
+}
+
 /// Build CreateAssociatedTokenAccount instruction for Token-2022.
 pub fn create_associated_token_account(
     payer: &Pubkey,
