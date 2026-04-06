@@ -19,12 +19,14 @@ use solana_program::{
     program::invoke_signed,
     program_error::ProgramError,
     pubkey::Pubkey,
+    sysvar::instructions as sysvar_instructions,
 };
 
 use crate::{
     cpi::{read_position, verify_slab_owner, PERCOLATOR_DEVNET, PERCOLATOR_MAINNET},
     error::NftError,
     state::{verify_pda_version, PositionNft, MINT_AUTHORITY_SEED, POSITION_NFT_LEN, POSITION_NFT_MAGIC},
+    token2022,
 };
 
 // Maintenance margin bps offset within the engine block.
@@ -161,6 +163,7 @@ fn is_position_healthy(
 ///   6. `[]`          Slab account
 ///   7. `[]`          Percolator program
 ///   8. `[]`          Mint authority PDA
+///   9. `[]`          Instructions sysvar (for CPI caller verification)
 ///
 /// Data: discriminator(8) + amount(8)
 pub fn process_execute(
@@ -180,17 +183,121 @@ pub fn process_execute(
 
     let accounts_iter = &mut accounts.iter();
 
-    let _source_ata = next_account_info(accounts_iter)?; // 0: source token account
+    let source_ata = next_account_info(accounts_iter)?; // 0: source token account
     let mint = next_account_info(accounts_iter)?; // 1: NFT mint
-    let _dest_ata = next_account_info(accounts_iter)?; // 2: destination token account
+    let dest_ata = next_account_info(accounts_iter)?; // 2: destination token account
     let dest_wallet = next_account_info(accounts_iter)?; // 3: new owner wallet
-    let _extra_metas = next_account_info(accounts_iter)?; // 4: ExtraAccountMetaList PDA
+    let extra_metas = next_account_info(accounts_iter)?; // 4: ExtraAccountMetaList PDA
 
     // Extra accounts
     let nft_pda = next_account_info(accounts_iter)?; // 5: PositionNft PDA (writable)
     let slab = next_account_info(accounts_iter)?; // 6: Slab account
     let percolator_prog = next_account_info(accounts_iter)?; // 7: Percolator program
     let mint_auth = next_account_info(accounts_iter)?; // 8: Mint authority PDA
+    let sysvar_ix = next_account_info(accounts_iter)?; // 9: Instructions sysvar
+
+    // ════════════════════════════════════════════════════════════════════
+    // SECURITY: Verify this Execute was invoked via CPI from Token-2022.
+    //
+    // Without this check, an attacker can call Execute directly with
+    // crafted accounts, stealing position ownership without moving the
+    // NFT token. We use the Instructions sysvar to introspect the call
+    // stack and confirm the outer instruction is a Token-2022
+    // Transfer/TransferChecked targeting our mint.
+    // ════════════════════════════════════════════════════════════════════
+
+    // 1. Verify the Instructions sysvar account key.
+    if *sysvar_ix.key != sysvar_instructions::id() {
+        msg!("Transfer rejected: account 9 is not the Instructions sysvar");
+        return Err(NftError::UnauthorizedDirectInvocation.into());
+    }
+
+    // 2. Validate the extra_metas PDA matches canonical derivation for this mint
+    //    AND is owned by this program. The key derivation check alone is not
+    //    sufficient — an attacker could compute the correct PDA address but pass
+    //    an account at that address that is uninitialized (owned by System program).
+    //    The owner check proves the PDA was actually created by this program
+    //    during InitializeExtraAccountMetas, which only happens via the
+    //    legitimate Token-2022 transfer hook setup flow.
+    let (expected_extra_metas, _) = extra_account_metas_pda(mint.key, program_id);
+    if *extra_metas.key != expected_extra_metas {
+        msg!("Transfer rejected: extra_metas PDA does not match expected derivation");
+        return Err(NftError::InvalidExtraAccountMetas.into());
+    }
+    if extra_metas.owner != program_id {
+        msg!("Transfer rejected: extra_metas PDA not owned by this program");
+        return Err(NftError::InvalidExtraAccountMetas.into());
+    }
+
+    // 3. Validate source token account (defense-in-depth).
+    //    Even with the sysvar check, validating the source ATA ensures the
+    //    account is a real Token-2022 token account for this mint with
+    //    sufficient balance. Token-2022 passes pre-transfer state, so
+    //    balance >= 1 proves the source genuinely holds the NFT.
+    if *source_ata.owner != token2022::TOKEN_2022_PROGRAM_ID {
+        msg!("Transfer rejected: source token account not owned by Token-2022");
+        return Err(NftError::InvalidTokenAccount.into());
+    }
+    {
+        let src_data = source_ata.try_borrow_data()?;
+        // Token-2022 account layout (same offsets as SPL Token):
+        //   [0..32]  mint (Pubkey)
+        //   [64..72] amount (u64 LE)
+        //   [108]    state (u8: 0=uninit, 1=initialized, 2=frozen)
+        if src_data.len() < 165 {
+            msg!("Transfer rejected: source token account data too short");
+            return Err(NftError::InvalidTokenAccount.into());
+        }
+        let src_mint = Pubkey::new_from_array(src_data[0..32].try_into().unwrap());
+        let src_amount = u64::from_le_bytes(src_data[64..72].try_into().unwrap());
+        let src_initialized =
+            src_data[108] == pinocchio_token::state::AccountState::Initialized as u8;
+        if !src_initialized {
+            msg!("Transfer rejected: source token account not initialized");
+            return Err(NftError::InvalidTokenAccount.into());
+        }
+        if src_mint != *mint.key {
+            msg!("Transfer rejected: source token account mint mismatch");
+            return Err(NftError::InvalidTokenAccount.into());
+        }
+        if src_amount < amount {
+            msg!("Transfer rejected: source balance insufficient");
+            return Err(NftError::InvalidTokenAccount.into());
+        }
+    }
+
+    // 4. Validate destination token account.
+    if *dest_ata.owner != token2022::TOKEN_2022_PROGRAM_ID {
+        msg!("Transfer rejected: dest token account not owned by Token-2022");
+        return Err(NftError::InvalidTokenAccount.into());
+    }
+    {
+        let dst_data = dest_ata.try_borrow_data()?;
+        if dst_data.len() < 165 {
+            msg!("Transfer rejected: dest token account data too short");
+            return Err(NftError::InvalidTokenAccount.into());
+        }
+        let dst_mint = Pubkey::new_from_array(dst_data[0..32].try_into().unwrap());
+        let dst_initialized =
+            dst_data[108] == pinocchio_token::state::AccountState::Initialized as u8;
+        if !dst_initialized {
+            msg!("Transfer rejected: dest token account not initialized");
+            return Err(NftError::InvalidTokenAccount.into());
+        }
+        if dst_mint != *mint.key {
+            msg!("Transfer rejected: dest token account mint mismatch");
+            return Err(NftError::InvalidTokenAccount.into());
+        }
+    }
+
+    // 5. Use the Instructions sysvar to verify CPI caller is Token-2022.
+    //    get_processed_sibling_instruction is not what we need — we need the
+    //    *outer* (parent) instruction that CPI'd into us. On Solana, when
+    //    Token-2022 calls our hook via CPI, the current instruction index
+    //    points to Token-2022's Transfer/TransferChecked instruction in the
+    //    transaction's top-level instruction list. We load that instruction
+    //    and verify its program_id is Token-2022.
+    verify_cpi_caller_is_token2022(sysvar_ix, mint.key)?;
 
     // ── GH#1687: Validate percolator_prog key against known constants ──
     // Prevents an attacker from supplying a malicious program as account[7].
@@ -355,6 +462,99 @@ pub fn process_execute(
     );
 
     Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════════
+// CPI caller verification — ensure Execute is called via Token-2022
+// ═══════════════════════════════════════════════════════════════
+
+/// SPL Token Transfer instruction tag.
+const TOKEN_IX_TRANSFER: u8 = 3;
+/// SPL Token TransferChecked instruction tag.
+const TOKEN_IX_TRANSFER_CHECKED: u8 = 12;
+
+/// Verify that the current instruction was invoked via CPI from the Token-2022
+/// program, and that the outer instruction is a Transfer or TransferChecked
+/// targeting the expected mint.
+///
+/// This is the standard defense used by SPL TransferHook reference
+/// implementations. It prevents direct invocation of the Execute handler.
+///
+/// How it works:
+/// - On Solana, when program A CPI-calls program B, program B's instruction
+///   still runs in the context of program A's top-level instruction index.
+/// - We use `load_current_index_checked` to find which top-level instruction
+///   is currently executing, then `load_instruction_at_checked` to read it.
+/// - If we were invoked via CPI from Token-2022, the top-level instruction
+///   will be Token-2022's Transfer/TransferChecked.
+/// - If we were invoked directly (not via CPI), the top-level instruction
+///   will be our own program — which we reject.
+fn verify_cpi_caller_is_token2022(
+    sysvar_ix: &AccountInfo,
+    expected_mint: &Pubkey,
+) -> Result<(), ProgramError> {
+    // Load the index of the currently executing top-level instruction.
+    let current_ix_idx = sysvar_instructions::load_current_index_checked(sysvar_ix)?;
+
+    // Load the top-level instruction at that index.
+    let current_ix =
+        sysvar_instructions::load_instruction_at_checked(current_ix_idx as usize, sysvar_ix)?;
+
+    // The outer instruction must be from Token-2022.
+    if current_ix.program_id != token2022::TOKEN_2022_PROGRAM_ID {
+        msg!(
+            "Transfer rejected: outer instruction program {} is not Token-2022",
+            current_ix.program_id
+        );
+        return Err(NftError::UnauthorizedDirectInvocation.into());
+    }
+
+    // Verify the outer instruction is Transfer (tag 3) or TransferChecked (tag 12).
+    // Both are valid Token-2022 instructions that trigger the transfer hook.
+    if current_ix.data.is_empty() {
+        msg!("Transfer rejected: Token-2022 instruction data is empty");
+        return Err(NftError::UnauthorizedDirectInvocation.into());
+    }
+
+    let ix_tag = current_ix.data[0];
+    match ix_tag {
+        TOKEN_IX_TRANSFER => {
+            // Transfer: tag(1) + amount(8)
+            // Accounts: [source, dest, authority]
+            // The mint is not directly in the instruction data for Transfer,
+            // but Token-2022 resolves it internally. We still validated that
+            // the outer program is Token-2022 and the instruction is a Transfer,
+            // which is sufficient — Token-2022 itself ensures the hook is only
+            // called for the correct mint via the TransferHook extension.
+            Ok(())
+        }
+        TOKEN_IX_TRANSFER_CHECKED => {
+            // TransferChecked: tag(1) + amount(8) + decimals(1)
+            // Accounts: [source, mint, dest, authority]
+            // Verify the mint account in the instruction matches our expected mint.
+            if current_ix.accounts.len() < 2 {
+                msg!("Transfer rejected: TransferChecked has insufficient accounts");
+                return Err(NftError::UnauthorizedDirectInvocation.into());
+            }
+            let ix_mint = &current_ix.accounts[1].pubkey;
+            if ix_mint != expected_mint {
+                msg!(
+                    "Transfer rejected: TransferChecked mint {} does not match expected {}",
+                    ix_mint,
+                    expected_mint
+                );
+                return Err(NftError::UnauthorizedDirectInvocation.into());
+            }
+            Ok(())
+        }
+        _ => {
+            msg!(
+                "Transfer rejected: Token-2022 instruction tag {} is not Transfer or TransferChecked",
+                ix_tag
+            );
+            Err(NftError::UnauthorizedDirectInvocation.into())
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
