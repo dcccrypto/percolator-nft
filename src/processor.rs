@@ -280,6 +280,16 @@ fn process_mint_position_nft(
         &[mint_auth_seeds],
     )?;
 
+    // ── PERC-9058: Revoke mint authority (supply=1 is now immutable) ──
+    // Standard NFT pattern: after minting exactly 1 token, set the mint
+    // authority to None so no additional tokens can ever be minted for this
+    // mint, regardless of any future program logic changes.
+    invoke_signed(
+        &token2022::set_mint_authority_none(nft_mint.key, mint_auth.key),
+        &[nft_mint.clone(), mint_auth.clone()],
+        &[mint_auth_seeds],
+    )?;
+
     msg!(
         "PositionNft minted: slab={}, idx={}, mint={}",
         slab.key,

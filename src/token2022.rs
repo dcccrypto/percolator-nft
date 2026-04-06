@@ -85,6 +85,34 @@ pub fn burn(account: &Pubkey, mint: &Pubkey, owner: &Pubkey, amount: u64) -> Ins
     }
 }
 
+/// SPL Token SetAuthority instruction tag (same for Token and Token-2022).
+const IX_SET_AUTHORITY: u8 = 6;
+
+/// Build SetAuthority instruction to remove the mint authority (set to None).
+///
+/// This is the standard NFT pattern: after minting supply=1, revoke the mint
+/// authority so no additional tokens can ever be minted for this mint.
+///
+/// Data layout: tag(1) + authority_type(1) + new_authority_option(1)
+///   authority_type 0 = MintTokens
+///   new_authority_option 0 = None (no new authority)
+pub fn set_mint_authority_none(mint: &Pubkey, current_authority: &Pubkey) -> Instruction {
+    let data = vec![
+        IX_SET_AUTHORITY,
+        0, // authority_type = MintTokens
+        0, // COption::None — no new authority
+    ];
+
+    Instruction {
+        program_id: TOKEN_2022_PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new(*mint, false),
+            AccountMeta::new_readonly(*current_authority, true),
+        ],
+        data,
+    }
+}
+
 /// SPL Token CloseAccount instruction tag (same for Token and Token-2022).
 const IX_CLOSE_ACCOUNT: u8 = 9;
 
