@@ -264,6 +264,20 @@ pub fn process_execute(
         pda_user_idx = nft_state.user_idx;
         pda_slab_bytes = nft_state.slab;
         old_funding = nft_state.last_funding_index_e18;
+
+        // ── PERC-9056: Verify PDA address matches expected derivation ──
+        // Consistency with Burn (PERC-9008). Without this, any program-owned
+        // account with matching magic/slab/mint fields could be substituted.
+        let (expected_pda, _) = crate::state::position_nft_pda(
+            &Pubkey::new_from_array(nft_state.slab),
+            pda_user_idx,
+            program_id,
+        );
+        if *nft_pda.key != expected_pda {
+            msg!("Transfer rejected: PDA address does not match expected derivation");
+            return Err(NftError::InvalidNftPda.into());
+        }
+
         // pda_data (immutable Ref) is dropped here at end of block
     }
 

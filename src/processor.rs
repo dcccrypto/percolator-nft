@@ -507,6 +507,16 @@ fn process_settle_funding(_program_id: &Pubkey, accounts: &[AccountInfo]) -> Pro
         return Err(ProgramError::InvalidAccountData);
     }
 
+    // ── PERC-9056: Verify PDA address matches expected derivation ──
+    // Consistency with Mint (line 120) and Burn (line 364, PERC-9008).
+    // Without this, any program-owned account with matching magic/slab fields
+    // could be substituted, allowing funding state manipulation.
+    let (expected_pda, _) = position_nft_pda(slab.key, nft_state.user_idx, _program_id);
+    if *nft_pda.key != expected_pda {
+        msg!("SettleFunding rejected: PDA address does not match expected derivation");
+        return Err(NftError::InvalidNftPda.into());
+    }
+
     // ── Verify holder owns the NFT (ATA balance = 1, owner = holder, state = initialized) ──
     // Token-2022 account layout (165 bytes, same offsets as SPL Token):
     //   [0..32]  mint (Pubkey)
