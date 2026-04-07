@@ -259,6 +259,16 @@ fn process_mint_position_nft(
         &[mint_auth_seeds],
     )?;
 
+    // ── PERC-9024: Verify owner_ata matches expected ATA derivation ──
+    // Without this, a caller can pass an arbitrary account as owner_ata.
+    // The ATA program CPI would create the correct ATA anyway, but if the
+    // passed account doesn't match, the mint CPI could target the wrong account.
+    let expected_ata = token2022::get_associated_token_address(owner.key, nft_mint.key);
+    if *owner_ata.key != expected_ata {
+        msg!("MintPositionNft: owner_ata does not match expected ATA derivation");
+        return Err(ProgramError::InvalidSeeds);
+    }
+
     // ── Create ATA for owner ──
     invoke(
         &token2022::create_associated_token_account(owner.key, owner.key, nft_mint.key),
