@@ -49,6 +49,12 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
 
 /// Token-2022 Mint account base size (without extensions).
 const MINT_BASE_SIZE: u64 = 82;
+/// PERC-9057: AccountType discriminator byte between base Mint data and TLV extensions.
+/// Token-2022 writes this 1-byte discriminator (value 1 for Mint) at offset 82.
+/// Previously omitted — worked because METADATA_MAX_LEN was a gross overestimate,
+/// absorbing the 1-byte shortfall. Without this, tightening METADATA_MAX_LEN to
+/// actual usage would cause MintPositionNft to fail.
+const ACCOUNT_TYPE_SIZE: u64 = 1;
 /// Type/length header for metadata extension.
 const METADATA_EXTENSION_HEADER: u64 = 4; // type(2) + length(2)
 /// Rough upper bound for metadata content (name + symbol + uri + fields).
@@ -216,6 +222,7 @@ fn process_mint_position_nft(
 
     // ── Create Token-2022 mint account (with metadata + transfer hook extensions) ──
     let mint_space = MINT_BASE_SIZE
+        + ACCOUNT_TYPE_SIZE
         + METADATA_EXTENSION_HEADER
         + METADATA_MAX_LEN
         + token2022::TRANSFER_HOOK_EXTENSION_SIZE;
