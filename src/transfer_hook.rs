@@ -88,7 +88,12 @@ fn is_position_healthy(
     engine_off: usize,
 ) -> Result<bool, ProgramError> {
     if position_size == 0 {
-        return Ok(false); // No position = nothing to transfer.
+        // PERC-9061: A closed position (size=0) has zero exposure and cannot
+        // be liquidated. Return healthy so the transfer hook proceeds —
+        // the new holder may need to withdraw remaining collateral or burn
+        // the NFT. The margin check below is meaningless when size=0
+        // (maintenance requirement = size * bps / 10000 = 0).
+        return Ok(true);
     }
 
     // PERC-9009: Reject if entry_price_e6 is zero — this would make PnL=0
@@ -271,6 +276,23 @@ pub fn process_execute(
     let position = {
         let slab_data = slab.try_borrow_data()?;
         let pos = read_position(&slab_data, pda_user_idx)?;
+
+        // ── PERC-9061: Closed-position fast path ──
+        // When size==0 the position has been fully closed on Percolator.
+        // Percolator zeroes entry_price_e6 on close, so the PERC-9060 snapshot
+        // check (if present) would always fail. There is also no margin to
+        // check, no funding to settle, and no slab owner to update. Skip all
+        // downstream processing and allow the transfer so the NFT can
+        // eventually be burned once collateral is withdrawn.
+        if pos.size == 0 {
+            msg!(
+                "Position closed (size=0) — transfer allowed: slab={}, idx={}, new_owner={}",
+                Pubkey::new_from_array(pda_slab_bytes),
+                pda_user_idx,
+                dest_wallet.key
+            );
+            return Ok(());
+        }
 
         // ── GH#1 / GH#11: Verify position equity >= maintenance margin ──
         // Uses real PnL calculation. Collateral is read from slab acct_off+32
