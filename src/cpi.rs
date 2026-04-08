@@ -88,6 +88,7 @@ struct SlabLayout {
 
 /// V0 layout constants (deployed devnet).
 const V0_HEADER: usize = 72;
+#[allow(dead_code)]
 const V0_CONFIG: usize = 408;
 const V0_ENGINE_OFF: usize = 480; // align_up(72 + 408, 8)
 const V0_ACCOUNT_SIZE: usize = 240;
@@ -108,7 +109,7 @@ fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
     // SLAB_MAGIC was defined but never checked, allowing any Percolator-owned
     // account (e.g. a config account) that happens to match the size heuristic
     // to be parsed as a slab, reading garbage position data.
-    let magic = read_u64(data, 0);
+    let magic = read_u64(data, 0)?;
     if magic != SLAB_MAGIC {
         return Err(NftError::UnrecognizedSlabLayout.into());
     }
@@ -120,7 +121,7 @@ fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
     }
 
     // Try V0 first (most common on devnet).
-    let v0_bitmap_bytes = (max_accounts + 7) / 8;
+    let v0_bitmap_bytes = max_accounts.div_ceil(8);
     let v0_accounts_off = V0_BITMAP_OFF + v0_bitmap_bytes;
     let v0_total = v0_accounts_off + max_accounts * V0_ACCOUNT_SIZE;
 
@@ -140,7 +141,7 @@ fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
     }
 
     // Try V1D.
-    let v1d_bitmap_bytes = (max_accounts + 7) / 8;
+    let v1d_bitmap_bytes = max_accounts.div_ceil(8);
     let v1d_accounts_off = V1D_BITMAP_OFF + v1d_bitmap_bytes;
     let v1d_total = v1d_accounts_off + max_accounts * V1D_ACCOUNT_SIZE;
 
@@ -161,6 +162,7 @@ fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
 // ═══════════════════════════════════════════════════════════════
 
 /// Position data read from a slab account.
+#[derive(Debug)]
 pub struct PositionData {
     /// Account ID (at slab acct_off+0) — monotonically increasing, unique per account.
     pub account_id: u64,
@@ -237,7 +239,7 @@ pub fn read_position(slab_data: &[u8], user_idx: u16) -> Result<PositionData, Pr
         return Err(NftError::UserIndexOutOfRange.into());
     }
 
-    let accounts_off = layout.bitmap_off + (layout.max_accounts + 7) / 8;
+    let accounts_off = layout.bitmap_off + layout.max_accounts.div_ceil(8);
     let acct_off = accounts_off + idx * layout.account_size;
     let acct_end = acct_off + layout.account_size;
 
@@ -246,7 +248,7 @@ pub fn read_position(slab_data: &[u8], user_idx: u16) -> Result<PositionData, Pr
     }
 
     // Read account_id first.
-    let account_id = read_u64(slab_data, acct_off + ACCT_ACCOUNT_ID_OFF);
+    let account_id = read_u64(slab_data, acct_off + ACCT_ACCOUNT_ID_OFF)?;
 
     // Read owner pubkey.
     let owner = Pubkey::new_from_array(
@@ -282,7 +284,7 @@ pub fn read_position(slab_data: &[u8], user_idx: u16) -> Result<PositionData, Pr
         return Err(ProgramError::ArithmeticOverflow);
     }
     // position_basis_q is the full signed I128 (for EmergencyBurn: check == 0 means flat).
-    let position_basis_q = read_i128(slab_data, acct_off + ACCT_POS_SIZE_LO_OFF);
+    let position_basis_q = read_i128(slab_data, acct_off + ACCT_POS_SIZE_LO_OFF)?;
     let entry_price_e6 = read_u64(slab_data, acct_off + ACCT_ENTRY_PRICE_OFF)?;
 
     // PERC-9060: Propagate error instead of silently defaulting to 0.

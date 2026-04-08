@@ -108,7 +108,7 @@ impl NftInstruction {
         // Check for TransferHook Execute discriminator first (8 bytes).
         if data.len() >= 16 {
             let disc = &data[..8];
-            if disc == &crate::transfer_hook::EXECUTE_DISCRIMINATOR {
+            if disc == crate::transfer_hook::EXECUTE_DISCRIMINATOR {
                 let amount = u64::from_le_bytes(data[8..16].try_into().unwrap());
                 return Ok(NftInstruction::ExecuteTransferHook { amount });
             }

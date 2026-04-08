@@ -375,7 +375,7 @@ pub fn process_execute(
     //
     // Strategy: read everything we need into local variables, drop borrows,
     // then perform the CPI and final PDA write in separate scopes.
-    let (pda_user_idx, pda_slab_bytes, old_funding, new_funding, pda_entry_price_e6, pda_is_long);
+    let (pda_user_idx, pda_slab_bytes, old_funding, new_funding, pda_entry_price_e6, pda_is_long, pda_account_id);
     {
         // ── PERC-9003: Verify PDA is owned by this program ──
         // Without this an attacker can pass a crafted account with matching magic
@@ -414,6 +414,7 @@ pub fn process_execute(
         old_funding = nft_state.last_funding_index_e18;
         pda_entry_price_e6 = nft_state.entry_price_e6;
         pda_is_long = nft_state.is_long;
+        pda_account_id = nft_state.account_id;
 
         // ── PERC-9056: Verify PDA address matches expected derivation ──
         // Consistency with Burn (PERC-9008). Without this, any program-owned
@@ -455,10 +456,10 @@ pub fn process_execute(
         }
 
         // ── Verify account_id matches — slot reuse protection (primary) ──
-        if pos.account_id != nft_state.account_id {
+        if pos.account_id != pda_account_id {
             msg!(
                 "Transfer rejected: account_id mismatch (stored={}, current={})",
-                nft_state.account_id,
+                pda_account_id,
                 pos.account_id,
             );
             return Err(NftError::InvalidAccountId.into());

@@ -65,11 +65,13 @@ pub struct PositionNft {
     /// Verified on burn/settle to detect if the slab slot was reallocated.
     pub account_id: u64, // 152..160
 
-    // ── Reserved (56 bytes) ──
-    pub _reserved0: [u8; 56], // 160..216
+    // ── Reserved (48 bytes, split for bytemuck Pod compatibility) ──
+    // Total struct size = 208 bytes (multiple of 16, required by i128 Pod alignment).
+    pub _reserved0: [u8; 32], // 160..192
+    pub _reserved1: [u8; 16], // 192..208
 }
 
-const _: () = assert!(core::mem::size_of::<PositionNft>() == 216);
+const _: () = assert!(core::mem::size_of::<PositionNft>() == 208);
 
 impl PositionNft {
     /// Get the slab pubkey.

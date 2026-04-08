@@ -66,6 +66,7 @@ pub struct PositionValuation {
 
 // Engine layout offsets (from engine_off)
 const ENGINE_MARK_PRICE_OFF: usize = 0; // u64
+#[allow(dead_code)]
 const ENGINE_ORACLE_PRICE_OFF: usize = 8; // u64
 const ENGINE_MAINT_MARGIN_OFF: usize = 96; // u64 (bps)
 

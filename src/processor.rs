@@ -257,14 +257,14 @@ fn process_mint_position_nft(
     // Self-referencing: metadata_address = mint itself (embedded metadata).
     invoke(
         &token2022::initialize_metadata_pointer(nft_mint.key, mint_auth.key, nft_mint.key),
-        &[nft_mint.clone()],
+        std::slice::from_ref(nft_mint),
     )?;
 
     // Initialize TransferHook extension BEFORE InitializeMint2.
     // Our program is the transfer hook — Token-2022 will call us on every transfer.
     invoke(
         &token2022::initialize_transfer_hook(nft_mint.key, mint_auth.key, program_id),
-        &[nft_mint.clone()],
+        std::slice::from_ref(nft_mint),
     )?;
 
     // PERC-9060: Initialize MintCloseAuthority extension BEFORE InitializeMint2.
@@ -272,13 +272,13 @@ fn process_mint_position_nft(
     // Without this extension, Token-2022 rejects CloseAccount on mint accounts.
     invoke(
         &token2022::initialize_mint_close_authority(nft_mint.key, mint_auth.key),
-        &[nft_mint.clone()],
+        std::slice::from_ref(nft_mint),
     )?;
 
     // InitializeMint2 (decimals=0, authority=mint_auth PDA, no freeze)
     invoke(
         &token2022::initialize_mint2(nft_mint.key, mint_auth.key),
-        &[nft_mint.clone()],
+        std::slice::from_ref(nft_mint),
     )?;
 
     // ── Initialize metadata extension ──
@@ -411,6 +411,8 @@ fn process_burn_position_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
         return Err(NftError::InvalidNftPda.into());
     }
     let user_idx = nft_state.user_idx;
+    let nft_account_id = nft_state.account_id;
+    let _ = nft_state;
     drop(pda_data);
 
     // ── PERC-9008: Verify PDA address matches expected derivation ──
@@ -444,10 +446,10 @@ fn process_burn_position_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
         let slab_data = slab.try_borrow_data()?;
         let position = read_position(&slab_data, user_idx)?;
         // Verify account_id matches — if mismatch, the slot was reallocated to a different account
-        if position.account_id != nft_state.account_id {
+        if position.account_id != nft_account_id {
             msg!(
                 "Burn rejected: account_id mismatch (stored={}, current={})",
-                nft_state.account_id,
+                nft_account_id,
                 position.account_id,
             );
             return Err(NftError::InvalidAccountId.into());
@@ -561,23 +563,25 @@ fn process_emergency_burn(_program_id: &Pubkey, accounts: &[AccountInfo]) -> Pro
     }
 
     // ── Verify PDA state ──
-    let pda_data = nft_pda.try_borrow_data()?;
-    if pda_data.len() < POSITION_NFT_LEN {
-        return Err(ProgramError::InvalidAccountData);
-    }
-    let nft_state = bytemuck::from_bytes::<PositionNft>(&pda_data[..POSITION_NFT_LEN]);
-    if nft_state.magic != POSITION_NFT_MAGIC {
-        return Err(ProgramError::InvalidAccountData);
-    }
-    if nft_state.slab != slab.key.to_bytes() {
-        return Err(ProgramError::InvalidAccountData);
-    }
-    if nft_state.nft_mint != nft_mint.key.to_bytes() {
-        msg!("EmergencyBurn rejected: nft_mint does not match PDA's recorded mint");
-        return Err(NftError::InvalidNftPda.into());
-    }
-    let user_idx = nft_state.user_idx;
-    drop(pda_data);
+    let (user_idx, nft_account_id_em, nft_mint_bytes_em) = {
+        let pda_data = nft_pda.try_borrow_data()?;
+        if pda_data.len() < POSITION_NFT_LEN {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        let nft_state = bytemuck::from_bytes::<PositionNft>(&pda_data[..POSITION_NFT_LEN]);
+        if nft_state.magic != POSITION_NFT_MAGIC {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        if nft_state.slab != slab.key.to_bytes() {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        if nft_state.nft_mint != nft_mint.key.to_bytes() {
+            msg!("EmergencyBurn rejected: nft_mint does not match PDA's recorded mint");
+            return Err(NftError::InvalidNftPda.into());
+        }
+        (nft_state.user_idx, nft_state.account_id, nft_state.nft_mint)
+        // pda_data Ref dropped here
+    };
 
     // ── Verify position is liquidated (position_basis_q == 0) ──
     // EmergencyBurn is for positions that have been liquidated on-chain.
@@ -589,10 +593,10 @@ fn process_emergency_burn(_program_id: &Pubkey, accounts: &[AccountInfo]) -> Pro
         let position = read_position(&slab_data, user_idx)?;
 
         // Verify account_id matches
-        if position.account_id != nft_state.account_id {
+        if position.account_id != nft_account_id_em {
             msg!(
                 "EmergencyBurn rejected: account_id mismatch (stored={}, current={})",
-                nft_state.account_id,
+                nft_account_id_em,
                 position.account_id,
             );
             return Err(NftError::InvalidAccountId.into());
@@ -622,7 +626,7 @@ fn process_emergency_burn(_program_id: &Pubkey, accounts: &[AccountInfo]) -> Pro
     let ata_initialized = ata_data[108] == pinocchio_token::state::AccountState::Initialized as u8;
     drop(ata_data);
 
-    if !ata_initialized || amount != 1 || ata_owner != *holder.key || ata_mint.to_bytes() != nft_state.nft_mint {
+    if !ata_initialized || amount != 1 || ata_owner != *holder.key || ata_mint.to_bytes() != nft_mint_bytes_em {
         return Err(NftError::NotNftHolder.into());
     }
 
