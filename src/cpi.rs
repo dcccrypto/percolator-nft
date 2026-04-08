@@ -84,6 +84,11 @@ struct SlabLayout {
     account_size: usize,
     bitmap_off: usize,
     max_accounts: usize,
+    // Account field offsets (layout-dependent)
+    acct_owner_off: usize,
+    acct_pos_size_lo_off: usize,
+    acct_pos_size_hi_off: usize,
+    acct_entry_price_off: usize,
 }
 
 /// V0 layout constants (deployed devnet).
@@ -98,6 +103,11 @@ const V0_BITMAP_OFF: usize = 608; // engine_off + 128
 const V1D_ENGINE_OFF: usize = 424;
 const V1D_ACCOUNT_SIZE: usize = 240;
 const V1D_BITMAP_OFF: usize = 1048; // engine_off + 624
+
+/// V12_1 layout constants (upstream rebase — mainnet target).
+const V12_1_ENGINE_OFF_LAYOUT: usize = 648; // align_up(104 + 544, 8)
+const V12_1_ACCOUNT_SIZE_LAYOUT: usize = 320;
+const V12_1_BITMAP_OFF_LAYOUT: usize = 1016; // engine_off + 368
 
 /// Detect layout from slab data length and header.
 fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
@@ -137,6 +147,10 @@ fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
             account_size: V0_ACCOUNT_SIZE,
             bitmap_off: V0_BITMAP_OFF,
             max_accounts,
+            acct_owner_off: 184,
+            acct_pos_size_lo_off: 80,
+            acct_pos_size_hi_off: 88,
+            acct_entry_price_off: 96,
         });
     }
 
@@ -151,6 +165,28 @@ fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
             account_size: V1D_ACCOUNT_SIZE,
             bitmap_off: V1D_BITMAP_OFF,
             max_accounts,
+            acct_owner_off: 184,
+            acct_pos_size_lo_off: 80,
+            acct_pos_size_hi_off: 88,
+            acct_entry_price_off: 96,
+        });
+    }
+
+    // Try V12_1 (upstream rebase — mainnet target).
+    let v12_bitmap_bytes = max_accounts.div_ceil(8);
+    let v12_accounts_off = V12_1_BITMAP_OFF_LAYOUT + v12_bitmap_bytes;
+    let v12_total = v12_accounts_off + max_accounts * V12_1_ACCOUNT_SIZE_LAYOUT;
+
+    if data.len() >= v12_total && data.len() <= v12_total + 64 {
+        return Ok(SlabLayout {
+            engine_off: V12_1_ENGINE_OFF_LAYOUT,
+            account_size: V12_1_ACCOUNT_SIZE_LAYOUT,
+            bitmap_off: V12_1_BITMAP_OFF_LAYOUT,
+            max_accounts,
+            acct_owner_off: 208,
+            acct_pos_size_lo_off: 296,
+            acct_pos_size_hi_off: 304,
+            acct_entry_price_off: 280,
         });
     }
 
@@ -250,9 +286,9 @@ pub fn read_position(slab_data: &[u8], user_idx: u16) -> Result<PositionData, Pr
     // Read account_id first.
     let account_id = read_u64(slab_data, acct_off + ACCT_ACCOUNT_ID_OFF)?;
 
-    // Read owner pubkey.
+    // Read owner pubkey (layout-dependent offset).
     let owner = Pubkey::new_from_array(
-        slab_data[acct_off + ACCT_OWNER_OFF..acct_off + ACCT_OWNER_OFF + 32]
+        slab_data[acct_off + layout.acct_owner_off..acct_off + layout.acct_owner_off + 32]
             .try_into()
             .unwrap(),
     );
@@ -275,8 +311,8 @@ pub fn read_position(slab_data: &[u8], user_idx: u16) -> Result<PositionData, Pr
     // magnitude, hi-word sign bit indicates direction (negative = short).
     // Verify the hi-word magnitude bits (excluding sign) are zero to detect
     // position sizes that exceed u64 — which would silently truncate.
-    let size = read_u64(slab_data, acct_off + ACCT_POS_SIZE_LO_OFF)?;
-    let pos_hi = read_u64(slab_data, acct_off + ACCT_POS_SIZE_HI_OFF)?;
+    let size = read_u64(slab_data, acct_off + layout.acct_pos_size_lo_off)?;
+    let pos_hi = read_u64(slab_data, acct_off + layout.acct_pos_size_hi_off)?;
     let is_long: u8 = if (pos_hi as i64) < 0 { 0 } else { 1 };
     // Check magnitude bits of hi-word (mask out sign bit)
     if pos_hi & 0x7FFF_FFFF_FFFF_FFFF != 0 {
@@ -284,8 +320,8 @@ pub fn read_position(slab_data: &[u8], user_idx: u16) -> Result<PositionData, Pr
         return Err(ProgramError::ArithmeticOverflow);
     }
     // position_basis_q is the full signed I128 (for EmergencyBurn: check == 0 means flat).
-    let position_basis_q = read_i128(slab_data, acct_off + ACCT_POS_SIZE_LO_OFF)?;
-    let entry_price_e6 = read_u64(slab_data, acct_off + ACCT_ENTRY_PRICE_OFF)?;
+    let position_basis_q = read_i128(slab_data, acct_off + layout.acct_pos_size_lo_off)?;
+    let entry_price_e6 = read_u64(slab_data, acct_off + layout.acct_entry_price_off)?;
 
     // PERC-9060: Propagate error instead of silently defaulting to 0.
     // A zero funding index would cause incorrect funding settlement on
