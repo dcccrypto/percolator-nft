@@ -19,12 +19,14 @@ use solana_program::{
     program::invoke_signed,
     program_error::ProgramError,
     pubkey::Pubkey,
+    sysvar::instructions as sysvar_instructions,
 };
 
 use crate::{
     cpi::{read_position, verify_slab_owner, PERCOLATOR_DEVNET, PERCOLATOR_MAINNET},
     error::NftError,
     state::{verify_pda_version, PositionNft, MINT_AUTHORITY_SEED, POSITION_NFT_LEN, POSITION_NFT_MAGIC},
+    token2022,
 };
 
 // Maintenance margin bps offset within the engine block.
@@ -161,6 +163,7 @@ fn is_position_healthy(
 ///   6. `[]`          Slab account
 ///   7. `[]`          Percolator program
 ///   8. `[]`          Mint authority PDA
+///   9. `[]`          Instructions sysvar (SysvarInstructions111111111111111111111111111)
 ///
 /// Data: discriminator(8) + amount(8)
 pub fn process_execute(
@@ -180,9 +183,9 @@ pub fn process_execute(
 
     let accounts_iter = &mut accounts.iter();
 
-    let _source_ata = next_account_info(accounts_iter)?; // 0: source token account
+    let source_ata = next_account_info(accounts_iter)?; // 0: source token account
     let mint = next_account_info(accounts_iter)?; // 1: NFT mint
-    let _dest_ata = next_account_info(accounts_iter)?; // 2: destination token account
+    let dest_ata = next_account_info(accounts_iter)?; // 2: destination token account
     let dest_wallet = next_account_info(accounts_iter)?; // 3: new owner wallet
     let _extra_metas = next_account_info(accounts_iter)?; // 4: ExtraAccountMetaList PDA
 
@@ -191,6 +194,88 @@ pub fn process_execute(
     let slab = next_account_info(accounts_iter)?; // 6: Slab account
     let percolator_prog = next_account_info(accounts_iter)?; // 7: Percolator program
     let mint_auth = next_account_info(accounts_iter)?; // 8: Mint authority PDA
+    let instructions_sysvar = next_account_info(accounts_iter)?; // 9: Instructions sysvar
+
+    // ── PERC-9061: Verify this Execute handler was invoked via CPI from Token-2022 ──
+    // Without this check, ANY user can call process_execute directly (not via
+    // Token-2022 transfer), passing their own wallet as dest_wallet (account[3]).
+    // The CPI to Percolator would then change slab position ownership to the
+    // attacker — stealing the position without holding or transferring the NFT.
+    //
+    // Fix: The Instructions sysvar stores top-level transaction instructions.
+    // load_current_index_checked() returns the index of the top-level instruction
+    // currently being executed. When Token-2022 CPI's into our hook, the top-level
+    // instruction is Token-2022's transfer. When called directly, the top-level
+    // instruction is our own program. We verify the top-level instruction's
+    // program_id is Token-2022.
+    if *instructions_sysvar.key != sysvar_instructions::ID {
+        msg!("Transfer rejected: invalid Instructions sysvar account");
+        return Err(ProgramError::InvalidAccountData);
+    }
+    {
+        let current_idx = sysvar_instructions::load_current_index_checked(instructions_sysvar)?;
+        let outer_ix = sysvar_instructions::load_instruction_at_checked(
+            current_idx as usize,
+            instructions_sysvar,
+        )?;
+
+        if outer_ix.program_id != token2022::TOKEN_2022_PROGRAM_ID {
+            msg!(
+                "Transfer rejected: Execute must be called via Token-2022 CPI, got caller={}",
+                outer_ix.program_id
+            );
+            return Err(NftError::UnauthorizedTransferHookCaller.into());
+        }
+    }
+
+    // ── PERC-9065: ATA validation (defence-in-depth, Layer 2) ──
+    // Even with the sysvar check above, validate that source and destination
+    // token accounts are real Token-2022 accounts for this mint, and that the
+    // destination ATA's owner matches dest_wallet. This prevents future attack
+    // vectors if the sysvar check is ever bypassed or weakened.
+    if *source_ata.owner != token2022::TOKEN_2022_PROGRAM_ID {
+        msg!("Transfer rejected: source token account not owned by Token-2022");
+        return Err(ProgramError::IllegalOwner);
+    }
+    if *dest_ata.owner != token2022::TOKEN_2022_PROGRAM_ID {
+        msg!("Transfer rejected: dest token account not owned by Token-2022");
+        return Err(ProgramError::IllegalOwner);
+    }
+    {
+        // Token-2022 account layout (same as SPL Token, 165+ bytes):
+        //   [0..32]  mint (Pubkey)
+        //   [32..64] owner (Pubkey)
+        let src_data = source_ata.try_borrow_data()?;
+        if src_data.len() < 165 {
+            msg!("Transfer rejected: source token account data too short");
+            return Err(ProgramError::InvalidAccountData);
+        }
+        let src_mint = Pubkey::new_from_array(src_data[0..32].try_into().unwrap());
+        if src_mint != *mint.key {
+            msg!("Transfer rejected: source ATA mint does not match NFT mint");
+            return Err(ProgramError::InvalidAccountData);
+        }
+    }
+    {
+        let dst_data = dest_ata.try_borrow_data()?;
+        if dst_data.len() < 165 {
+            msg!("Transfer rejected: dest token account data too short");
+            return Err(ProgramError::InvalidAccountData);
+        }
+        let dst_mint = Pubkey::new_from_array(dst_data[0..32].try_into().unwrap());
+        if dst_mint != *mint.key {
+            msg!("Transfer rejected: dest ATA mint does not match NFT mint");
+            return Err(ProgramError::InvalidAccountData);
+        }
+        // Verify dest ATA owner field matches dest_wallet — ensures the CPI
+        // target (new position owner) is genuinely the recipient of the NFT,
+        // not an arbitrary attacker-supplied address.
+        let dst_owner = Pubkey::new_from_array(dst_data[32..64].try_into().unwrap());
+        if dst_owner != *dest_wallet.key {
+            msg!("Transfer rejected: dest ATA owner does not match dest_wallet");
+            return Err(ProgramError::InvalidAccountData);
+        }
+    }
 
     // ── GH#1687: Validate percolator_prog key against known constants ──
     // Prevents an attacker from supplying a malicious program as account[7].

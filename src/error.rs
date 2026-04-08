@@ -34,6 +34,10 @@ pub enum NftError {
     InvalidPercolatorProgram = 13,
     /// BurnPositionNft: position must be fully closed (size=0, collateral=0) before burn (GH#1869).
     PositionNotClosed = 14,
+    /// TransferHook Execute was not invoked via CPI from Token-2022.
+    /// Direct invocation of the transfer hook is forbidden — only Token-2022
+    /// may call Execute as part of a token transfer.
+    UnauthorizedTransferHookCaller = 15,
 }
 
 impl From<NftError> for ProgramError {
