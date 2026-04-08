@@ -264,9 +264,11 @@ pub fn read_position(slab_data: &[u8], user_idx: u16) -> Result<PositionData, Pr
     }
     let entry_price_e6 = read_u64(slab_data, acct_off + ACCT_ENTRY_PRICE_OFF)?;
 
-    // Read global funding index from engine.
+    // PERC-9060: Propagate error instead of silently defaulting to 0.
+    // A zero funding index would cause incorrect funding settlement on
+    // NFT transfers, matching transfer_hook.rs error propagation pattern.
     let funding_off = layout.engine_off + ENGINE_FUNDING_INDEX_OFF;
-    let global_funding_index_e18 = read_i128(slab_data, funding_off).unwrap_or(0i128);
+    let global_funding_index_e18 = read_i128(slab_data, funding_off)?;
 
     Ok(PositionData {
         owner,
