@@ -18,6 +18,7 @@ pub const ATA_PROGRAM_ID: Pubkey =
     solana_program::pubkey!("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
 
 /// SPL Token instruction tags (same for Token and Token-2022).
+const IX_SET_AUTHORITY: u8 = 6;
 const IX_INITIALIZE_MINT2: u8 = 20;
 const IX_MINT_TO: u8 = 7;
 const IX_BURN: u8 = 8;
@@ -43,6 +44,50 @@ pub fn initialize_mint2(mint: &Pubkey, authority: &Pubkey) -> Instruction {
         accounts: vec![AccountMeta::new(*mint, false)],
         data,
     }
+}
+
+/// Authority type constants for SetAuthority instruction.
+const AUTHORITY_TYPE_MINT_TOKENS: u8 = 0;
+
+/// Build SetAuthority instruction (Token-2022).
+///
+/// PERC-9060: Used to revoke mint authority after the initial MintTo,
+/// ensuring each NFT mint can never produce additional tokens.
+///
+/// Layout: tag(1) + authority_type(1) + COption<Pubkey>
+///   COption: 0 = None (revoke), 1 = Some followed by 32-byte pubkey
+pub fn set_authority(
+    account: &Pubkey,
+    current_authority: &Pubkey,
+    new_authority: Option<&Pubkey>,
+    authority_type: u8,
+) -> Instruction {
+    let mut data = Vec::with_capacity(35);
+    data.push(IX_SET_AUTHORITY);
+    data.push(authority_type);
+    match new_authority {
+        Some(pubkey) => {
+            data.push(1); // COption::Some
+            data.extend_from_slice(pubkey.as_ref());
+        }
+        None => {
+            data.push(0); // COption::None
+        }
+    }
+
+    Instruction {
+        program_id: TOKEN_2022_PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new(*account, false),
+            AccountMeta::new_readonly(*current_authority, true),
+        ],
+        data,
+    }
+}
+
+/// Convenience: revoke mint authority (set to None).
+pub fn revoke_mint_authority(mint: &Pubkey, current_authority: &Pubkey) -> Instruction {
+    set_authority(mint, current_authority, None, AUTHORITY_TYPE_MINT_TOKENS)
 }
 
 /// Build MintTo instruction (Token-2022).

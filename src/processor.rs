@@ -280,6 +280,15 @@ fn process_mint_position_nft(
         &[mint_auth_seeds],
     )?;
 
+    // ── PERC-9060: Revoke mint authority to enforce 1-of-1 NFT invariant ──
+    // After minting exactly 1 token, set the mint authority to None so no
+    // additional tokens can ever be minted from this mint account.
+    invoke_signed(
+        &token2022::revoke_mint_authority(nft_mint.key, mint_auth.key),
+        &[nft_mint.clone(), mint_auth.clone()],
+        &[mint_auth_seeds],
+    )?;
+
     msg!(
         "PositionNft minted: slab={}, idx={}, mint={}",
         slab.key,
