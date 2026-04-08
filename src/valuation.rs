@@ -64,11 +64,10 @@ pub struct PositionValuation {
     pub funding_delta_e18: i128,
 }
 
-// Engine layout offsets (from engine_off)
-const ENGINE_MARK_PRICE_OFF: usize = 0; // u64
-#[allow(dead_code)]
-const ENGINE_ORACLE_PRICE_OFF: usize = 8; // u64
-const ENGINE_MAINT_MARGIN_OFF: usize = 96; // u64 (bps)
+// Engine field offsets are now layout-dependent — read from PositionData.
+// V0: mark_price=0, maint_margin=96
+// V1D: mark_price=424, maint_margin=80
+// V12_1: mark_price=928, maint_margin=104
 
 /// Process GetPositionValue instruction.
 ///
@@ -135,7 +134,7 @@ pub fn process_get_position_value(_program_id: &Pubkey, accounts: &[AccountInfo]
     // PERC-9060: Read mark price, returning an error instead of silently
     // defaulting to 0. A zeroed mark price causes unrealized_pnl to compute
     // as 0, making an underwater position appear break-even to consumers.
-    let mark_price_e6 = read_u64_checked(&slab_data, engine_off + ENGINE_MARK_PRICE_OFF)
+    let mark_price_e6 = read_u64_checked(&slab_data, engine_off + position.engine_mark_price_off)
         .ok_or(ProgramError::from(NftError::SlabDataTooShort))?;
 
     // Read collateral from position data.
@@ -150,7 +149,7 @@ pub fn process_get_position_value(_program_id: &Pubkey, accounts: &[AccountInfo]
     // PERC-9060: Propagate error instead of silently defaulting to 0.
     // A zero maint_margin_bps would make any position appear healthy, matching
     // the transfer_hook.rs pattern that uses .ok_or(NftError::SlabDataTooShort)?.
-    let maint_margin_bps: u64 = read_u64_checked(&slab_data, engine_off + ENGINE_MAINT_MARGIN_OFF)
+    let maint_margin_bps: u64 = read_u64_checked(&slab_data, engine_off + position.engine_maint_margin_off)
         .ok_or(ProgramError::from(NftError::SlabDataTooShort))?;
 
     // PERC-9019: Compute PnL with checked arithmetic returning explicit errors

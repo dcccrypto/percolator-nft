@@ -29,11 +29,10 @@ use crate::{
     token2022,
 };
 
-// Maintenance margin bps offset within the engine block.
-// Engine layout: +0 mark_price_e6(u64), +8 oracle_price_e6(u64), +16 last_funding_slot(u64),
-//               ..., +96 maintenance_margin_bps(u64).
-const ENGINE_MARK_PRICE_OFF: usize = 0;
-const ENGINE_MAINT_MARGIN_OFF: usize = 96;
+// Engine field offsets are now layout-dependent — read from PositionData.
+// V0: mark_price=0, maint_margin=96
+// V1D: mark_price=424, maint_margin=80
+// V12_1: mark_price=928, maint_margin=104
 
 // ═══════════════════════════════════════════════════════════════
 // SPL TransferHook interface constants
@@ -98,6 +97,8 @@ fn is_position_healthy(
     is_long: u8,
     collateral: u64,
     engine_off: usize,
+    mark_price_off: usize,
+    maint_margin_off: usize,
     funding_delta_e18: i128,
 ) -> Result<bool, ProgramError> {
     if position_size == 0 {
@@ -117,7 +118,7 @@ fn is_position_healthy(
     }
 
     // Read mark price from engine block.
-    let mark_price_e6 = match read_u64_at(slab_data, engine_off + ENGINE_MARK_PRICE_OFF) {
+    let mark_price_e6 = match read_u64_at(slab_data, engine_off + mark_price_off) {
         Some(p) if p > 0 => p,
         _ => return Ok(false), // Stale / zero price → reject.
     };
@@ -126,7 +127,7 @@ fn is_position_healthy(
     // PERC-9010: Reject instead of defaulting to 500bps if the read fails.
     // An attacker could craft slab data truncated before offset 96 to force
     // a lenient 500bps default instead of the actual (possibly higher) value.
-    let maint_margin_bps = read_u64_at(slab_data, engine_off + ENGINE_MAINT_MARGIN_OFF)
+    let maint_margin_bps = read_u64_at(slab_data, engine_off + maint_margin_off)
         .ok_or(NftError::SlabDataTooShort)?;
 
     // PERC-9009: Use checked arithmetic instead of saturating to detect
@@ -497,6 +498,8 @@ pub fn process_execute(
             pos.is_long,
             pos.collateral,
             pos.engine_off,
+            pos.engine_mark_price_off,
+            pos.engine_maint_margin_off,
             funding_delta_e18,
         )? {
             msg!("Transfer rejected: position is below maintenance margin (liquidatable)");

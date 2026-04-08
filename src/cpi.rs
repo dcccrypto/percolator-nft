@@ -89,6 +89,10 @@ struct SlabLayout {
     acct_pos_size_lo_off: usize,
     acct_pos_size_hi_off: usize,
     acct_entry_price_off: usize,
+    // Engine field offsets relative to engine_off (layout-dependent)
+    engine_mark_price_off: usize,
+    engine_maint_margin_off: usize,
+    engine_funding_index_off: usize,
 }
 
 /// V0 layout constants (deployed devnet).
@@ -151,6 +155,9 @@ fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
             acct_pos_size_lo_off: 80,
             acct_pos_size_hi_off: 88,
             acct_entry_price_off: 96,
+            engine_mark_price_off: 0, // V0 has no mark_price in engine — uses config
+            engine_maint_margin_off: 96, // params_off(48) + 8 + warmup(8) = ~56..96 (V0 layout)
+            engine_funding_index_off: 112,
         });
     }
 
@@ -169,6 +176,9 @@ fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
             acct_pos_size_lo_off: 80,
             acct_pos_size_hi_off: 88,
             acct_entry_price_off: 96,
+            engine_mark_price_off: 424, // V1D mark_price at engine+424
+            engine_maint_margin_off: 80, // params_off(72) + 8 = 80
+            engine_funding_index_off: 392,
         });
     }
 
@@ -187,6 +197,9 @@ fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
             acct_pos_size_lo_off: 296,
             acct_pos_size_hi_off: 304,
             acct_entry_price_off: 280,
+            engine_mark_price_off: 928, // V12_1: mark_ewma_e6 at engine+928
+            engine_maint_margin_off: 104, // params_off(96) + 8 = 104
+            engine_funding_index_off: 936, // V12_1: funding_index at engine+936
         });
     }
 
@@ -224,6 +237,12 @@ pub struct PositionData {
     /// Byte offset to the engine block within slab data (layout-dependent).
     /// Callers can use this to read further engine fields (e.g. mark_price).
     pub engine_off: usize,
+    /// Mark price offset relative to engine_off (layout-dependent).
+    pub engine_mark_price_off: usize,
+    /// Maintenance margin BPS offset relative to engine_off (layout-dependent).
+    pub engine_maint_margin_off: usize,
+    /// Funding index offset relative to engine_off (layout-dependent).
+    pub engine_funding_index_off: usize,
 }
 
 /// Account struct field offsets within each account slot.
@@ -326,7 +345,7 @@ pub fn read_position(slab_data: &[u8], user_idx: u16) -> Result<PositionData, Pr
     // PERC-9060: Propagate error instead of silently defaulting to 0.
     // A zero funding index would cause incorrect funding settlement on
     // NFT transfers, matching transfer_hook.rs error propagation pattern.
-    let funding_off = layout.engine_off + ENGINE_FUNDING_INDEX_OFF;
+    let funding_off = layout.engine_off + layout.engine_funding_index_off;
     let global_funding_index_e18 = read_i128(slab_data, funding_off)?;
 
     Ok(PositionData {
@@ -340,5 +359,8 @@ pub fn read_position(slab_data: &[u8], user_idx: u16) -> Result<PositionData, Pr
         is_long,
         global_funding_index_e18,
         engine_off: layout.engine_off,
+        engine_mark_price_off: layout.engine_mark_price_off,
+        engine_maint_margin_off: layout.engine_maint_margin_off,
+        engine_funding_index_off: layout.engine_funding_index_off,
     })
 }
