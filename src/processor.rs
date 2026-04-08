@@ -403,19 +403,24 @@ fn process_burn_position_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
         return Err(NftError::InvalidNftPda.into());
     }
 
-    // GH#1869 (PERC-8222): Verify position is fully closed before burning the NFT.
-    // Without this guard an open-position NFT can be burned, orphaning the position
-    // in the slab with no way to recover the collateral (unrecoverable funds).
-    // We read position data directly from the slab using the CPI helper.
+    // GH#1869 (PERC-8222): Verify position has no open trade before burning.
+    // An open-position NFT must not be burned — it would orphan the position
+    // in the slab with no way to recover or manage it.
+    //
+    // PERC-9035: Only check size != 0 (open trade). Residual collateral
+    // (size=0, collateral>0) should NOT block burn. The collateral belongs
+    // to the slab position owner and can only be withdrawn via Percolator
+    // directly — it is unaffected by whether the NFT PDA exists. Requiring
+    // collateral==0 traps the NFT: can't transfer (size=0 fails margin
+    // check), can't burn (collateral>0 fails this check), permanently stuck.
     verify_slab_owner(slab)?;
     {
         let slab_data = slab.try_borrow_data()?;
         let position = read_position(&slab_data, user_idx)?;
-        if position.size != 0 || position.collateral != 0 {
+        if position.size != 0 {
             msg!(
-                "Burn rejected: position is not fully closed (size={}, collateral={})",
+                "Burn rejected: position still has open trade (size={})",
                 position.size,
-                position.collateral,
             );
             return Err(NftError::PositionNotClosed.into());
         }
