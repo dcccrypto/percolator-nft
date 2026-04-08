@@ -214,10 +214,11 @@ fn process_mint_position_nft(
     // URI: Empty — all position data is on-chain in PositionNft PDA
     let nft_uri = "";
 
-    // ── Create Token-2022 mint account (with metadata + transfer hook extensions) ──
+    // ── Create Token-2022 mint account (with metadata pointer + metadata + transfer hook extensions) ──
     let mint_space = MINT_BASE_SIZE
         + METADATA_EXTENSION_HEADER
         + METADATA_MAX_LEN
+        + token2022::METADATA_POINTER_EXTENSION_SIZE
         + token2022::TRANSFER_HOOK_EXTENSION_SIZE;
     let mint_rent = rent.minimum_balance(mint_space as usize);
     invoke(
@@ -229,6 +230,15 @@ fn process_mint_position_nft(
             &token2022::TOKEN_2022_PROGRAM_ID,
         ),
         &[owner.clone(), nft_mint.clone(), system_program.clone()],
+    )?;
+
+    // PERC-9061: Initialize MetadataPointer extension BEFORE InitializeMint2.
+    // This tells wallets/explorers where to find the embedded metadata via standard
+    // Token-2022 metadata discovery. Without it, metadata is stored but invisible.
+    // Self-referencing: metadata_address = mint itself (embedded metadata).
+    invoke(
+        &token2022::initialize_metadata_pointer(nft_mint.key, mint_auth.key, nft_mint.key),
+        &[nft_mint.clone()],
     )?;
 
     // Initialize TransferHook extension BEFORE InitializeMint2.
