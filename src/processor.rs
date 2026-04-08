@@ -456,7 +456,7 @@ fn process_burn_position_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
 // Tag 2: SettleFunding
 // ═══════════════════════════════════════════════════════════════
 
-fn process_settle_funding(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+fn process_settle_funding(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     let accounts_iter = &mut accounts.iter();
 
     // GH#5 fix: SettleFunding is now restricted to the current NFT holder.
@@ -487,7 +487,7 @@ fn process_settle_funding(_program_id: &Pubkey, accounts: &[AccountInfo]) -> Pro
     }
 
     // ── PERC-9003: Verify PDA is owned by this program ──
-    if nft_pda.owner != _program_id {
+    if nft_pda.owner != program_id {
         msg!("SettleFunding rejected: PositionNft PDA not owned by this program");
         return Err(ProgramError::IllegalOwner);
     }
@@ -505,6 +505,18 @@ fn process_settle_funding(_program_id: &Pubkey, accounts: &[AccountInfo]) -> Pro
     verify_pda_version(nft_state)?;
     if nft_state.slab != slab.key.to_bytes() {
         return Err(ProgramError::InvalidAccountData);
+    }
+
+    // ── PERC-9008: Verify PDA address matches expected derivation ──
+    // The code checks magic, version, slab, and program ownership, but never
+    // verifies that nft_pda.key is the canonical PDA for (slab, user_idx).
+    // Without this, any program-owned account with matching fields could be
+    // substituted. The derivation check is the definitive proof of identity.
+    // (Mirrors the same check in process_burn_position_nft.)
+    let (expected_pda, _) = position_nft_pda(slab.key, nft_state.user_idx, program_id);
+    if *nft_pda.key != expected_pda {
+        msg!("SettleFunding rejected: PDA address does not match expected derivation");
+        return Err(NftError::InvalidNftPda.into());
     }
 
     // ── Verify holder owns the NFT (ATA balance = 1, owner = holder, state = initialized) ──
