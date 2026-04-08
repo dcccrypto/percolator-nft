@@ -85,6 +85,34 @@ pub fn burn(account: &Pubkey, mint: &Pubkey, owner: &Pubkey, amount: u64) -> Ins
     }
 }
 
+/// SPL Token SetAuthority instruction tag (same for Token and Token-2022).
+const IX_SET_AUTHORITY: u8 = 6;
+
+/// Build SetAuthority instruction to remove the mint authority (set to None).
+///
+/// This is the standard NFT pattern: after minting supply=1, revoke the mint
+/// authority so no additional tokens can ever be minted for this mint.
+///
+/// Data layout: tag(1) + authority_type(1) + new_authority_option(1)
+///   authority_type 0 = MintTokens
+///   new_authority_option 0 = None (no new authority)
+pub fn set_mint_authority_none(mint: &Pubkey, current_authority: &Pubkey) -> Instruction {
+    let data = vec![
+        IX_SET_AUTHORITY,
+        0, // authority_type = MintTokens
+        0, // COption::None — no new authority
+    ];
+
+    Instruction {
+        program_id: TOKEN_2022_PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new(*mint, false),
+            AccountMeta::new_readonly(*current_authority, true),
+        ],
+        data,
+    }
+}
+
 /// SPL Token CloseAccount instruction tag (same for Token and Token-2022).
 const IX_CLOSE_ACCOUNT: u8 = 9;
 
@@ -232,6 +260,33 @@ pub fn initialize_transfer_hook(
 
 /// Size of TransferHook extension data (authority + program_id).
 pub const TRANSFER_HOOK_EXTENSION_SIZE: u64 = 4 + 64; // type(2) + len(2) + authority(32) + program_id(32)
+
+/// Size of MintCloseAuthority extension (TLV header + authority pubkey).
+pub const MINT_CLOSE_AUTHORITY_EXTENSION_SIZE: u64 = 4 + 32; // type(2) + len(2) + authority(32)
+
+/// Initialize MintCloseAuthority extension on a Token-2022 mint.
+/// Must be called BEFORE InitializeMint2.
+///
+/// This extension allows closing the mint account (reclaiming rent) when
+/// supply reaches 0. Without it, Token-2022 rejects CloseAccount on mints.
+///
+/// Instruction tag 25 = InitializeMintCloseAuthority.
+/// Data: tag(1) + option(1) + authority(32)
+pub fn initialize_mint_close_authority(
+    mint: &Pubkey,
+    close_authority: &Pubkey,
+) -> Instruction {
+    let mut data = Vec::with_capacity(34);
+    data.push(25); // InitializeMintCloseAuthority instruction tag
+    data.push(1);  // COption::Some
+    data.extend_from_slice(close_authority.as_ref());
+
+    Instruction {
+        program_id: TOKEN_2022_PROGRAM_ID,
+        accounts: vec![AccountMeta::new(*mint, false)],
+        data,
+    }
+}
 
 /// Build CreateAssociatedTokenAccount instruction for Token-2022.
 pub fn create_associated_token_account(

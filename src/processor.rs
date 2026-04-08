@@ -49,6 +49,12 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
 
 /// Token-2022 Mint account base size (without extensions).
 const MINT_BASE_SIZE: u64 = 82;
+/// PERC-9057: AccountType discriminator byte between base Mint data and TLV extensions.
+/// Token-2022 writes this 1-byte discriminator (value 1 for Mint) at offset 82.
+/// Previously omitted — worked because METADATA_MAX_LEN was a gross overestimate,
+/// absorbing the 1-byte shortfall. Without this, tightening METADATA_MAX_LEN to
+/// actual usage would cause MintPositionNft to fail.
+const ACCOUNT_TYPE_SIZE: u64 = 1;
 /// Type/length header for metadata extension.
 const METADATA_EXTENSION_HEADER: u64 = 4; // type(2) + length(2)
 /// Rough upper bound for metadata content (name + symbol + uri + fields).
@@ -216,10 +222,12 @@ fn process_mint_position_nft(
 
     // ── Create Token-2022 mint account (with metadata pointer + metadata + transfer hook extensions) ──
     let mint_space = MINT_BASE_SIZE
+        + ACCOUNT_TYPE_SIZE
         + METADATA_EXTENSION_HEADER
         + METADATA_MAX_LEN
         + token2022::METADATA_POINTER_EXTENSION_SIZE
-        + token2022::TRANSFER_HOOK_EXTENSION_SIZE;
+        + token2022::TRANSFER_HOOK_EXTENSION_SIZE
+        + token2022::MINT_CLOSE_AUTHORITY_EXTENSION_SIZE;
     let mint_rent = rent.minimum_balance(mint_space as usize);
     invoke(
         &system_instruction::create_account(
@@ -248,6 +256,14 @@ fn process_mint_position_nft(
         &[nft_mint.clone()],
     )?;
 
+    // PERC-9060: Initialize MintCloseAuthority extension BEFORE InitializeMint2.
+    // This allows the burn handler to close the mint account and reclaim rent.
+    // Without this extension, Token-2022 rejects CloseAccount on mint accounts.
+    invoke(
+        &token2022::initialize_mint_close_authority(nft_mint.key, mint_auth.key),
+        &[nft_mint.clone()],
+    )?;
+
     // InitializeMint2 (decimals=0, authority=mint_auth PDA, no freeze)
     invoke(
         &token2022::initialize_mint2(nft_mint.key, mint_auth.key),
@@ -269,6 +285,16 @@ fn process_mint_position_nft(
         &[mint_auth_seeds],
     )?;
 
+    // ── PERC-9024: Verify owner_ata matches expected ATA derivation ──
+    // Without this, a caller can pass an arbitrary account as owner_ata.
+    // The ATA program CPI would create the correct ATA anyway, but if the
+    // passed account doesn't match, the mint CPI could target the wrong account.
+    let expected_ata = token2022::get_associated_token_address(owner.key, nft_mint.key);
+    if *owner_ata.key != expected_ata {
+        msg!("MintPositionNft: owner_ata does not match expected ATA derivation");
+        return Err(ProgramError::InvalidSeeds);
+    }
+
     // ── Create ATA for owner ──
     invoke(
         &token2022::create_associated_token_account(owner.key, owner.key, nft_mint.key),
@@ -287,6 +313,16 @@ fn process_mint_position_nft(
     invoke_signed(
         &token2022::mint_to(nft_mint.key, owner_ata.key, mint_auth.key, 1),
         &[nft_mint.clone(), owner_ata.clone(), mint_auth.clone()],
+        &[mint_auth_seeds],
+    )?;
+
+    // ── PERC-9058: Revoke mint authority (supply=1 is now immutable) ──
+    // Standard NFT pattern: after minting exactly 1 token, set the mint
+    // authority to None so no additional tokens can ever be minted for this
+    // mint, regardless of any future program logic changes.
+    invoke_signed(
+        &token2022::set_mint_authority_none(nft_mint.key, mint_auth.key),
+        &[nft_mint.clone(), mint_auth.clone()],
         &[mint_auth_seeds],
     )?;
 
@@ -377,19 +413,29 @@ fn process_burn_position_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
         return Err(NftError::InvalidNftPda.into());
     }
 
-    // GH#1869 (PERC-8222): Verify position is fully closed before burning the NFT.
-    // Without this guard an open-position NFT can be burned, orphaning the position
-    // in the slab with no way to recover the collateral (unrecoverable funds).
-    // We read position data directly from the slab using the CPI helper.
+    // GH#1869 (PERC-8222): Verify position has no open trade before burning.
+    // An open-position NFT must not be burned — it would orphan the position
+    // in the slab with no way to recover or manage it.
+    //
+    // PERC-9035: Only check size != 0 (open trade). Residual collateral
+    // (size=0, collateral>0) should NOT block burn. The collateral belongs
+    // to the slab position owner and can only be withdrawn via Percolator
+    // directly — it is unaffected by whether the NFT PDA exists. Requiring
+    // collateral==0 traps the NFT: can't transfer (size=0 fails margin
+    // check), can't burn (collateral>0 fails this check), permanently stuck.
+    //
+    // NOTE (PERC-9060): We intentionally skip the entry_price/is_long mismatch
+    // check here. Percolator zeroes entry_price_e6 when a position is closed, so
+    // comparing against the PDA snapshot would always fail for legitimate burns.
+    // Slot reuse is not a risk — the slot is empty, and burn destroys the PDA.
     verify_slab_owner(slab)?;
     {
         let slab_data = slab.try_borrow_data()?;
         let position = read_position(&slab_data, user_idx)?;
-        if position.size != 0 || position.collateral != 0 {
+        if position.size != 0 {
             msg!(
-                "Burn rejected: position is not fully closed (size={}, collateral={})",
+                "Burn rejected: position still has open trade (size={})",
                 position.size,
-                position.collateral,
             );
             return Err(NftError::PositionNotClosed.into());
         }
@@ -440,11 +486,23 @@ fn process_burn_position_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
         &[holder_ata.clone(), nft_mint.clone(), holder.clone()],
     )?;
 
-    // ── PERC-9032: Close the ATA (return rent to holder) ──
+    // ���─ PERC-9032: Close the ATA (return rent to holder) ──
     // Without this, the empty ATA remains open with ~0.002 SOL locked.
     invoke(
         &token2022::close_account(holder_ata.key, holder.key, holder.key),
         &[holder_ata.clone(), holder.clone()],
+    )?;
+
+    // ── PERC-9060: Close the mint account (return rent to holder) ──
+    // Supply is now 0 after burn. The MintCloseAuthority extension designates
+    // mint_auth PDA as the close authority, allowing us to reclaim ~0.003-0.005 SOL.
+    // Without this, mint rent is permanently locked per NFT lifecycle.
+    let (_, mint_auth_bump) = mint_authority_pda(program_id);
+    let mint_auth_seeds: &[&[u8]] = &[MINT_AUTHORITY_SEED, &[mint_auth_bump]];
+    invoke_signed(
+        &token2022::close_account(nft_mint.key, holder.key, mint_auth.key),
+        &[nft_mint.clone(), holder.clone(), mint_auth.clone()],
+        &[mint_auth_seeds],
     )?;
 
     // ── Close the PDA (return rent to holder) ──
@@ -517,6 +575,16 @@ fn process_settle_funding(_program_id: &Pubkey, accounts: &[AccountInfo]) -> Pro
         return Err(ProgramError::InvalidAccountData);
     }
 
+    // ── PERC-9056: Verify PDA address matches expected derivation ──
+    // Consistency with Mint (line 120) and Burn (line 364, PERC-9008).
+    // Without this, any program-owned account with matching magic/slab fields
+    // could be substituted, allowing funding state manipulation.
+    let (expected_pda, _) = position_nft_pda(slab.key, nft_state.user_idx, _program_id);
+    if *nft_pda.key != expected_pda {
+        msg!("SettleFunding rejected: PDA address does not match expected derivation");
+        return Err(NftError::InvalidNftPda.into());
+    }
+
     // ── Verify holder owns the NFT (ATA balance = 1, owner = holder, state = initialized) ──
     // Token-2022 account layout (165 bytes, same offsets as SPL Token):
     //   [0..32]  mint (Pubkey)
@@ -551,6 +619,20 @@ fn process_settle_funding(_program_id: &Pubkey, accounts: &[AccountInfo]) -> Pro
     let slab_data = slab.try_borrow_data()?;
     let position = read_position(&slab_data, nft_state.user_idx)?;
     drop(slab_data);
+
+    // ── PERC-9060: Verify slab slot still matches PDA snapshot ──
+    // If the original position was closed and the slab slot reused for a
+    // different position, entry_price_e6 and/or is_long will differ from
+    // the values snapshotted at mint time. Without this check, the NFT
+    // would settle funding on a completely different position.
+    if nft_state.entry_price_e6 != position.entry_price_e6
+        || nft_state.is_long != position.is_long
+    {
+        msg!(
+            "SettleFunding rejected: slab slot reuse detected (PDA snapshot does not match live position)"
+        );
+        return Err(NftError::PositionMismatch.into());
+    }
 
     // PERC-9029: Reject settling funding on a closed position (size=0).
     // A closed position has no active funding accrual. Allowing settle on a

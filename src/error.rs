@@ -34,6 +34,12 @@ pub enum NftError {
     InvalidPercolatorProgram = 13,
     /// BurnPositionNft: position must be fully closed (size=0, collateral=0) before burn (GH#1869).
     PositionNotClosed = 14,
+    /// Transfer hook: ExtraAccountMetaList PDA does not match expected derivation.
+    InvalidExtraAccountMetas = 15,
+    /// Transfer hook: source or destination token account validation failed.
+    InvalidTokenAccount = 16,
+    /// TransferHook Execute was invoked directly, not via Token-2022 CPI.
+    UnauthorizedDirectInvocation = 17,
 }
 
 impl From<NftError> for ProgramError {
