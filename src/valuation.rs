@@ -172,11 +172,18 @@ pub fn process_get_position_value(_program_id: &Pubkey, accounts: &[AccountInfo]
     let maintenance_margin = (position.size as u128)
         .checked_mul(maint_margin_bps as u128)
         .unwrap_or(0) / 10_000;
+    // PERC-9060: Use checked arithmetic and safe i128→i64 cast to prevent
+    // silent truncation/wrapping that could flip the sign and make an
+    // underwater position appear healthy to lending protocols.
     let liquidation_distance_bps: i64 = if net_equity > 0 {
         let distance = net_equity
             .checked_sub(maintenance_margin as i128)
             .unwrap_or(0);
-        ((distance * 10_000) / net_equity) as i64
+        let bps_i128 = distance
+            .checked_mul(10_000)
+            .unwrap_or(if distance < 0 { i128::MIN } else { i128::MAX })
+            / net_equity;
+        bps_i128.clamp(i64::MIN as i128, i64::MAX as i128) as i64
     } else {
         -10_000 // fully liquidatable
     };
