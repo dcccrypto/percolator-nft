@@ -17,7 +17,7 @@ use crate::error::NftError;
 pub const PERCOLATOR_DEVNET: Pubkey =
     solana_program::pubkey!("FxfD37s1AZTeWfFQps9Zpebi2dNQ9QSSDtfMKdbsfKrD");
 pub const PERCOLATOR_MAINNET: Pubkey =
-    solana_program::pubkey!("GM8zjJ8LTBMv9xEsverh6H6wLyevgMHEJXcEzyY3rY24");
+    solana_program::pubkey!("ESa89R5Es3rJ5mnwGybVRG1GrNt9etP11Z5V2QWD4edv");
 
 /// Verify slab account is owned by a known Percolator program.
 pub fn verify_slab_owner(slab: &AccountInfo) -> Result<(), ProgramError> {
