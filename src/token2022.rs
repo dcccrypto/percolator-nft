@@ -194,6 +194,45 @@ pub fn initialize_token_metadata(
 }
 
 // ═══════════════════════════════════════════════════════════════
+// MetadataPointer Extension
+// ═══════════════════════════════════════════════════════════════
+
+/// Initialize MetadataPointer extension on a Token-2022 mint.
+/// Must be called BEFORE InitializeMint2.
+///
+/// PERC-9061: Without this extension, wallets and explorers using standard
+/// Token-2022 metadata discovery will not find the embedded metadata, even
+/// though the bytes are physically present in the mint account.
+///
+/// For self-referencing embedded metadata:
+///   authority     = mint_auth PDA (can update the pointer later)
+///   metadata_addr = mint itself (metadata lives in this account)
+///
+/// Instruction tag 39 = InitializeMetadataPointer (Token-2022 extension).
+/// Data: tag(1) + authority COption<Pubkey>(1 + 32) + metadata_address COption<Pubkey>(1 + 32)
+pub fn initialize_metadata_pointer(
+    mint: &Pubkey,
+    authority: &Pubkey,
+    metadata_address: &Pubkey,
+) -> Instruction {
+    let mut data = Vec::with_capacity(67);
+    data.push(39); // InitializeMetadataPointer instruction tag
+    data.push(1); // COption::Some(authority)
+    data.extend_from_slice(authority.as_ref());
+    data.push(1); // COption::Some(metadata_address)
+    data.extend_from_slice(metadata_address.as_ref());
+
+    Instruction {
+        program_id: TOKEN_2022_PROGRAM_ID,
+        accounts: vec![AccountMeta::new(*mint, false)],
+        data,
+    }
+}
+
+/// Size of MetadataPointer extension: type(2) + length(2) + authority(32) + metadata_address(32) = 68 bytes.
+pub const METADATA_POINTER_EXTENSION_SIZE: u64 = 68;
+
+// ═══════════════════════════════════════════════════════════════
 // TransferHook Extension
 // ═══════════════════════════════════════════════════════════════
 
