@@ -95,3 +95,14 @@ pub fn position_nft_pda(slab: &Pubkey, user_idx: u16, program_id: &Pubkey) -> (P
 pub fn mint_authority_pda(program_id: &Pubkey) -> (Pubkey, u8) {
     Pubkey::find_program_address(&[MINT_AUTHORITY_SEED], program_id)
 }
+
+/// PERC-9030: Verify PDA version is supported.
+/// All instruction handlers check magic but not version. If a future version
+/// introduces breaking layout changes, old code would misinterpret the data.
+pub fn verify_pda_version(nft_state: &PositionNft) -> Result<(), solana_program::program_error::ProgramError> {
+    if nft_state.version != POSITION_NFT_VERSION {
+        solana_program::msg!("Unsupported PositionNft version: {}", nft_state.version);
+        return Err(solana_program::program_error::ProgramError::InvalidAccountData);
+    }
+    Ok(())
+}
