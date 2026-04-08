@@ -23,12 +23,6 @@ use crate::{
     state::{verify_pda_version, PositionNft, POSITION_NFT_LEN, POSITION_NFT_MAGIC},
 };
 
-/// Read a u64 from slab data at offset.
-fn read_u64(data: &[u8], off: usize) -> u64 {
-    let bytes: [u8; 8] = data[off..off + 8].try_into().unwrap();
-    u64::from_le_bytes(bytes)
-}
-
 /// Read a u64 from slab data at offset (checked).
 fn read_u64_checked(data: &[u8], off: usize) -> Option<u64> {
     if off + 8 > data.len() {
@@ -122,12 +116,11 @@ pub fn process_get_position_value(_program_id: &Pubkey, accounts: &[AccountInfo]
     // engine_off comes from the slab layout detected in read_position().
     let engine_off = position.engine_off;
 
-    // Read mark price.
-    let mark_price_e6 = if engine_off + 8 <= slab_data.len() {
-        read_u64(&slab_data, engine_off + ENGINE_MARK_PRICE_OFF)
-    } else {
-        0
-    };
+    // PERC-9060: Read mark price, returning an error instead of silently
+    // defaulting to 0. A zeroed mark price causes unrealized_pnl to compute
+    // as 0, making an underwater position appear break-even to consumers.
+    let mark_price_e6 = read_u64_checked(&slab_data, engine_off + ENGINE_MARK_PRICE_OFF)
+        .ok_or(ProgramError::from(NftError::SlabDataTooShort))?;
 
     // Read collateral from position data.
     // position.collateral is the actual deposited margin (slab acct_off + ACCT_COLLATERAL_OFF).
@@ -138,8 +131,11 @@ pub fn process_get_position_value(_program_id: &Pubkey, accounts: &[AccountInfo]
     // PERC-9018: Read maintenance_margin_bps as u64 (consistent with transfer_hook.rs).
     // Previously the comment said u128 but transfer hook read it as u64. The engine
     // field is maintenance_margin_bps: u64.
+    // PERC-9060: Propagate error instead of silently defaulting to 0.
+    // A zero maint_margin_bps would make any position appear healthy, matching
+    // the transfer_hook.rs pattern that uses .ok_or(NftError::SlabDataTooShort)?.
     let maint_margin_bps: u64 = read_u64_checked(&slab_data, engine_off + ENGINE_MAINT_MARGIN_OFF)
-        .unwrap_or(0);
+        .ok_or(ProgramError::from(NftError::SlabDataTooShort))?;
 
     // PERC-9019: Compute PnL with checked arithmetic returning explicit errors
     // instead of silently producing 0 via unwrap_or(0). A silently zeroed PnL
@@ -168,24 +164,26 @@ pub fn process_get_position_value(_program_id: &Pubkey, accounts: &[AccountInfo]
         .checked_add(unrealized_pnl)
         .ok_or(ProgramError::ArithmeticOverflow)?;
 
-    // Compute maintenance margin requirement and liquidation distance.
+    // PERC-9060: Propagate arithmetic overflow instead of silently zeroing.
+    // A silently zeroed maintenance_margin makes a liquidatable position appear healthy.
     let maintenance_margin = (position.size as u128)
         .checked_mul(maint_margin_bps as u128)
-        .unwrap_or(0) / 10_000;
+        .ok_or(ProgramError::ArithmeticOverflow)? / 10_000;
     let liquidation_distance_bps: i64 = if net_equity > 0 {
         let distance = net_equity
             .checked_sub(maintenance_margin as i128)
-            .unwrap_or(0);
+            .ok_or(ProgramError::ArithmeticOverflow)?;
         ((distance * 10_000) / net_equity) as i64
     } else {
         -10_000 // fully liquidatable
     };
 
-    // Funding delta since mint.
+    // PERC-9060: Propagate overflow instead of silently zeroing.
+    // A zeroed funding delta hides accrued funding costs from consumers.
     let funding_delta_e18 = position
         .global_funding_index_e18
         .checked_sub(nft_state.last_funding_index_e18)
-        .unwrap_or(0);
+        .ok_or(ProgramError::ArithmeticOverflow)?;
 
     // Log valuation data (clients read via simulateTransaction).
     msg!(
