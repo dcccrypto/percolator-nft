@@ -269,7 +269,7 @@ mod kani_proofs {
         assert_eq!(ix.accounts.len(), 3);
     }
 
-    /// Prove initialize_mint2 data is always exactly 35 bytes (no freeze authority).
+    /// Prove initialize_mint2 data is always exactly 67 bytes (with freeze authority).
     #[kani::proof]
     fn kani_init_mint2_data_size() {
         use percolator_nft::token2022;
@@ -280,10 +280,12 @@ mod kani_proofs {
         let auth = solana_program::pubkey::Pubkey::new_from_array(auth_bytes);
 
         let ix = token2022::initialize_mint2(&mint, &auth);
-        assert_eq!(ix.data.len(), 35, "InitializeMint2 data must be tag(1) + decimals(1) + authority(32) + freeze_option(1) = 35 bytes");
+        assert_eq!(ix.data.len(), 67, "InitializeMint2 data must be tag(1) + decimals(1) + mint_authority(32) + freeze_option(1) + freeze_authority(32) = 67 bytes");
         assert_eq!(ix.data[0], 20, "InitializeMint2 tag must be 20");
         assert_eq!(ix.data[1], 0, "Decimals must be 0 for NFT");
-        assert_eq!(ix.data[34], 0, "Freeze authority option must be None (0)");
+        assert_eq!(ix.data[34], 1, "Freeze authority option must be Some (1)");
+        // Freeze authority pubkey (bytes 35..67) must equal the mint authority pubkey (bytes 2..34).
+        assert_eq!(&ix.data[35..67], &ix.data[2..34], "Freeze authority must match mint authority");
     }
 
     // ═══════════════════════════════════════════════════════════
