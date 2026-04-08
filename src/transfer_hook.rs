@@ -454,6 +454,16 @@ pub fn process_execute(
             return Ok(());
         }
 
+        // ── Verify account_id matches — slot reuse protection (primary) ──
+        if pos.account_id != nft_state.account_id {
+            msg!(
+                "Transfer rejected: account_id mismatch (stored={}, current={})",
+                nft_state.account_id,
+                pos.account_id,
+            );
+            return Err(NftError::InvalidAccountId.into());
+        }
+
         // ── PERC-9060: Verify slab slot still matches PDA snapshot ──
         // If the original position was closed and the slab slot reused for a
         // different position, entry_price_e6 and/or is_long will differ from

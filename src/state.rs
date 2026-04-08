@@ -23,7 +23,7 @@ pub const POSITION_NFT_LEN: usize = core::mem::size_of::<PositionNft>();
 /// On-chain state for a Position NFT.
 ///
 /// Uses `[u8; 32]` for pubkey fields (Pubkey doesn't implement Pod/Zeroable).
-/// Layout: 208 bytes total (multiple of 16, required by i128 alignment).
+/// Layout: 216 bytes total (multiple of 8, required by i128 alignment).
 #[derive(Clone, Copy, Pod, Zeroable)]
 #[repr(C)]
 pub struct PositionNft {
@@ -42,7 +42,7 @@ pub struct PositionNft {
     /// The Token-2022 NFT mint address.
     pub nft_mint: [u8; 32], // 56..88
 
-    // ── Position snapshot (24 bytes) ──
+    // ── Position snapshot (32 bytes) ──
     /// Entry price (E6 fixed-point) at time of NFT mint.
     pub entry_price_e6: u64, // 88..96
     /// Position size (absolute, in collateral micro-units) at mint time.
@@ -50,19 +50,26 @@ pub struct PositionNft {
     /// 1=long, 0=short.
     pub is_long: u8, // 104
     pub _pad2: [u8; 7], // 105..112
+    /// Signed position size (position_basis_q from slab) at mint — allows detecting position flips.
+    pub position_basis_q: i128, // 112..128
 
-    // ── Funding tracking (24 bytes) ──
+    // ── Funding tracking (16 bytes) ──
     /// Last funding index applied (E18 fixed-point).
-    pub last_funding_index_e18: i128, // 112..128
-    /// Timestamp (unix seconds) when this NFT was minted.
-    pub minted_at: i64, // 128..136
+    pub last_funding_index_e18: i128, // 128..144
 
-    // ── Reserved (72 bytes — includes tail alignment for i128) ──
-    pub _reserved0: [u8; 64], // 136..200
-    pub _reserved1: [u8; 8],  // 200..208
+    /// Timestamp (unix seconds) when this NFT was minted.
+    pub minted_at: i64, // 144..152
+
+    // ── Slot reuse protection (8 bytes) ──
+    /// Account ID at mint time — monotonically increasing u64 unique per account.
+    /// Verified on burn/settle to detect if the slab slot was reallocated.
+    pub account_id: u64, // 152..160
+
+    // ── Reserved (56 bytes) ──
+    pub _reserved0: [u8; 56], // 160..216
 }
 
-const _: () = assert!(core::mem::size_of::<PositionNft>() == 208);
+const _: () = assert!(core::mem::size_of::<PositionNft>() == 216);
 
 impl PositionNft {
     /// Get the slab pubkey.

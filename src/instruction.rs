@@ -70,6 +70,22 @@ pub const TAG_GET_POSITION_VALUE: u8 = 3;
 /// Data: discriminator(8) + amount(8) [SPL TransferHook format]
 pub const TAG_EXECUTE_TRANSFER_HOOK: u8 = 4;
 
+/// Tag 5: EmergencyBurn
+/// Burn an NFT for a liquidated/closed position where position_basis_q == 0.
+/// Callable only by NFT holder. Used when a position is liquidated and collateral cannot be recovered.
+///
+/// Accounts:
+///   0. `[signer]`    NFT holder
+///   1. `[writable]`  PositionNft PDA (closed, rent returned)
+///   2. `[writable]`  NFT mint (supply → 0)
+///   3. `[writable]`  Holder's NFT token account (closed)
+///   4. `[]`          Slab account (verify liquidation)
+///   5. `[]`          Mint authority PDA
+///   6. `[]`          Token-2022 program
+///
+/// Data: tag(1)
+pub const TAG_EMERGENCY_BURN: u8 = 5;
+
 /// Decoded instruction for the Position NFT program.
 pub enum NftInstruction {
     /// Mint an NFT for a position.
@@ -82,6 +98,8 @@ pub enum NftInstruction {
     GetPositionValue,
     /// TransferHook execute (called by Token-2022, not directly).
     ExecuteTransferHook { amount: u64 },
+    /// Emergency burn for liquidated positions.
+    EmergencyBurn,
 }
 
 impl NftInstruction {
@@ -110,6 +128,7 @@ impl NftInstruction {
             TAG_BURN_POSITION_NFT => Ok(NftInstruction::BurnPositionNft),
             TAG_SETTLE_FUNDING => Ok(NftInstruction::SettleFunding),
             TAG_GET_POSITION_VALUE => Ok(NftInstruction::GetPositionValue),
+            TAG_EMERGENCY_BURN => Ok(NftInstruction::EmergencyBurn),
             _ => Err(ProgramError::InvalidInstructionData),
         }
     }

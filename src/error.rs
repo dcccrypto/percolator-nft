@@ -40,6 +40,10 @@ pub enum NftError {
     InvalidTokenAccount = 16,
     /// TransferHook Execute was invoked directly, not via Token-2022 CPI.
     UnauthorizedDirectInvocation = 17,
+    /// MintPositionNft: account is an LP account, not a trading account.
+    LpAccountNotAllowed = 18,
+    /// Position account_id mismatch — slot was reallocated to a different account.
+    InvalidAccountId = 19,
 }
 
 impl From<NftError> for ProgramError {

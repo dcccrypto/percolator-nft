@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh pr:*)",
+      "Bash(wc -l src/*.rs)",
+      "Bash(cargo build-sbf:*)"
+    ]
+  }
+}
