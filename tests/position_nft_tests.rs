@@ -134,7 +134,7 @@ fn test_metadata_init_instruction_structure() {
     );
 
     // Discriminator is 8 bytes
-    assert_eq!(&ix.data[..8], &[210, 225, 30, 162, 88, 184, 238, 125]);
+    assert_eq!(&ix.data[..8], &[210, 225, 30, 162, 88, 184, 77, 141]);
     // 3 accounts: mint(w), update_authority, mint_authority(s)
     assert_eq!(ix.accounts.len(), 3);
     assert!(ix.accounts[0].is_writable);
