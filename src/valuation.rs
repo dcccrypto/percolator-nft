@@ -109,6 +109,21 @@ pub fn process_get_position_value(_program_id: &Pubkey, accounts: &[AccountInfo]
     let slab_data = slab.try_borrow_data()?;
     let position = read_position(&slab_data, nft_state.user_idx)?;
 
+    // ── PERC-9060: Verify slab slot still matches PDA snapshot ──
+    // If the original position was closed and the slab slot reused for a
+    // different position, entry_price_e6 and/or is_long will differ from
+    // the values snapshotted at mint time. Without this check, valuation
+    // would return data for a completely different user's position —
+    // misleading lending protocols and marketplaces into mis-pricing the NFT.
+    if nft_state.entry_price_e6 != position.entry_price_e6
+        || nft_state.is_long != position.is_long
+    {
+        msg!(
+            "GetPositionValue rejected: slab slot reuse detected (PDA snapshot does not match live position)"
+        );
+        return Err(NftError::PositionMismatch.into());
+    }
+
     if position.size == 0 {
         return Err(NftError::PositionNotOpen.into());
     }

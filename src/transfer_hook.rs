@@ -370,7 +370,7 @@ pub fn process_execute(
     //
     // Strategy: read everything we need into local variables, drop borrows,
     // then perform the CPI and final PDA write in separate scopes.
-    let (pda_user_idx, pda_slab_bytes, old_funding, new_funding);
+    let (pda_user_idx, pda_slab_bytes, old_funding, new_funding, pda_entry_price_e6, pda_is_long);
     {
         // ── PERC-9003: Verify PDA is owned by this program ──
         // Without this an attacker can pass a crafted account with matching magic
@@ -407,6 +407,8 @@ pub fn process_execute(
         pda_user_idx = nft_state.user_idx;
         pda_slab_bytes = nft_state.slab;
         old_funding = nft_state.last_funding_index_e18;
+        pda_entry_price_e6 = nft_state.entry_price_e6;
+        pda_is_long = nft_state.is_long;
 
         // ── PERC-9056: Verify PDA address matches expected derivation ──
         // Consistency with Burn (PERC-9008). Without this, any program-owned
@@ -421,6 +423,7 @@ pub fn process_execute(
             return Err(NftError::InvalidNftPda.into());
         }
 
+
         // pda_data (immutable Ref) is dropped here at end of block
     }
 
@@ -428,6 +431,18 @@ pub fn process_execute(
     let position = {
         let slab_data = slab.try_borrow_data()?;
         let pos = read_position(&slab_data, pda_user_idx)?;
+
+        // ── PERC-9060: Verify slab slot still matches PDA snapshot ──
+        // If the original position was closed and the slab slot reused for a
+        // different position, entry_price_e6 and/or is_long will differ from
+        // the values snapshotted at mint time. Without this check, the NFT
+        // would silently operate on a completely different position.
+        if pda_entry_price_e6 != pos.entry_price_e6 || pda_is_long != pos.is_long {
+            msg!(
+                "Transfer rejected: slab slot reuse detected (PDA snapshot does not match live position)"
+            );
+            return Err(NftError::PositionMismatch.into());
+        }
 
         // ── GH#1 / GH#11: Verify position equity >= maintenance margin ──
         // Uses real PnL calculation. Collateral is read from slab acct_off+32
