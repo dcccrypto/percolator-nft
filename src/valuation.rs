@@ -173,7 +173,14 @@ pub fn process_get_position_value(_program_id: &Pubkey, accounts: &[AccountInfo]
         let distance = net_equity
             .checked_sub(maintenance_margin as i128)
             .ok_or(ProgramError::ArithmeticOverflow)?;
-        ((distance * 10_000) / net_equity) as i64
+        // PERC-9060: Use checked arithmetic and clamp before casting to prevent
+        // silent truncation/wrapping that could flip the sign and make an
+        // underwater position appear healthy to lending protocols.
+        let bps_i128 = distance
+            .checked_mul(10_000)
+            .unwrap_or(if distance < 0 { i128::MIN } else { i128::MAX })
+            / net_equity;
+        bps_i128.clamp(i64::MIN as i128, i64::MAX as i128) as i64
     } else {
         -10_000 // fully liquidatable
     };
