@@ -101,7 +101,12 @@ fn is_position_healthy(
     funding_delta_e18: i128,
 ) -> Result<bool, ProgramError> {
     if position_size == 0 {
-        return Ok(false); // No position = nothing to transfer.
+        // PERC-9061: A closed position (size=0) has zero exposure and cannot
+        // be liquidated. Return healthy so the transfer hook proceeds —
+        // the new holder may need to withdraw remaining collateral or burn
+        // the NFT. The margin check below is meaningless when size=0
+        // (maintenance requirement = size * bps / 10000 = 0).
+        return Ok(true);
     }
 
     // PERC-9009: Reject if entry_price_e6 is zero — this would make PnL=0
@@ -432,11 +437,29 @@ pub fn process_execute(
         let slab_data = slab.try_borrow_data()?;
         let pos = read_position(&slab_data, pda_user_idx)?;
 
+        // ── PERC-9061: Closed-position fast path ──
+        // When size==0 the position has been fully closed on Percolator.
+        // Percolator zeroes entry_price_e6 on close, so the PERC-9060 snapshot
+        // check below would always fail for legitimate closed positions. There is
+        // also no margin to check, no funding to settle, and no slab owner to
+        // update. Allow the transfer so the NFT can eventually be burned once
+        // collateral is withdrawn.
+        if pos.size == 0 {
+            msg!(
+                "Position closed (size=0) — transfer allowed: slab={}, idx={}, new_owner={}",
+                Pubkey::new_from_array(pda_slab_bytes),
+                pda_user_idx,
+                dest_wallet.key
+            );
+            return Ok(());
+        }
+
         // ── PERC-9060: Verify slab slot still matches PDA snapshot ──
         // If the original position was closed and the slab slot reused for a
         // different position, entry_price_e6 and/or is_long will differ from
         // the values snapshotted at mint time. Without this check, the NFT
         // would silently operate on a completely different position.
+        // (Only reached when size > 0 — closed positions use the fast path above.)
         if pda_entry_price_e6 != pos.entry_price_e6 || pda_is_long != pos.is_long {
             msg!(
                 "Transfer rejected: slab slot reuse detected (PDA snapshot does not match live position)"
