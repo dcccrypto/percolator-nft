@@ -23,14 +23,20 @@ const IX_MINT_TO: u8 = 7;
 const IX_BURN: u8 = 8;
 
 /// Build InitializeMint2 instruction (Token-2022).
-/// decimals=0, mint_authority=authority, freeze_authority=None.
+/// decimals=0, mint_authority=authority, freeze_authority=authority (same PDA).
+///
+/// PERC-9033: The freeze authority is set to the mint_authority PDA so that the
+/// program can emergency-freeze NFT token accounts if a vulnerability is
+/// discovered. Without a freeze authority, there is no way to pause transfers
+/// while a fix is deployed — a critical gap in incident response capability.
 pub fn initialize_mint2(mint: &Pubkey, authority: &Pubkey) -> Instruction {
-    // Layout: tag(1) + decimals(1) + mint_authority(32) + freeze_option(1) [+ freeze_authority(32)]
-    let mut data = Vec::with_capacity(35);
+    // Layout: tag(1) + decimals(1) + mint_authority(32) + freeze_option(1) + freeze_authority(32)
+    let mut data = Vec::with_capacity(67);
     data.push(IX_INITIALIZE_MINT2);
     data.push(0); // decimals = 0
     data.extend_from_slice(authority.as_ref()); // mint authority
-    data.push(0); // no freeze authority
+    data.push(1); // has freeze authority
+    data.extend_from_slice(authority.as_ref()); // freeze authority = same PDA
 
     Instruction {
         program_id: TOKEN_2022_PROGRAM_ID,
@@ -79,6 +85,51 @@ pub fn burn(account: &Pubkey, mint: &Pubkey, owner: &Pubkey, amount: u64) -> Ins
     }
 }
 
+/// SPL Token SetAuthority instruction tag (same for Token and Token-2022).
+const IX_SET_AUTHORITY: u8 = 6;
+
+/// Build SetAuthority instruction to remove the mint authority (set to None).
+///
+/// This is the standard NFT pattern: after minting supply=1, revoke the mint
+/// authority so no additional tokens can ever be minted for this mint.
+///
+/// Data layout: tag(1) + authority_type(1) + new_authority_option(1)
+///   authority_type 0 = MintTokens
+///   new_authority_option 0 = None (no new authority)
+pub fn set_mint_authority_none(mint: &Pubkey, current_authority: &Pubkey) -> Instruction {
+    let data = vec![
+        IX_SET_AUTHORITY,
+        0, // authority_type = MintTokens
+        0, // COption::None — no new authority
+    ];
+
+    Instruction {
+        program_id: TOKEN_2022_PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new(*mint, false),
+            AccountMeta::new_readonly(*current_authority, true),
+        ],
+        data,
+    }
+}
+
+/// SPL Token CloseAccount instruction tag (same for Token and Token-2022).
+const IX_CLOSE_ACCOUNT: u8 = 9;
+
+/// Build CloseAccount instruction (Token-2022).
+/// PERC-9031/9032: Close a token account or mint, returning rent to destination.
+pub fn close_account(account: &Pubkey, destination: &Pubkey, owner: &Pubkey) -> Instruction {
+    Instruction {
+        program_id: TOKEN_2022_PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new(*account, false),
+            AccountMeta::new(*destination, false),
+            AccountMeta::new_readonly(*owner, true),
+        ],
+        data: vec![IX_CLOSE_ACCOUNT],
+    }
+}
+
 /// Derive the associated token account address for Token-2022.
 pub fn get_associated_token_address(wallet: &Pubkey, mint: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(
@@ -101,10 +152,14 @@ pub fn get_associated_token_address(wallet: &Pubkey, mint: &Pubkey) -> Pubkey {
 const METADATA_INIT_DISCRIMINATOR: [u8; 8] = [210, 225, 30, 162, 88, 184, 238, 125];
 
 /// Encode a string as borsh: u32 LE length + utf8 bytes.
+///
+/// PERC-9043: Use u32::try_from to detect strings exceeding u32::MAX.
+/// The original `as u32` cast silently truncates, producing malformed borsh.
 fn borsh_string(s: &str) -> Vec<u8> {
     let bytes = s.as_bytes();
+    let len = u32::try_from(bytes.len()).expect("borsh_string: length exceeds u32::MAX");
     let mut out = Vec::with_capacity(4 + bytes.len());
-    out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    out.extend_from_slice(&len.to_le_bytes());
     out.extend_from_slice(bytes);
     out
 }
@@ -166,6 +221,33 @@ pub fn initialize_transfer_hook(
 
 /// Size of TransferHook extension data (authority + program_id).
 pub const TRANSFER_HOOK_EXTENSION_SIZE: u64 = 4 + 64; // type(2) + len(2) + authority(32) + program_id(32)
+
+/// Size of MintCloseAuthority extension (TLV header + authority pubkey).
+pub const MINT_CLOSE_AUTHORITY_EXTENSION_SIZE: u64 = 4 + 32; // type(2) + len(2) + authority(32)
+
+/// Initialize MintCloseAuthority extension on a Token-2022 mint.
+/// Must be called BEFORE InitializeMint2.
+///
+/// This extension allows closing the mint account (reclaiming rent) when
+/// supply reaches 0. Without it, Token-2022 rejects CloseAccount on mints.
+///
+/// Instruction tag 25 = InitializeMintCloseAuthority.
+/// Data: tag(1) + option(1) + authority(32)
+pub fn initialize_mint_close_authority(
+    mint: &Pubkey,
+    close_authority: &Pubkey,
+) -> Instruction {
+    let mut data = Vec::with_capacity(34);
+    data.push(25); // InitializeMintCloseAuthority instruction tag
+    data.push(1);  // COption::Some
+    data.extend_from_slice(close_authority.as_ref());
+
+    Instruction {
+        program_id: TOKEN_2022_PROGRAM_ID,
+        accounts: vec![AccountMeta::new(*mint, false)],
+        data,
+    }
+}
 
 /// Build CreateAssociatedTokenAccount instruction for Token-2022.
 pub fn create_associated_token_account(

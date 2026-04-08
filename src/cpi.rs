@@ -37,22 +37,39 @@ pub fn verify_slab_owner(slab: &AccountInfo) -> Result<(), ProgramError> {
 /// Slab header magic (first 8 bytes).
 pub const SLAB_MAGIC: u64 = 0x5045_5243_534C_4142; // "PERCSLAB"
 
+// PERC-9042: Read helpers return Result instead of panicking.
+// The original .unwrap() would abort the transaction with an unhelpful
+// "index out of bounds" panic if slab data was shorter than expected.
+// Returning errors allows proper error propagation and clear diagnostics.
+
 /// Read a u64 from a byte slice at the given offset.
-fn read_u64(data: &[u8], off: usize) -> u64 {
-    let bytes: [u8; 8] = data[off..off + 8].try_into().unwrap();
-    u64::from_le_bytes(bytes)
+fn read_u64(data: &[u8], off: usize) -> Result<u64, ProgramError> {
+    let end = off.checked_add(8).ok_or(NftError::SlabDataTooShort)?;
+    if end > data.len() {
+        return Err(NftError::SlabDataTooShort.into());
+    }
+    let bytes: [u8; 8] = data[off..end].try_into().unwrap();
+    Ok(u64::from_le_bytes(bytes))
 }
 
 /// Read a u16 from a byte slice at the given offset.
-fn read_u16(data: &[u8], off: usize) -> u16 {
-    let bytes: [u8; 2] = data[off..off + 2].try_into().unwrap();
-    u16::from_le_bytes(bytes)
+fn read_u16(data: &[u8], off: usize) -> Result<u16, ProgramError> {
+    let end = off.checked_add(2).ok_or(NftError::SlabDataTooShort)?;
+    if end > data.len() {
+        return Err(NftError::SlabDataTooShort.into());
+    }
+    let bytes: [u8; 2] = data[off..end].try_into().unwrap();
+    Ok(u16::from_le_bytes(bytes))
 }
 
 /// Read an i128 from a byte slice at the given offset.
-fn read_i128(data: &[u8], off: usize) -> i128 {
-    let bytes: [u8; 16] = data[off..off + 16].try_into().unwrap();
-    i128::from_le_bytes(bytes)
+fn read_i128(data: &[u8], off: usize) -> Result<i128, ProgramError> {
+    let end = off.checked_add(16).ok_or(NftError::SlabDataTooShort)?;
+    if end > data.len() {
+        return Err(NftError::SlabDataTooShort.into());
+    }
+    let bytes: [u8; 16] = data[off..end].try_into().unwrap();
+    Ok(i128::from_le_bytes(bytes))
 }
 
 /// Detected slab layout parameters.
@@ -81,8 +98,17 @@ fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
         return Err(NftError::SlabDataTooShort.into());
     }
 
+    // PERC-9023: Verify slab magic before trusting any other header fields.
+    // SLAB_MAGIC was defined but never checked, allowing any Percolator-owned
+    // account (e.g. a config account) that happens to match the size heuristic
+    // to be parsed as a slab, reading garbage position data.
+    let magic = read_u64(data, 0);
+    if magic != SLAB_MAGIC {
+        return Err(NftError::UnrecognizedSlabLayout.into());
+    }
+
     // Read max_accounts from header offset 8.
-    let max_accounts = read_u16(data, 8) as usize;
+    let max_accounts = read_u16(data, 8)? as usize;
     if max_accounts == 0 {
         return Err(NftError::UnrecognizedSlabLayout.into());
     }
@@ -92,7 +118,13 @@ fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
     let v0_accounts_off = V0_BITMAP_OFF + v0_bitmap_bytes;
     let v0_total = v0_accounts_off + max_accounts * V0_ACCOUNT_SIZE;
 
-    if data.len() == v0_total || data.len() == v0_total + 8 {
+    // PERC-9039: Use >= instead of == for layout size matching.
+    // The original exact-match (==) breaks if Percolator adds even 1 byte
+    // to the slab (e.g. a trailing version field or padding). Using >= with
+    // a minimum size threshold is forward-compatible — we only need the data
+    // to be at least as large as our layout requires. The magic + max_accounts
+    // checks above already validate the header.
+    if data.len() >= v0_total && data.len() <= v0_total + 64 {
         return Ok(SlabLayout {
             engine_off: V0_ENGINE_OFF,
             account_size: V0_ACCOUNT_SIZE,
@@ -106,8 +138,7 @@ fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
     let v1d_accounts_off = V1D_BITMAP_OFF + v1d_bitmap_bytes;
     let v1d_total = v1d_accounts_off + max_accounts * V1D_ACCOUNT_SIZE;
 
-    // Accept both postBitmap=2 and postBitmap=18 sizes.
-    if data.len() == v1d_total || data.len() == v1d_total + 16 {
+    if data.len() >= v1d_total && data.len() <= v1d_total + 64 {
         return Ok(SlabLayout {
             engine_off: V1D_ENGINE_OFF,
             account_size: V1D_ACCOUNT_SIZE,
@@ -206,20 +237,36 @@ pub fn read_position(slab_data: &[u8], user_idx: u16) -> Result<PositionData, Pr
             .unwrap(),
     );
 
-    let collateral = read_u64(slab_data, acct_off + ACCT_COLLATERAL_OFF);
-    // position_size is I128 = [lo: u64, hi: u64]. Absolute size = lo-word; sign = hi-word MSB.
-    let size = read_u64(slab_data, acct_off + ACCT_POS_SIZE_LO_OFF);
-    let pos_hi = read_u64(slab_data, acct_off + ACCT_POS_SIZE_HI_OFF);
+    // PERC-9037: Read collateral as U128 lo-word. The capital field is a
+    // Percolator U128 stored as [lo: u64, hi: u64]. We only use the lo-word,
+    // which is correct for values < 2^64. Verify the hi-word is zero to detect
+    // overflow that would silently truncate the collateral value — a truncated
+    // collateral makes the position appear under-collateralized in margin checks.
+    let collateral = read_u64(slab_data, acct_off + ACCT_COLLATERAL_OFF)?;
+    let collateral_hi = read_u64(slab_data, acct_off + ACCT_COLLATERAL_OFF + 8)?;
+    if collateral_hi != 0 {
+        solana_program::msg!("read_position: collateral U128 hi-word is non-zero, value exceeds u64");
+        return Err(ProgramError::ArithmeticOverflow);
+    }
+
+    // PERC-9038: Read position_size as I128 = [lo: u64, hi: u64].
+    // Percolator's I128 uses sign+magnitude encoding: lo-word is the absolute
+    // magnitude, hi-word sign bit indicates direction (negative = short).
+    // Verify the hi-word magnitude bits (excluding sign) are zero to detect
+    // position sizes that exceed u64 — which would silently truncate.
+    let size = read_u64(slab_data, acct_off + ACCT_POS_SIZE_LO_OFF)?;
+    let pos_hi = read_u64(slab_data, acct_off + ACCT_POS_SIZE_HI_OFF)?;
     let is_long: u8 = if (pos_hi as i64) < 0 { 0 } else { 1 };
-    let entry_price_e6 = read_u64(slab_data, acct_off + ACCT_ENTRY_PRICE_OFF);
+    // Check magnitude bits of hi-word (mask out sign bit)
+    if pos_hi & 0x7FFF_FFFF_FFFF_FFFF != 0 {
+        solana_program::msg!("read_position: position_size I128 exceeds u64 magnitude");
+        return Err(ProgramError::ArithmeticOverflow);
+    }
+    let entry_price_e6 = read_u64(slab_data, acct_off + ACCT_ENTRY_PRICE_OFF)?;
 
     // Read global funding index from engine.
     let funding_off = layout.engine_off + ENGINE_FUNDING_INDEX_OFF;
-    let global_funding_index_e18 = if funding_off + 16 <= slab_data.len() {
-        read_i128(slab_data, funding_off)
-    } else {
-        0i128
-    };
+    let global_funding_index_e18 = read_i128(slab_data, funding_off).unwrap_or(0i128);
 
     Ok(PositionData {
         owner,
