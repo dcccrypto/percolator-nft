@@ -98,6 +98,15 @@ fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
         return Err(NftError::SlabDataTooShort.into());
     }
 
+    // PERC-9023: Verify slab magic before trusting any other header fields.
+    // SLAB_MAGIC was defined but never checked, allowing any Percolator-owned
+    // account (e.g. a config account) that happens to match the size heuristic
+    // to be parsed as a slab, reading garbage position data.
+    let magic = read_u64(data, 0);
+    if magic != SLAB_MAGIC {
+        return Err(NftError::UnrecognizedSlabLayout.into());
+    }
+
     // Read max_accounts from header offset 8.
     let max_accounts = read_u16(data, 8)? as usize;
     if max_accounts == 0 {
@@ -255,9 +264,11 @@ pub fn read_position(slab_data: &[u8], user_idx: u16) -> Result<PositionData, Pr
     }
     let entry_price_e6 = read_u64(slab_data, acct_off + ACCT_ENTRY_PRICE_OFF)?;
 
-    // Read global funding index from engine.
+    // PERC-9060: Propagate error instead of silently defaulting to 0.
+    // A zero funding index would cause incorrect funding settlement on
+    // NFT transfers, matching transfer_hook.rs error propagation pattern.
     let funding_off = layout.engine_off + ENGINE_FUNDING_INDEX_OFF;
-    let global_funding_index_e18 = read_i128(slab_data, funding_off).unwrap_or(0i128);
+    let global_funding_index_e18 = read_i128(slab_data, funding_off)?;
 
     Ok(PositionData {
         owner,
