@@ -24,7 +24,7 @@ use solana_program::{
 use crate::{
     cpi::{read_position, verify_slab_owner, PERCOLATOR_DEVNET, PERCOLATOR_MAINNET},
     error::NftError,
-    state::{verify_pda_version, PositionNft, MINT_AUTHORITY_SEED, POSITION_NFT_LEN, POSITION_NFT_MAGIC},
+    state::{position_nft_pda, verify_pda_version, PositionNft, MINT_AUTHORITY_SEED, POSITION_NFT_LEN, POSITION_NFT_MAGIC},
 };
 
 // Maintenance margin bps offset within the engine block.
@@ -258,6 +258,24 @@ pub fn process_execute(
         // different mint, allowing cross-mint state confusion.
         if nft_state.nft_mint != mint.key.to_bytes() {
             msg!("Transfer rejected: mint does not match NFT PDA nft_mint binding");
+            return Err(NftError::InvalidNftPda.into());
+        }
+
+        // ── PERC-9060: Re-derive PDA address from canonical seeds ──
+        // The checks above verify the *contents* of the account (magic, version,
+        // slab, mint) but never prove that nft_pda.key is the canonical PDA
+        // derived from [b"position_nft", slab, user_idx]. An attacker could
+        // create a rogue account owned by this program at a non-PDA address
+        // with matching field values, bypassing all content checks. Re-deriving
+        // the address is the only way to prove this account was created via the
+        // legitimate mint_nft flow.
+        let (expected_pda, _) = position_nft_pda(
+            &Pubkey::new_from_array(nft_state.slab),
+            nft_state.user_idx,
+            program_id,
+        );
+        if *nft_pda.key != expected_pda {
+            msg!("Transfer rejected: PositionNft PDA address does not match canonical derivation");
             return Err(NftError::InvalidNftPda.into());
         }
 
