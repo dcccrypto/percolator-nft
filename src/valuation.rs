@@ -20,7 +20,7 @@ use solana_program::{
 use crate::{
     cpi::{read_position, verify_slab_owner},
     error::NftError,
-    state::{verify_pda_version, PositionNft, POSITION_NFT_LEN, POSITION_NFT_MAGIC},
+    state::{position_nft_pda, verify_pda_version, PositionNft, POSITION_NFT_LEN, POSITION_NFT_MAGIC},
 };
 
 /// Read a u64 from slab data at offset.
@@ -84,7 +84,7 @@ const ENGINE_MAINT_MARGIN_OFF: usize = 96; // u64 (bps)
 /// Data: tag(1) — no additional data needed.
 ///
 /// Returns valuation via msg! logs (clients use simulateTransaction).
-pub fn process_get_position_value(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+pub fn process_get_position_value(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     let accounts_iter = &mut accounts.iter();
     let nft_pda = next_account_info(accounts_iter)?;
     let slab = next_account_info(accounts_iter)?;
@@ -93,7 +93,7 @@ pub fn process_get_position_value(_program_id: &Pubkey, accounts: &[AccountInfo]
     verify_slab_owner(slab)?;
 
     // ── PERC-9003: Verify PDA is owned by this program ──
-    if nft_pda.owner != _program_id {
+    if nft_pda.owner != program_id {
         return Err(ProgramError::IllegalOwner);
     }
 
@@ -109,6 +109,16 @@ pub fn process_get_position_value(_program_id: &Pubkey, accounts: &[AccountInfo]
     verify_pda_version(nft_state)?;
     if nft_state.slab != slab.key.to_bytes() {
         return Err(ProgramError::InvalidAccountData);
+    }
+
+    // ── PERC-9060: Re-derive PDA to prevent spoofed valuation ──
+    // Without this, any program-owned account with matching magic/version/slab
+    // bytes could impersonate a different user_idx, feeding lending protocols
+    // and marketplaces incorrect equity data via simulateTransaction logs.
+    let (expected_pda, _) = position_nft_pda(slab.key, nft_state.user_idx, program_id);
+    if *nft_pda.key != expected_pda {
+        msg!("Valuation rejected: PDA address does not match expected derivation");
+        return Err(NftError::InvalidNftPda.into());
     }
 
     // Read position from slab.
