@@ -214,11 +214,12 @@ fn process_mint_position_nft(
     // URI: Empty — all position data is on-chain in PositionNft PDA
     let nft_uri = "";
 
-    // ── Create Token-2022 mint account (with metadata + transfer hook extensions) ──
+    // ── Create Token-2022 mint account (with metadata + transfer hook + close authority extensions) ──
     let mint_space = MINT_BASE_SIZE
         + METADATA_EXTENSION_HEADER
         + METADATA_MAX_LEN
-        + token2022::TRANSFER_HOOK_EXTENSION_SIZE;
+        + token2022::TRANSFER_HOOK_EXTENSION_SIZE
+        + token2022::MINT_CLOSE_AUTHORITY_EXTENSION_SIZE;
     let mint_rent = rent.minimum_balance(mint_space as usize);
     invoke(
         &system_instruction::create_account(
@@ -235,6 +236,14 @@ fn process_mint_position_nft(
     // Our program is the transfer hook — Token-2022 will call us on every transfer.
     invoke(
         &token2022::initialize_transfer_hook(nft_mint.key, mint_auth.key, program_id),
+        &[nft_mint.clone()],
+    )?;
+
+    // PERC-9060: Initialize MintCloseAuthority extension BEFORE InitializeMint2.
+    // This allows the mint account to be closed during burn, reclaiming ~0.005 SOL rent.
+    // The close authority is the mint_auth PDA (same as mint authority).
+    invoke(
+        &token2022::initialize_mint_close_authority(nft_mint.key, mint_auth.key),
         &[nft_mint.clone()],
     )?;
 
@@ -435,6 +444,18 @@ fn process_burn_position_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
     invoke(
         &token2022::close_account(holder_ata.key, holder.key, holder.key),
         &[holder_ata.clone(), holder.clone()],
+    )?;
+
+    // ── PERC-9060: Close the mint account (return rent to holder) ──
+    // The MintCloseAuthority extension was initialized at mint creation with the
+    // mint_auth PDA as close authority. Now that supply=0, we can close the mint
+    // to reclaim ~0.005 SOL rent that would otherwise be permanently locked.
+    let (_, mint_auth_bump) = mint_authority_pda(program_id);
+    let mint_auth_seeds: &[&[u8]] = &[MINT_AUTHORITY_SEED, &[mint_auth_bump]];
+    invoke_signed(
+        &token2022::close_account(nft_mint.key, holder.key, mint_auth.key),
+        &[nft_mint.clone(), holder.clone(), mint_auth.clone()],
+        &[mint_auth_seeds],
     )?;
 
     // ── Close the PDA (return rent to holder) ──

@@ -166,6 +166,38 @@ pub fn initialize_token_metadata(
 }
 
 // ═══════════════════════════════════════════════════════════════
+// MintCloseAuthority Extension
+// ═══════════════════════════════════════════════════════════════
+
+/// Initialize MintCloseAuthority extension on a Token-2022 mint.
+/// Must be called BEFORE InitializeMint2.
+///
+/// PERC-9060: Without this extension, Token-2022 will reject CloseAccount on
+/// mint accounts. The close authority is set to the mint_auth PDA so that the
+/// program can reclaim rent when burning NFTs.
+///
+/// Instruction tag 25 = InitializeMintCloseAuthority (Token-2022 extension).
+/// Data: tag(1) + COption<Pubkey>(1 + 32 if Some)
+pub fn initialize_mint_close_authority(
+    mint: &Pubkey,
+    close_authority: &Pubkey,
+) -> Instruction {
+    let mut data = Vec::with_capacity(34);
+    data.push(25); // InitializeMintCloseAuthority instruction tag
+    data.push(1); // COption::Some
+    data.extend_from_slice(close_authority.as_ref());
+
+    Instruction {
+        program_id: TOKEN_2022_PROGRAM_ID,
+        accounts: vec![AccountMeta::new(*mint, false)],
+        data,
+    }
+}
+
+/// Size of MintCloseAuthority extension: type(2) + length(2) + close_authority(32) = 36 bytes.
+pub const MINT_CLOSE_AUTHORITY_EXTENSION_SIZE: u64 = 36;
+
+// ═══════════════════════════════════════════════════════════════
 // TransferHook Extension
 // ═══════════════════════════════════════════════════════════════
 
