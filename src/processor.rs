@@ -371,6 +371,12 @@ fn process_burn_position_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
     // Without this guard an open-position NFT can be burned, orphaning the position
     // in the slab with no way to recover the collateral (unrecoverable funds).
     // We read position data directly from the slab using the CPI helper.
+    //
+    // NOTE (PERC-9060): We intentionally skip the entry_price/is_long mismatch
+    // check here. Burn requires size==0 && collateral==0 (position fully closed).
+    // Percolator zeroes entry_price_e6 when a position is closed, so comparing
+    // against the PDA snapshot would always fail for legitimate burns. Slot reuse
+    // is not a risk here — the slot is empty, and burn destroys the PDA anyway.
     verify_slab_owner(slab)?;
     {
         let slab_data = slab.try_borrow_data()?;
@@ -541,6 +547,20 @@ fn process_settle_funding(_program_id: &Pubkey, accounts: &[AccountInfo]) -> Pro
     let slab_data = slab.try_borrow_data()?;
     let position = read_position(&slab_data, nft_state.user_idx)?;
     drop(slab_data);
+
+    // ── PERC-9060: Verify slab slot still matches PDA snapshot ──
+    // If the original position was closed and the slab slot reused for a
+    // different position, entry_price_e6 and/or is_long will differ from
+    // the values snapshotted at mint time. Without this check, the NFT
+    // would settle funding on a completely different position.
+    if nft_state.entry_price_e6 != position.entry_price_e6
+        || nft_state.is_long != position.is_long
+    {
+        msg!(
+            "SettleFunding rejected: slab slot reuse detected (PDA snapshot does not match live position)"
+        );
+        return Err(NftError::PositionMismatch.into());
+    }
 
     // PERC-9029: Reject settling funding on a closed position (size=0).
     // A closed position has no active funding accrual. Allowing settle on a
