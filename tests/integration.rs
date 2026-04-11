@@ -231,6 +231,7 @@ fn test_mint_rejects_lp_account() {
     let mut token_lamports = 0u64;
     let mut ata_prog_lamports = 0u64;
     let mut sys_lamports = 0u64;
+    let mut extra_metas_lamports = 0u64;
 
     let mut owner_data: Vec<u8> = vec![];
     let mut pda_data: Vec<u8> = vec![];
@@ -241,6 +242,7 @@ fn test_mint_rejects_lp_account() {
     let mut token_data: Vec<u8> = vec![];
     let mut ata_prog_data: Vec<u8> = vec![];
     let mut sys_data: Vec<u8> = vec![];
+    let mut extra_metas_data: Vec<u8> = vec![];
 
     let pda_pk = Pubkey::new_from_array(pda_key.to_bytes());
     let nft_mint_pk = Pubkey::new_from_array(nft_mint_key.to_bytes());
@@ -253,6 +255,12 @@ fn test_mint_rejects_lp_account() {
     let auth_pk = Pubkey::new_from_array(mint_auth_key.to_bytes());
     let ata_program_pk = token2022_ata_program_id();
     let sys_pk = system_pk;
+    // PERC-9064: ExtraAccountMetaList PDA is now part of the MintPositionNft
+    // account list at slot 9. Derived from [b"extra-account-metas", nft_mint].
+    let (extra_metas_pda_pk, _) = percolator_nft::transfer_hook::extra_account_metas_pda(
+        &nft_mint_pk,
+        &prog_pk,
+    );
 
     let owner_ai = AccountInfo::new(
         &owner_pk,
@@ -344,9 +352,29 @@ fn test_mint_rejects_lp_account() {
         false,
         0,
     );
+    // PERC-9064: slot 9 — ExtraAccountMetaList PDA (writable, created by mint handler).
+    let extra_metas_ai = AccountInfo::new(
+        &extra_metas_pda_pk,
+        false,
+        true,
+        &mut extra_metas_lamports,
+        &mut extra_metas_data,
+        &sys_pk,
+        false,
+        0,
+    );
 
     let accounts = [
-        owner_ai, pda_ai, nft_mint_ai, ata_ai, slab_ai, auth_ai, token_ai, ata_prog_ai, sys_ai,
+        owner_ai,
+        pda_ai,
+        nft_mint_ai,
+        ata_ai,
+        slab_ai,
+        auth_ai,
+        token_ai,
+        ata_prog_ai,
+        sys_ai,
+        extra_metas_ai,
     ];
     // MintPositionNft: tag=0, user_idx=0 (LE u16)
     let ix_data = [0u8, 0u8, 0u8];

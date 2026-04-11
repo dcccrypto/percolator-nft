@@ -6,18 +6,21 @@ use solana_program::program_error::ProgramError;
 
 /// Tag 0: MintPositionNft
 /// Mint an NFT for an open position. Caller must be the position owner.
+/// Atomically creates and initializes the ExtraAccountMetaList PDA
+/// required by Token-2022 TransferHook, so the NFT is born transferable.
 ///
 /// Accounts:
-///   0. `[signer]`    Position owner (pays rent)
-///   1. `[writable]`  PositionNft PDA (created)
-///   2. `[writable]`  NFT mint (Token-2022, created)
-///   3. `[writable]`  Owner's NFT token account (ATA, created)
-///   4. `[]`          Slab account (read position data)
-///   5. `[]`          Mint authority PDA
-///   6. `[]`          Token-2022 program
-///   7. `[]`          Associated token account program
-///   8. `[]`          System program
-///   9. `[]`          Rent sysvar
+///   0. `[signer, writable]`  Position owner (pays rent)
+///   1. `[writable]`          PositionNft PDA (created)
+///   2. `[writable, signer]`  NFT mint (Token-2022, created — fresh keypair)
+///   3. `[writable]`          Owner's NFT token account (ATA, created)
+///   4. `[]`                  Slab account (read position data)
+///   5. `[]`                  Mint authority PDA
+///   6. `[]`                  Token-2022 program
+///   7. `[]`                  Associated token account program
+///   8. `[]`                  System program
+///   9. `[writable]`          ExtraAccountMetaList PDA (created) —
+///                            seeds: `[b"extra-account-metas", nft_mint]`
 ///
 /// Data: tag(1) + user_idx(2)
 pub const TAG_MINT_POSITION_NFT: u8 = 0;

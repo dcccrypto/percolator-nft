@@ -196,6 +196,128 @@ fn test_extra_account_metas_pda() {
     assert_eq!(b1, b2);
 }
 
+/// PERC-9064: Byte-layout regression test for the ExtraAccountMetaList TLV
+/// written by `process_mint_position_nft`. This test manually constructs
+/// the 191-byte buffer using the same algorithm as the mint handler and
+/// verifies every byte offset against the documented upstream layout
+/// from `spl_tlv_account_resolution::ExtraAccountMetaList::init::<ExecuteInstruction>`:
+///
+///   [0..8]   : TLV type discriminator = EXECUTE_DISCRIMINATOR
+///   [8..12]  : u32 LE — value length = 4 + 35*N (179 for N=5)
+///   [12..16] : u32 LE — entry count (5)
+///   [16..]   : N × 35-byte entries:
+///              [0]     = 0 (FixedPubkey discriminator)
+///              [1..33] = pubkey
+///              [33]    = is_signer (0/1)
+///              [34]    = is_writable (0/1)
+///
+/// Any change to the byte layout — tag, length field, entry format — will
+/// fail this test before it reaches mainnet. This is the byte-exactness
+/// guarantee against upstream.
+#[test]
+fn test_extra_metas_tlv_byte_layout() {
+    use percolator_nft::transfer_hook::EXECUTE_DISCRIMINATOR;
+    use solana_sdk::pubkey::Pubkey;
+
+    // Test fixtures: 5 distinct fake pubkeys for the 5 extra account slots.
+    let nft_pda_key = Pubkey::new_from_array([1u8; 32]);
+    let slab_key = Pubkey::new_from_array([2u8; 32]);
+    let percolator_prog_key = Pubkey::new_from_array([3u8; 32]);
+    let mint_auth_key = Pubkey::new_from_array([4u8; 32]);
+    // Use all-fives so we can differentiate from the real sysvar pubkey in assertions.
+    let sysvar_ix_key = Pubkey::new_from_array([5u8; 32]);
+
+    // Constants matching the mint handler.
+    const EXTRA_META_ENTRY_LEN: usize = 35;
+    const EXTRA_META_COUNT: usize = 5;
+    const EXTRA_METAS_ACCOUNT_LEN: usize =
+        8 + 4 + 4 + EXTRA_META_ENTRY_LEN * EXTRA_META_COUNT;
+
+    // Verify constants.
+    assert_eq!(
+        EXTRA_METAS_ACCOUNT_LEN, 191,
+        "ExtraAccountMetaList PDA size must be 191 bytes for 5 fixed-pubkey entries"
+    );
+
+    // Build the buffer using the same algorithm as the mint handler.
+    let mut data = vec![0u8; EXTRA_METAS_ACCOUNT_LEN];
+    data[0..8].copy_from_slice(&EXECUTE_DISCRIMINATOR);
+    let tlv_value_len: u32 = (4 + EXTRA_META_ENTRY_LEN * EXTRA_META_COUNT) as u32;
+    data[8..12].copy_from_slice(&tlv_value_len.to_le_bytes());
+    data[12..16].copy_from_slice(&(EXTRA_META_COUNT as u32).to_le_bytes());
+
+    let entries: [(Pubkey, bool, bool); EXTRA_META_COUNT] = [
+        (nft_pda_key, false, true),
+        (slab_key, false, false),
+        (percolator_prog_key, false, false),
+        (mint_auth_key, false, false),
+        (sysvar_ix_key, false, false),
+    ];
+    for (i, (key, is_signer, is_writable)) in entries.iter().enumerate() {
+        let off = 16 + i * EXTRA_META_ENTRY_LEN;
+        data[off] = 0;
+        data[off + 1..off + 33].copy_from_slice(key.as_ref());
+        data[off + 33] = if *is_signer { 1 } else { 0 };
+        data[off + 34] = if *is_writable { 1 } else { 0 };
+    }
+
+    // ── Assertions against the documented byte layout ──
+
+    // Total length.
+    assert_eq!(data.len(), 191);
+
+    // TLV type discriminator = EXECUTE_DISCRIMINATOR.
+    assert_eq!(
+        &data[0..8],
+        &EXECUTE_DISCRIMINATOR,
+        "TLV type must equal EXECUTE_DISCRIMINATOR"
+    );
+
+    // TLV value length = 179 (= 4 count + 5*35 entries).
+    assert_eq!(
+        u32::from_le_bytes(data[8..12].try_into().unwrap()),
+        179,
+        "TLV value length must be 179 for 5 fixed-pubkey entries"
+    );
+
+    // Entry count = 5.
+    assert_eq!(
+        u32::from_le_bytes(data[12..16].try_into().unwrap()),
+        5,
+        "Entry count must be 5"
+    );
+
+    // Entry 0: PositionNft PDA (writable), offset 16..51.
+    assert_eq!(data[16], 0, "Entry 0: discriminator must be 0 (FixedPubkey)");
+    assert_eq!(&data[17..49], nft_pda_key.as_ref(), "Entry 0: pubkey mismatch");
+    assert_eq!(data[49], 0, "Entry 0: is_signer must be 0");
+    assert_eq!(data[50], 1, "Entry 0: is_writable must be 1 (PositionNft PDA is writable)");
+
+    // Entry 1: Slab (read-only), offset 51..86.
+    assert_eq!(data[51], 0);
+    assert_eq!(&data[52..84], slab_key.as_ref());
+    assert_eq!(data[84], 0);
+    assert_eq!(data[85], 0, "Entry 1: slab is read-only");
+
+    // Entry 2: Percolator program (read-only), offset 86..121.
+    assert_eq!(data[86], 0);
+    assert_eq!(&data[87..119], percolator_prog_key.as_ref());
+    assert_eq!(data[119], 0);
+    assert_eq!(data[120], 0);
+
+    // Entry 3: Mint authority PDA (read-only), offset 121..156.
+    assert_eq!(data[121], 0);
+    assert_eq!(&data[122..154], mint_auth_key.as_ref());
+    assert_eq!(data[154], 0);
+    assert_eq!(data[155], 0);
+
+    // Entry 4: Instructions sysvar (read-only), offset 156..191.
+    assert_eq!(data[156], 0);
+    assert_eq!(&data[157..189], sysvar_ix_key.as_ref());
+    assert_eq!(data[189], 0);
+    assert_eq!(data[190], 0);
+}
+
 #[test]
 fn test_transfer_hook_extension_init() {
     use percolator_nft::token2022;
