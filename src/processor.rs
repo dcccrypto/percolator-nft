@@ -10,11 +10,11 @@ use solana_program::{
     pubkey::Pubkey,
     rent::Rent,
     system_instruction,
-    sysvar::Sysvar,
+    sysvar::{instructions as sysvar_instructions, Sysvar},
 };
 
 use crate::{
-    cpi::{read_position, verify_slab_owner},
+    cpi::{read_position, verify_slab_owner, PERCOLATOR_DEVNET, PERCOLATOR_MAINNET},
     error::NftError,
     instruction::NftInstruction,
     state::{
@@ -23,6 +23,7 @@ use crate::{
         POSITION_NFT_VERSION,
     },
     token2022,
+    transfer_hook::{extra_account_metas_pda, EXECUTE_DISCRIMINATOR, EXTRA_METAS_SEED},
 };
 
 /// Main instruction router.
@@ -78,6 +79,7 @@ fn process_mint_position_nft(
     let token_program = next_account_info(accounts_iter)?; // 6: Token-2022 program
     let ata_program = next_account_info(accounts_iter)?; // 7: ATA program
     let system_program = next_account_info(accounts_iter)?; // 8: System program
+    let extra_metas = next_account_info(accounts_iter)?; // 9: ExtraAccountMetaList PDA (writable, created)
 
     // ── PERC-9004: Verify well-known program account keys ──
     // Without these checks, an attacker can substitute malicious programs for
@@ -336,6 +338,170 @@ fn process_mint_position_nft(
         &[nft_mint.clone(), mint_auth.clone()],
         &[mint_auth_seeds],
     )?;
+
+    // ════════════════════════════════════════════════════════════════════
+    // PERC-9064: Atomic ExtraAccountMetaList PDA initialization
+    //
+    // Token-2022's TransferHook extension calls our `process_execute` on
+    // every NFT transfer. Before invoking the hook, Token-2022 reads the
+    // `ExtraAccountMetaList` PDA at `[b"extra-account-metas", mint]` to
+    // discover the extra accounts the hook requires. If that PDA is absent
+    // or not owned by this program, `process_execute` rejects with
+    // `InvalidExtraAccountMetas` and the NFT is non-transferable.
+    //
+    // We create and initialize the PDA here, inline, so every minted NFT
+    // is born transferable — no separate instruction to chain on the
+    // client side, no race window.
+    //
+    // TLV layout (byte-for-byte matches upstream
+    // `spl_tlv_account_resolution::state::ExtraAccountMetaList`
+    // `::init::<ExecuteInstruction>`):
+    //
+    //   bytes  [0..8]   : EXECUTE_DISCRIMINATOR (TLV type, 8 bytes)
+    //   bytes  [8..12]  : u32 LE — TLV value length = 4 + 35 * N (179 for N=5)
+    //   bytes  [12..16] : u32 LE — number of entries (5)
+    //   bytes  [16..16+35*N] : N × 35-byte ExtraAccountMeta entries:
+    //                            [0]      : discriminator (0 = Fixed/Literal pubkey)
+    //                            [1..33]  : 32-byte raw pubkey
+    //                            [33]     : is_signer (u8, 0 or 1)
+    //                            [34]     : is_writable (u8, 0 or 1)
+    //
+    // For N=5 fixed-pubkey entries, total account size = 16 + 175 = 191 bytes.
+    //
+    // The 5 entries correspond to `process_execute` extra account indices 5-9:
+    //   [5] PositionNft PDA      — writable  (hook updates last_funding_index_e18)
+    //   [6] Slab account         — read-only
+    //   [7] Percolator program   — read-only (value from slab.owner, see below)
+    //   [8] Mint authority PDA   — read-only
+    //   [9] Instructions sysvar  — read-only (for CPI caller verification)
+    //
+    // Percolator program key: taken from `*slab.owner`, which is verified
+    // by `verify_slab_owner` at line 106 to be either PERCOLATOR_DEVNET or
+    // PERCOLATOR_MAINNET — exactly the allow-list `process_execute` enforces
+    // at account index 7. Using slab.owner avoids adding an extra account
+    // to the MintPositionNft ABI.
+    {
+        // Re-assert the slab-owner invariant LOCALLY so the TLV block's
+        // security guarantee is refactor-proof: if a future edit moves the
+        // extra_metas block above the top-of-handler verify_slab_owner,
+        // this re-assertion still enforces the allow-list before any
+        // percolator_prog bytes are written into the validation account.
+        verify_slab_owner(slab)?;
+        // SAFETY: verify_slab_owner above guarantees slab.owner is one of
+        // {PERCOLATOR_DEVNET, PERCOLATOR_MAINNET}. Recording this pubkey
+        // in the ExtraAccountMetaList means every subsequent transfer hook
+        // invocation will see it at extra account index 7, matching the
+        // allow-list check already enforced in process_execute.
+        let percolator_prog_id: Pubkey = *slab.owner;
+        debug_assert!(
+            percolator_prog_id == PERCOLATOR_DEVNET
+                || percolator_prog_id == PERCOLATOR_MAINNET
+        );
+
+        // Derive the canonical ExtraAccountMetaList PDA and verify the
+        // caller passed the correct account.
+        let (expected_extra_metas, extra_metas_bump) =
+            extra_account_metas_pda(nft_mint.key, program_id);
+        if *extra_metas.key != expected_extra_metas {
+            msg!("MintPositionNft: extra_metas PDA does not match expected derivation");
+            return Err(NftError::InvalidExtraAccountMetas.into());
+        }
+
+        // Reject re-initialization. Because `nft_mint` is enforced to be
+        // a fresh keypair earlier in this handler (line 153), the PDA
+        // derived from its key should always be empty. This check is
+        // defense-in-depth against any future path that might reuse a
+        // mint keypair.
+        if extra_metas.owner == program_id && !extra_metas.data_is_empty() {
+            msg!("MintPositionNft: extra_metas PDA already initialized");
+            return Err(NftError::InvalidExtraAccountMetas.into());
+        }
+
+        // TLV account size constants.
+        const EXTRA_META_ENTRY_LEN: usize = 35;
+        const EXTRA_META_COUNT: usize = 5;
+        const EXTRA_METAS_ACCOUNT_LEN: usize =
+            8 /* TLV type */ + 4 /* TLV length */ + 4 /* entry count */
+            + EXTRA_META_ENTRY_LEN * EXTRA_META_COUNT;
+
+        let extra_metas_seeds: &[&[u8]] = &[
+            EXTRA_METAS_SEED,
+            nft_mint.key.as_ref(),
+            &[extra_metas_bump],
+        ];
+
+        // Grief-resistant creation: system_instruction::create_account fails
+        // if the destination already has lamports (a 1-lamport airdrop on
+        // the deterministic PDA address would permanently brick this mint).
+        // Instead, we transfer the rent shortfall from the payer (if any),
+        // then allocate and assign via signed CPIs. This sequence succeeds
+        // regardless of any pre-existing lamport balance.
+        let extra_metas_rent = rent.minimum_balance(EXTRA_METAS_ACCOUNT_LEN);
+        let current_lamports = extra_metas.lamports();
+        if current_lamports < extra_metas_rent {
+            let shortfall = extra_metas_rent - current_lamports;
+            invoke(
+                &system_instruction::transfer(owner.key, extra_metas.key, shortfall),
+                &[owner.clone(), extra_metas.clone(), system_program.clone()],
+            )?;
+        }
+        invoke_signed(
+            &system_instruction::allocate(
+                extra_metas.key,
+                EXTRA_METAS_ACCOUNT_LEN as u64,
+            ),
+            &[extra_metas.clone(), system_program.clone()],
+            &[extra_metas_seeds],
+        )?;
+        invoke_signed(
+            &system_instruction::assign(extra_metas.key, program_id),
+            &[extra_metas.clone(), system_program.clone()],
+            &[extra_metas_seeds],
+        )?;
+
+        // Write the TLV-encoded validation data.
+        let mut data = extra_metas.try_borrow_mut_data()?;
+        if data.len() != EXTRA_METAS_ACCOUNT_LEN {
+            return Err(ProgramError::AccountDataTooSmall);
+        }
+
+        // [0..8] TLV type discriminator = ExecuteInstruction's SplDiscriminate
+        //        = sha256("spl-transfer-hook-interface:execute")[..8]
+        //        (same constant the hook already uses to detect its
+        //        top-level Execute instruction).
+        data[0..8].copy_from_slice(&EXECUTE_DISCRIMINATOR);
+
+        // [8..12] u32 LE — TLV value length = entry_count(4) + entries(N*35)
+        let tlv_value_len: u32 =
+            (4 + EXTRA_META_ENTRY_LEN * EXTRA_META_COUNT) as u32;
+        data[8..12].copy_from_slice(&tlv_value_len.to_le_bytes());
+
+        // [12..16] u32 LE — number of entries
+        data[12..16].copy_from_slice(&(EXTRA_META_COUNT as u32).to_le_bytes());
+
+        // [16..] 35 bytes per entry, in order matching process_execute:
+        //   [disc(1) = 0 (FixedPubkey) | pubkey(32) | is_signer(1) | is_writable(1)]
+        let entries: [(Pubkey, bool, bool); EXTRA_META_COUNT] = [
+            // 5: PositionNft PDA — writable
+            (*nft_pda.key, false, true),
+            // 6: Slab — read-only
+            (*slab.key, false, false),
+            // 7: Percolator program — read-only, from verified slab.owner
+            (percolator_prog_id, false, false),
+            // 8: Mint authority PDA — read-only
+            (*mint_auth.key, false, false),
+            // 9: Instructions sysvar — read-only
+            (sysvar_instructions::id(), false, false),
+        ];
+
+        for (i, (key, is_signer, is_writable)) in entries.iter().enumerate() {
+            let off = 16 + i * EXTRA_META_ENTRY_LEN;
+            data[off] = 0; // FixedPubkey discriminator
+            data[off + 1..off + 33].copy_from_slice(key.as_ref());
+            data[off + 33] = if *is_signer { 1 } else { 0 };
+            data[off + 34] = if *is_writable { 1 } else { 0 };
+        }
+    }
 
     msg!(
         "PositionNft minted: slab={}, idx={}, mint={}",
