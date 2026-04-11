@@ -35,7 +35,15 @@ pub fn verify_slab_owner(slab: &AccountInfo) -> Result<(), ProgramError> {
 // Layout auto-detection by slab data length + header fields.
 
 /// Slab header magic (first 8 bytes).
-pub const SLAB_MAGIC: u64 = 0x5045_5243_534C_4142; // "PERCSLAB"
+///
+/// PERC-9065: Must match `percolator_prog::constants::MAGIC` in the upstream
+/// `dcccrypto/percolator-prog` crate, which is written into `SlabHeader.magic`
+/// at market creation. Previously this constant was `0x5045_5243_534C_4142`
+/// ("PERCSLAB") — a value that does not exist in any Percolator deployment.
+/// As a result, `detect_layout` rejected every real Percolator slab with
+/// `UnrecognizedSlabLayout`, making the NFT program unable to read any
+/// mainnet or devnet position data.
+pub const SLAB_MAGIC: u64 = 0x5045_5243_4F4C_4154; // "PERCOLAT"
 
 // PERC-9042: Read helpers return Result instead of panicking.
 // The original .unwrap() would abort the transaction with an unhelpful
