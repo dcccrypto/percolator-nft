@@ -149,7 +149,7 @@ pub fn get_associated_token_address(wallet: &Pubkey, mint: &Pubkey) -> Pubkey {
 
 /// Token metadata program discriminator for Initialize.
 /// SHA256("spl_token_metadata_interface:initialize_account")[:8]
-const METADATA_INIT_DISCRIMINATOR: [u8; 8] = [210, 225, 30, 162, 88, 184, 238, 125];
+const METADATA_INIT_DISCRIMINATOR: [u8; 8] = [210, 225, 30, 162, 88, 184, 77, 141];
 
 /// Encode a string as borsh: u32 LE length + utf8 bytes.
 ///

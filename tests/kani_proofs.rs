@@ -260,8 +260,15 @@ mod kani_proofs {
         let ix = token2022::initialize_token_metadata(&mint, &auth, &auth, "TEST", "T", "");
 
         // Discriminator must be first 8 bytes.
+        // SHA256("spl_token_metadata_interface:initialize_account")[:8]
         assert_eq!(ix.data[0], 210);
         assert_eq!(ix.data[1], 225);
+        assert_eq!(ix.data[2], 30);
+        assert_eq!(ix.data[3], 162);
+        assert_eq!(ix.data[4], 88);
+        assert_eq!(ix.data[5], 184);
+        assert_eq!(ix.data[6], 77);
+        assert_eq!(ix.data[7], 141);
         // Name "TEST" borsh: len=4 (LE u32) + 4 bytes.
         let name_len = u32::from_le_bytes([ix.data[8], ix.data[9], ix.data[10], ix.data[11]]);
         assert_eq!(name_len, 4, "Name length must be 4");
