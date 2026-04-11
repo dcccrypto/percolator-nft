@@ -8,6 +8,12 @@ description = "Position NFT wrapper for Percolator — mint transferable NFTs re
 no-entrypoint = []
 test = []
 kani = []
+# PERC-9066: Slab capacity tiers — MUST mirror percolator/Cargo.toml exactly
+# so the vendored RiskEngine in src/slab_types.rs matches the deployed
+# Percolator program's byte layout. Pick the feature matching the deployed
+# mainnet Percolator build (default = 4096 accounts, medium = 1024, etc).
+small = []
+medium = []
 
 [dependencies]
 solana-program = "=2.2.1"
