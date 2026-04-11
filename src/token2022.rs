@@ -197,6 +197,16 @@ pub fn initialize_token_metadata(
 // MetadataPointer Extension
 // ═══════════════════════════════════════════════════════════════
 
+/// Outer Token-2022 instruction tag for the MetadataPointer extension family.
+pub const METADATA_POINTER_EXTENSION_TAG: u8 = 39;
+/// Sub-tag within the MetadataPointer family for `Initialize`.
+pub const METADATA_POINTER_INITIALIZE_SUB_TAG: u8 = 0;
+/// Exact wire-format length of an `InitializeMetadataPointer` instruction.
+///
+/// Layout (matches upstream `encode_instruction`):
+///   outer_tag(1) + sub_tag(1) + authority(32) + metadata_address(32) = 66
+pub const INITIALIZE_METADATA_POINTER_IX_LEN: usize = 66;
+
 /// Initialize MetadataPointer extension on a Token-2022 mint.
 /// Must be called BEFORE InitializeMint2.
 ///
@@ -208,18 +218,30 @@ pub fn initialize_token_metadata(
 ///   authority     = mint_auth PDA (can update the pointer later)
 ///   metadata_addr = mint itself (metadata lives in this account)
 ///
-/// Instruction tag 39 = InitializeMetadataPointer (Token-2022 extension).
-/// Data: tag(1) + authority COption<Pubkey>(1 + 32) + metadata_address COption<Pubkey>(1 + 32)
+/// PERC-9063: Wire format correction. Token-2022 extension instructions use a
+/// two-byte discriminator (outer extension tag + sub-instruction tag), and the
+/// payload is `InitializeInstructionData` — a `#[repr(C)]` struct of two
+/// `OptionalNonZeroPubkey` fields. `OptionalNonZeroPubkey` is
+/// `#[repr(transparent)]` over `Pubkey` (32 raw bytes; zero = None).
+/// Confirmed against upstream `solana-program/token-2022/interface`.
+///
+/// Wire format:
+///   byte  0      : outer tag = 39 (MetadataPointerExtension family)
+///   byte  1      : sub-tag   = 0  (Initialize variant)
+///   bytes 2..34  : authority        (OptionalNonZeroPubkey, 32 bytes, no option flag)
+///   bytes 34..66 : metadata_address (OptionalNonZeroPubkey, 32 bytes, no option flag)
+///
+/// Total: 66 bytes. A zero Pubkey encodes `None`; callers pass real PDA
+/// pubkeys so both fields are always `Some`.
 pub fn initialize_metadata_pointer(
     mint: &Pubkey,
     authority: &Pubkey,
     metadata_address: &Pubkey,
 ) -> Instruction {
-    let mut data = Vec::with_capacity(67);
-    data.push(39); // InitializeMetadataPointer instruction tag
-    data.push(1); // COption::Some(authority)
+    let mut data = Vec::with_capacity(INITIALIZE_METADATA_POINTER_IX_LEN);
+    data.push(METADATA_POINTER_EXTENSION_TAG);
+    data.push(METADATA_POINTER_INITIALIZE_SUB_TAG);
     data.extend_from_slice(authority.as_ref());
-    data.push(1); // COption::Some(metadata_address)
     data.extend_from_slice(metadata_address.as_ref());
 
     Instruction {
@@ -236,18 +258,41 @@ pub const METADATA_POINTER_EXTENSION_SIZE: u64 = 68;
 // TransferHook Extension
 // ═══════════════════════════════════════════════════════════════
 
+/// Outer Token-2022 instruction tag for the TransferHook extension family.
+pub const TRANSFER_HOOK_EXTENSION_TAG: u8 = 36;
+/// Sub-tag within the TransferHook family for `Initialize`.
+pub const TRANSFER_HOOK_INITIALIZE_SUB_TAG: u8 = 0;
+/// Exact wire-format length of an `InitializeTransferHook` instruction.
+///
+/// Layout (matches upstream `encode_instruction`):
+///   outer_tag(1) + sub_tag(1) + authority(32) + program_id(32) = 66
+pub const INITIALIZE_TRANSFER_HOOK_IX_LEN: usize = 66;
+
 /// Initialize TransferHook extension on a Token-2022 mint.
 /// Must be called BEFORE InitializeMint2.
 ///
-/// Instruction tag 36 = InitializeTransferHook (Token-2022 extension).
-/// Data: tag(1) + authority(32) + program_id(32)
+/// PERC-9063: Wire format correction. Prior versions emitted 65 bytes,
+/// omitting the sub-tag — Token-2022 rejected the instruction with
+/// InvalidInstructionData. Like MetadataPointer, TransferHook uses the
+/// two-byte extension discriminator (outer tag + sub-tag) followed by
+/// `InitializeInstructionData` — two `OptionalNonZeroPubkey` fields.
+/// Confirmed against upstream `solana-program/token-2022/interface`.
+///
+/// Wire format:
+///   byte  0      : outer tag = 36 (TransferHookExtension family)
+///   byte  1      : sub-tag   = 0  (Initialize variant)
+///   bytes 2..34  : authority   (OptionalNonZeroPubkey, 32 bytes, no option flag)
+///   bytes 34..66 : program_id  (OptionalNonZeroPubkey, 32 bytes, no option flag)
+///
+/// Total: 66 bytes.
 pub fn initialize_transfer_hook(
     mint: &Pubkey,
     authority: &Pubkey,
     hook_program_id: &Pubkey,
 ) -> Instruction {
-    let mut data = Vec::with_capacity(65);
-    data.push(36); // InitializeTransferHook instruction tag
+    let mut data = Vec::with_capacity(INITIALIZE_TRANSFER_HOOK_IX_LEN);
+    data.push(TRANSFER_HOOK_EXTENSION_TAG);
+    data.push(TRANSFER_HOOK_INITIALIZE_SUB_TAG);
     data.extend_from_slice(authority.as_ref());
     data.extend_from_slice(hook_program_id.as_ref());
 

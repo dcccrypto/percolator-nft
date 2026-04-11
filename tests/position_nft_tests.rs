@@ -204,8 +204,12 @@ fn test_transfer_hook_extension_init() {
     let hook_prog = solana_sdk::pubkey::Pubkey::new_unique();
 
     let ix = token2022::initialize_transfer_hook(&mint, &auth, &hook_prog);
-    assert_eq!(ix.data[0], 36); // InitializeTransferHook tag
-    assert_eq!(ix.data.len(), 65); // tag(1) + authority(32) + program_id(32)
+    // PERC-9063: wire format is outer_tag(1) + sub_tag(1) + authority(32) + program_id(32) = 66
+    assert_eq!(ix.data[0], 36); // TransferHookExtension outer tag
+    assert_eq!(ix.data[1], 0); // TransferHookInstruction::Initialize sub-tag
+    assert_eq!(ix.data.len(), 66);
+    assert_eq!(&ix.data[2..34], auth.as_ref());
+    assert_eq!(&ix.data[34..66], hook_prog.as_ref());
     assert_eq!(ix.accounts.len(), 1);
 }
 
