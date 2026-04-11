@@ -407,4 +407,144 @@ mod kani_proofs {
             "C10-B2: burn guard fires iff position is NOT closed"
         );
     }
+
+    // ═══════════════════════════════════════════════════════════
+    // PERC-9063: Token-2022 extension instruction wire-format proofs
+    //
+    // Ground truth: upstream `solana-program/token-2022/interface`
+    //   encode_instruction  ->  [outer_tag, sub_tag, bytes_of(pod_data)]
+    //   InitializeInstructionData { authority, metadata_address }
+    //     where each field is OptionalNonZeroPubkey, which is
+    //     #[repr(transparent)] over Pubkey (32 raw bytes; no option
+    //     flag — the all-zero pubkey encodes None).
+    //
+    // Both InitializeMetadataPointer and InitializeTransferHook are
+    // exactly 1 + 1 + 32 + 32 = 66 bytes on the wire.
+    //
+    // Prior versions of these functions shipped with two distinct bugs
+    // that silently corrupted every MintPositionNft call against real
+    // Token-2022: metadata_pointer added spurious COption flag bytes
+    // (67-byte payload), and transfer_hook omitted the sub-tag entirely
+    // (65-byte payload). These proofs permanently pin the correct layout
+    // so any regression to the historical shapes is caught statically.
+    // ═══════════════════════════════════════════════════════════
+
+    /// Pin the wire-format constants so any change to them without
+    /// updating this proof is a verification error.
+    #[kani::proof]
+    fn kani_token2022_extension_constants_pinned() {
+        use percolator_nft::token2022::{
+            INITIALIZE_METADATA_POINTER_IX_LEN, INITIALIZE_TRANSFER_HOOK_IX_LEN,
+            METADATA_POINTER_EXTENSION_TAG, METADATA_POINTER_INITIALIZE_SUB_TAG,
+            TRANSFER_HOOK_EXTENSION_TAG, TRANSFER_HOOK_INITIALIZE_SUB_TAG,
+        };
+
+        assert_eq!(METADATA_POINTER_EXTENSION_TAG, 39);
+        assert_eq!(METADATA_POINTER_INITIALIZE_SUB_TAG, 0);
+        assert_eq!(INITIALIZE_METADATA_POINTER_IX_LEN, 66);
+
+        assert_eq!(TRANSFER_HOOK_EXTENSION_TAG, 36);
+        assert_eq!(TRANSFER_HOOK_INITIALIZE_SUB_TAG, 0);
+        assert_eq!(INITIALIZE_TRANSFER_HOOK_IX_LEN, 66);
+    }
+
+    /// Pin on-chain TLV extension size constants: header(4) + data(64) = 68
+    /// for both MetadataPointer and TransferHook. Catches "fixed the
+    /// instruction but forgot the account-space allocation" regressions.
+    #[kani::proof]
+    fn kani_token2022_extension_tlv_sizes_pinned() {
+        use percolator_nft::token2022::{
+            METADATA_POINTER_EXTENSION_SIZE, TRANSFER_HOOK_EXTENSION_SIZE,
+        };
+        assert_eq!(METADATA_POINTER_EXTENSION_SIZE, 4 + 64);
+        assert_eq!(TRANSFER_HOOK_EXTENSION_SIZE, 4 + 64);
+    }
+
+    /// InitializeMetadataPointer produces byte-exact upstream shape for
+    /// ALL possible pubkey inputs.
+    #[kani::proof]
+    fn kani_initialize_metadata_pointer_wire_format() {
+        use percolator_nft::token2022::{
+            initialize_metadata_pointer, INITIALIZE_METADATA_POINTER_IX_LEN,
+            METADATA_POINTER_EXTENSION_TAG, METADATA_POINTER_INITIALIZE_SUB_TAG,
+        };
+
+        let mint_bytes: [u8; 32] = kani::any();
+        let auth_bytes: [u8; 32] = kani::any();
+        let meta_bytes: [u8; 32] = kani::any();
+
+        let mint = solana_program::pubkey::Pubkey::new_from_array(mint_bytes);
+        let authority = solana_program::pubkey::Pubkey::new_from_array(auth_bytes);
+        let metadata_address = solana_program::pubkey::Pubkey::new_from_array(meta_bytes);
+
+        let ix = initialize_metadata_pointer(&mint, &authority, &metadata_address);
+
+        assert_eq!(ix.data.len(), INITIALIZE_METADATA_POINTER_IX_LEN);
+        assert_eq!(ix.data[0], METADATA_POINTER_EXTENSION_TAG);
+        assert_eq!(ix.data[1], METADATA_POINTER_INITIALIZE_SUB_TAG);
+        assert_eq!(&ix.data[2..34], &auth_bytes);
+        assert_eq!(&ix.data[34..66], &meta_bytes);
+        assert_eq!(ix.accounts.len(), 1);
+    }
+
+    /// InitializeTransferHook produces byte-exact upstream shape for
+    /// ALL possible pubkey inputs.
+    #[kani::proof]
+    fn kani_initialize_transfer_hook_wire_format() {
+        use percolator_nft::token2022::{
+            initialize_transfer_hook, INITIALIZE_TRANSFER_HOOK_IX_LEN,
+            TRANSFER_HOOK_EXTENSION_TAG, TRANSFER_HOOK_INITIALIZE_SUB_TAG,
+        };
+
+        let mint_bytes: [u8; 32] = kani::any();
+        let auth_bytes: [u8; 32] = kani::any();
+        let hook_bytes: [u8; 32] = kani::any();
+
+        let mint = solana_program::pubkey::Pubkey::new_from_array(mint_bytes);
+        let authority = solana_program::pubkey::Pubkey::new_from_array(auth_bytes);
+        let hook_program_id = solana_program::pubkey::Pubkey::new_from_array(hook_bytes);
+
+        let ix = initialize_transfer_hook(&mint, &authority, &hook_program_id);
+
+        assert_eq!(ix.data.len(), INITIALIZE_TRANSFER_HOOK_IX_LEN);
+        assert_eq!(ix.data[0], TRANSFER_HOOK_EXTENSION_TAG);
+        assert_eq!(ix.data[1], TRANSFER_HOOK_INITIALIZE_SUB_TAG);
+        assert_eq!(&ix.data[2..34], &auth_bytes);
+        assert_eq!(&ix.data[34..66], &hook_bytes);
+        assert_eq!(ix.accounts.len(), 1);
+    }
+
+    /// Negative proof: explicitly reject the historical 67-byte COption
+    /// shape for MetadataPointer. If someone re-introduces COption flag
+    /// bytes, this proof fails loudly.
+    #[kani::proof]
+    fn kani_initialize_metadata_pointer_rejects_legacy_coption_shape() {
+        use percolator_nft::token2022::initialize_metadata_pointer;
+        let mint = solana_program::pubkey::Pubkey::new_from_array(kani::any());
+        let authority = solana_program::pubkey::Pubkey::new_from_array(kani::any());
+        let metadata_address = solana_program::pubkey::Pubkey::new_from_array(kani::any());
+
+        let ix = initialize_metadata_pointer(&mint, &authority, &metadata_address);
+
+        // Historical bug: 67 bytes with COption::Some flag bytes at [1] and [34].
+        assert_ne!(ix.data.len(), 67, "must not be the old 67-byte COption shape");
+        // Byte at index 1 must be the Initialize sub-tag (0), NOT a COption::Some (1).
+        assert_ne!(ix.data[1], 1, "byte 1 must be sub-tag, not COption::Some");
+    }
+
+    /// Negative proof: explicitly reject the historical 65-byte shape
+    /// for TransferHook, which omitted the sub-tag byte entirely.
+    #[kani::proof]
+    fn kani_initialize_transfer_hook_rejects_legacy_missing_subtag() {
+        use percolator_nft::token2022::initialize_transfer_hook;
+        let mint = solana_program::pubkey::Pubkey::new_from_array(kani::any());
+        let authority = solana_program::pubkey::Pubkey::new_from_array(kani::any());
+        let hook_program_id = solana_program::pubkey::Pubkey::new_from_array(kani::any());
+
+        let ix = initialize_transfer_hook(&mint, &authority, &hook_program_id);
+
+        // Historical bug: 65 bytes (no sub-tag).
+        assert_ne!(ix.data.len(), 65, "must not be the old 65-byte missing-sub-tag shape");
+        assert_eq!(ix.data.len(), 66, "must include the sub-tag byte");
+    }
 }
