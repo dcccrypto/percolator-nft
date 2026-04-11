@@ -116,10 +116,16 @@ const V1D_ENGINE_OFF: usize = 424;
 const V1D_ACCOUNT_SIZE: usize = 240;
 const V1D_BITMAP_OFF: usize = 1048; // engine_off + 624
 
-/// V12_1 layout constants (upstream rebase — mainnet target).
+/// V12_1 layout constants (upstream rebase — mainnet target, HOST aarch64).
 const V12_1_ENGINE_OFF_LAYOUT: usize = 648; // align_up(104 + 544, 8)
 const V12_1_ACCOUNT_SIZE_LAYOUT: usize = 320;
 const V12_1_BITMAP_OFF_LAYOUT: usize = 1016; // engine_off + 368
+
+/// V12_1_EP layout constants (entry_price re-added, SBF deployed binary).
+/// Account grows from 280 → 288 on SBF. Engine at 616, bitmap at engine+584.
+const V12_1_EP_ENGINE_OFF: usize = 616;
+const V12_1_EP_ACCOUNT_SIZE: usize = 288;
+const V12_1_EP_BITMAP_OFF: usize = 1200; // engine_off(616) + 584 = 1200 absolute
 
 /// Detect layout from slab data length and header.
 fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
@@ -190,7 +196,28 @@ fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
         });
     }
 
-    // Try V12_1 (upstream rebase — mainnet target).
+    // Try V12_1_EP (SBF deployed, entry_price re-added, 288-byte accounts).
+    let v12ep_bitmap_bytes = max_accounts.div_ceil(8);
+    let v12ep_accounts_off = V12_1_EP_BITMAP_OFF + v12ep_bitmap_bytes;
+    let v12ep_total = v12ep_accounts_off + max_accounts * V12_1_EP_ACCOUNT_SIZE;
+
+    if data.len() >= v12ep_total && data.len() <= v12ep_total + 64 {
+        return Ok(SlabLayout {
+            engine_off: V12_1_EP_ENGINE_OFF,
+            account_size: V12_1_EP_ACCOUNT_SIZE,
+            bitmap_off: V12_1_EP_BITMAP_OFF,
+            max_accounts,
+            acct_owner_off: 216,           // shifted +8 from V12_1 due to entry_price insertion
+            acct_pos_size_lo_off: 88,      // position_basis_q: i128 at SBF offset 88
+            acct_pos_size_hi_off: 96,
+            acct_entry_price_off: 144,     // entry_price: u64 at 144 (after adl_epoch_snap)
+            engine_mark_price_off: 560,    // SBF probed: markPriceE6 at engine+560
+            engine_maint_margin_off: 40,   // SBF: params_off(32) + 8 = 40
+            engine_funding_index_off: 0,   // not present in SBF engine (-1 equivalent, read returns 0)
+        });
+    }
+
+    // Try V12_1 HOST (upstream rebase, 320-byte accounts).
     let v12_bitmap_bytes = max_accounts.div_ceil(8);
     let v12_accounts_off = V12_1_BITMAP_OFF_LAYOUT + v12_bitmap_bytes;
     let v12_total = v12_accounts_off + max_accounts * V12_1_ACCOUNT_SIZE_LAYOUT;
@@ -205,9 +232,9 @@ fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
             acct_pos_size_lo_off: 296,
             acct_pos_size_hi_off: 304,
             acct_entry_price_off: 280,
-            engine_mark_price_off: 928, // V12_1: mark_ewma_e6 at engine+928
-            engine_maint_margin_off: 104, // params_off(96) + 8 = 104
-            engine_funding_index_off: 936, // V12_1: funding_index at engine+936
+            engine_mark_price_off: 928,
+            engine_maint_margin_off: 104,
+            engine_funding_index_off: 936,
         });
     }
 
