@@ -340,7 +340,7 @@ fn test_burn_not_nftholder_ata_wrong_owner_system_program() {
     let v0_total = v0_bitmap_off + bitmap_bytes + (max_accounts as usize) * 240;
     let mut slab_data = vec![0u8; v0_total];
     // SLAB_MAGIC at offset 0
-    slab_data[0..8].copy_from_slice(&0x5045_5243_534C_4142u64.to_le_bytes());
+    slab_data[0..8].copy_from_slice(&0x5045_5243_4F4C_4154u64.to_le_bytes()); // PERC-9065: "PERCOLAT"
     slab_data[8..10].copy_from_slice(&max_accounts.to_le_bytes());
     // Set bitmap bit for slot 0
     slab_data[v0_bitmap_off] = 0x01;
@@ -492,7 +492,7 @@ fn test_burn_not_nftholder_ata_wrong_owner_legacy_token() {
     let v0_bitmap_off = 608usize;
     let v0_total = v0_bitmap_off + bitmap_bytes + (max_accounts as usize) * 240;
     let mut slab_data = vec![0u8; v0_total];
-    slab_data[0..8].copy_from_slice(&0x5045_5243_534C_4142u64.to_le_bytes());
+    slab_data[0..8].copy_from_slice(&0x5045_5243_4F4C_4154u64.to_le_bytes()); // PERC-9065: "PERCOLAT"
     slab_data[8..10].copy_from_slice(&max_accounts.to_le_bytes());
     slab_data[v0_bitmap_off] = 0x01;
     let mut auth_data: Vec<u8> = vec![];
@@ -743,7 +743,7 @@ fn test_burn_rejects_wrong_pda_address() {
     let v0_total = 608 + bitmap_bytes + max_accounts as usize * 240;
     let mut slab_data = vec![0u8; v0_total];
     // SLAB_MAGIC required by detect_layout()
-    slab_data[0..8].copy_from_slice(&0x5045_5243_534C_4142u64.to_le_bytes());
+    slab_data[0..8].copy_from_slice(&0x5045_5243_4F4C_4154u64.to_le_bytes()); // PERC-9065: "PERCOLAT"
     slab_data[8..10].copy_from_slice(&max_accounts.to_le_bytes());
     // Set bitmap bit for index 0
     slab_data[608] = 0x01;
