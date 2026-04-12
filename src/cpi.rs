@@ -7,6 +7,7 @@
 use solana_program::{account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey};
 
 use crate::error::NftError;
+use crate::slab_types;
 
 // ═══════════════════════════════════════════════════════════════
 // Percolator program IDs (verified at runtime via account owner)
@@ -71,9 +72,13 @@ fn read_u16(data: &[u8], off: usize) -> Result<u16, ProgramError> {
 }
 
 /// Read a u32 from a byte slice at the given offset.
-fn read_u32(data: &[u8], off: usize) -> u32 {
-    let bytes: [u8; 4] = data[off..off + 4].try_into().unwrap();
-    u32::from_le_bytes(bytes)
+fn read_u32(data: &[u8], off: usize) -> Result<u32, ProgramError> {
+    let end = off.checked_add(4).ok_or(NftError::SlabDataTooShort)?;
+    if end > data.len() {
+        return Err(NftError::SlabDataTooShort.into());
+    }
+    let bytes: [u8; 4] = data[off..end].try_into().unwrap();
+    Ok(u32::from_le_bytes(bytes))
 }
 
 /// Read an i128 from a byte slice at the given offset.
@@ -127,14 +132,11 @@ const V12_1_EP_ENGINE_OFF: usize = 616;
 const V12_1_EP_ACCOUNT_SIZE: usize = 288;
 const V12_1_EP_BITMAP_OFF: usize = 1200; // engine_off(616) + 584 = 1200 absolute
 
-/// V12_15 layout constants (upstream sync — reserve cohorts, funding_rate_e9, MarketMode).
-/// Two variants: 62 cohorts (4400 bytes/account) and 8 cohorts (944 bytes, --features small).
-/// Engine at 624. Account field offsets 0-240 are identical for both variants.
-const V12_15_ENGINE_OFF: usize = 624;
-const V12_15_ACCOUNT_SIZE: usize = 944;       // 8 cohorts (--features small, deployed)
-const V12_15_BITMAP_OFF: usize = 1856;        // absolute: 624 + 1264 - 32 = 1856 (for n=256, 8 cohorts)
-const V12_15_ACCOUNT_SIZE_FULL: usize = 4400;  // 62 cohorts (upstream default)
-const V12_15_BITMAP_OFF_FULL: usize = 2016;    // absolute for 62-cohort variant
+/// V12_15 layout constants — sourced from slab_types.rs compile-time assertions.
+/// Engine at 616 (SBF, align 8). Account offsets from slab_types::ACCT_OFF_*.
+const V12_15_ENGINE_OFF: usize = slab_types::ENGINE_OFF;  // 616
+const V12_15_ACCOUNT_SIZE: usize = 920;       // 8 cohorts, SBF (verified on-chain)
+const V12_15_ACCOUNT_SIZE_FULL: usize = 4400; // 62 cohorts (upstream default)
 
 /// Detect layout from slab data length and header.
 fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
@@ -205,45 +207,57 @@ fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
         });
     }
 
-    // Try V12_15 (upstream sync, 4400-byte accounts with reserve cohorts).
+    // Try V12_15 (upstream sync, reserve cohorts, 8 cohorts / --features small).
+    // Compute bitmap offset from slab_types: bitmap is at ENGINE_OFF + ENGINE_REL_USED.
+    let v1215_bitmap_off = V12_15_ENGINE_OFF + slab_types::ENGINE_REL_USED; // 616 + 1016 = 1632
     let v1215_bitmap_bytes = max_accounts.div_ceil(8);
-    let v1215_accounts_off = V12_15_BITMAP_OFF + v1215_bitmap_bytes;
+    // After bitmap: num_used(2) + pad(6) + next_account_id(8) + free_head(2) + next_free(2*n)
+    // Then accounts array starts at ENGINE_OFF + ENGINE_REL_ACCOUNTS
+    let v1215_accounts_off = V12_15_ENGINE_OFF + slab_types::ENGINE_REL_ACCOUNTS;
     let v1215_total = v1215_accounts_off + max_accounts * V12_15_ACCOUNT_SIZE;
 
     if data.len() >= v1215_total && data.len() <= v1215_total + 256 {
         return Ok(SlabLayout {
             engine_off: V12_15_ENGINE_OFF,
             account_size: V12_15_ACCOUNT_SIZE,
-            bitmap_off: V12_15_BITMAP_OFF,
+            bitmap_off: v1215_bitmap_off,
             max_accounts,
-            acct_owner_off: 192,           // Account.owner at offset 192
-            acct_pos_size_lo_off: 64,      // position_basis_q: i128 at offset 64
-            acct_pos_size_hi_off: 72,      // hi-word at 72 (not used for i128, but kept for compat)
-            acct_entry_price_off: 120,     // entry_price: u64 at offset 120
-            engine_mark_price_off: 0,      // mark_price not in v12.15 engine (removed)
-            engine_maint_margin_off: 40,   // params at 32, maint_margin_bps at params+8 = 40
-            engine_funding_index_off: 0,   // funding index not present as single field (per-side now)
+            // V12_15 account offsets verified on-chain (session 2026-04-12).
+            // V12_15 REMOVED warmup_started_at_slot and warmup_slope_per_step from Account,
+            // so position_basis_q is at 64 (not 88 like V12_1 which has those fields).
+            acct_owner_off: 192,           // verified on-chain
+            acct_pos_size_lo_off: 64,      // position_basis_q: i128 at 64 (V12_15 layout)
+            acct_pos_size_hi_off: 72,
+            acct_entry_price_off: 120,     // entry_price: u64 at 120
+            // V12_15 engine layout is DIFFERENT from V12_1 — no mark_price, no single funding_index.
+            // Params at engine+32, mm_bps at params+0 = engine+32.
+            engine_mark_price_off: 0,      // not present in V12_15 engine — use oraclePriceE6 from SDK
+            engine_maint_margin_off: 32,   // params starts at engine+32, mm_bps is first field
+            engine_funding_index_off: 0,   // not present as single field (per-side in V12_15)
         });
     }
 
     // Try V12_15 full (62 cohorts, 4400-byte accounts).
+    // Same engine offsets, different account size.
     let v1215f_bitmap_bytes = max_accounts.div_ceil(8);
-    let v1215f_accounts_off = V12_15_BITMAP_OFF_FULL + v1215f_bitmap_bytes;
-    let v1215f_total = v1215f_accounts_off + max_accounts * V12_15_ACCOUNT_SIZE_FULL;
+    let v1215f_accounts_off = v1215_bitmap_off + v1215f_bitmap_bytes + 18 + max_accounts * 2;
+    let v1215f_accounts_off_aligned = (v1215f_accounts_off + 7) & !7;
+    let v1215f_total = v1215f_accounts_off_aligned + max_accounts * V12_15_ACCOUNT_SIZE_FULL;
 
     if data.len() >= v1215f_total && data.len() <= v1215f_total + 256 {
         return Ok(SlabLayout {
             engine_off: V12_15_ENGINE_OFF,
             account_size: V12_15_ACCOUNT_SIZE_FULL,
-            bitmap_off: V12_15_BITMAP_OFF_FULL,
+            bitmap_off: v1215_bitmap_off,
             max_accounts,
+            // Same account/engine offsets as small variant — field positions don't change with cohort count
             acct_owner_off: 192,
             acct_pos_size_lo_off: 64,
             acct_pos_size_hi_off: 72,
             acct_entry_price_off: 120,
-            engine_mark_price_off: 0,
-            engine_maint_margin_off: 40,
-            engine_funding_index_off: 0,
+            engine_mark_price_off: 0,      // not present in V12_15 engine
+            engine_maint_margin_off: 32,   // params at engine+32, mm_bps first
+            engine_funding_index_off: 0,   // not present as single field
         });
     }
 
@@ -258,13 +272,15 @@ fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
             account_size: V12_1_EP_ACCOUNT_SIZE,
             bitmap_off: V12_1_EP_BITMAP_OFF,
             max_accounts,
-            acct_owner_off: 216,           // shifted +8 from V12_1 due to entry_price insertion
-            acct_pos_size_lo_off: 88,      // position_basis_q: i128 at SBF offset 88
+            // V12_1_EP has a DIFFERENT account layout from V12_15 (fewer fields, different offsets).
+            // These offsets were probed from the deployed SBF binary (session 2026-04-12).
+            acct_owner_off: 216,           // probed: owner at SBF offset 216 (EP layout shifts +8)
+            acct_pos_size_lo_off: 88,      // position_basis_q at SBF offset 88
             acct_pos_size_hi_off: 96,
-            acct_entry_price_off: 144,     // entry_price: u64 at 144 (after adl_epoch_snap)
-            engine_mark_price_off: 560,    // SBF probed: markPriceE6 at engine+560
-            engine_maint_margin_off: 40,   // SBF: params_off(32) + 8 = 40
-            engine_funding_index_off: 0,   // not present in SBF engine (-1 equivalent, read returns 0)
+            acct_entry_price_off: 144,     // entry_price at SBF offset 144
+            engine_mark_price_off: 560,    // probed: markPriceE6 at engine+560 (V12_1 SBF)
+            engine_maint_margin_off: 40,   // SBF: params at engine+32, maint_margin at params+8 = 40
+            engine_funding_index_off: 0,   // not present in V12_1 engine (global funding removed)
         });
     }
 
@@ -279,13 +295,14 @@ fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
             account_size: V12_1_ACCOUNT_SIZE_LAYOUT,
             bitmap_off: V12_1_BITMAP_OFF_LAYOUT,
             max_accounts,
-            acct_owner_off: 208,
-            acct_pos_size_lo_off: 296,
-            acct_pos_size_hi_off: 304,
-            acct_entry_price_off: 280,
-            engine_mark_price_off: 928,
-            engine_maint_margin_off: 104,
-            engine_funding_index_off: 936,
+            // V12_1 HOST layout — uses slab_types compile-time verified offsets
+            acct_owner_off: slab_types::ACCT_OFF_OWNER,                       // 208
+            acct_pos_size_lo_off: slab_types::ACCT_OFF_POSITION_SIZE,         // 296 (legacy sign+magnitude)
+            acct_pos_size_hi_off: slab_types::ACCT_OFF_POSITION_SIZE + 8,     // 304
+            acct_entry_price_off: slab_types::ACCT_OFF_ENTRY_PRICE,           // 280
+            engine_mark_price_off: slab_types::ENGINE_REL_MARK_PRICE_E6,      // 928
+            engine_maint_margin_off: slab_types::ENGINE_REL_MAINT_MARGIN_BPS, // 104
+            engine_funding_index_off: slab_types::ENGINE_REL_FUNDING_INDEX_QPB_E6, // 936
         });
     }
 
@@ -398,7 +415,7 @@ pub fn read_position(slab_data: &[u8], user_idx: u16) -> Result<PositionData, Pr
             .unwrap(),
     );
 
-    let kind = read_u32(slab_data, acct_off + ACCT_KIND_OFF);
+    let kind = read_u32(slab_data, acct_off + ACCT_KIND_OFF)?;
     // PERC-9037: Read collateral as U128 lo-word. The capital field is a
     // Percolator U128 stored as [lo: u64, hi: u64]. We only use the lo-word,
     // which is correct for values < 2^64. Verify the hi-word is zero to detect
@@ -414,7 +431,10 @@ pub fn read_position(slab_data: &[u8], user_idx: u16) -> Result<PositionData, Pr
     // Read position_basis_q as native i128 (two's complement in v12.15) or
     // I128 sign+magnitude (pre-v12.15).
     let position_basis_q = read_i128(slab_data, acct_off + layout.acct_pos_size_lo_off)?;
-    let is_v12_15 = layout.account_size == V12_15_ACCOUNT_SIZE;
+    // V12.15 uses two's complement i128 for position_basis_q.
+    // Both the small (920-byte) and full (4400-byte) variants use the same encoding.
+    let is_v12_15 = layout.account_size == V12_15_ACCOUNT_SIZE
+        || layout.account_size == V12_15_ACCOUNT_SIZE_FULL;
     let (size, is_long) = if is_v12_15 {
         // V12.15: native i128 (two's complement). Derive size and direction directly.
         let abs = position_basis_q.unsigned_abs() as u64;

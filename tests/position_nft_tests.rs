@@ -363,6 +363,9 @@ fn test_position_data_collateral_is_separate_from_size() {
         account_id: 0,
         kind: 0,
         position_basis_q: 1_000_000_000i128,
+        engine_mark_price_off: 0,
+        engine_maint_margin_off: 0,
+        engine_funding_index_off: 0,
     };
     // collateral ≠ size — using size as collateral would be 10× inflated
     assert_ne!(
