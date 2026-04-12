@@ -127,6 +127,13 @@ const V12_1_EP_ENGINE_OFF: usize = 616;
 const V12_1_EP_ACCOUNT_SIZE: usize = 288;
 const V12_1_EP_BITMAP_OFF: usize = 1200; // engine_off(616) + 584 = 1200 absolute
 
+/// V12_15 layout constants (upstream sync — reserve cohorts, funding_rate_e9, MarketMode).
+/// Account grows to 4400 bytes (62 ReserveCohort × 64 bytes + overflow fields).
+/// Engine at 624, MAX_ACCOUNTS=256 (small feature). SLAB_LEN=1,128,448.
+const V12_15_ENGINE_OFF: usize = 624;
+const V12_15_ACCOUNT_SIZE: usize = 4400;
+const V12_15_BITMAP_OFF: usize = 2016; // absolute: 624 + 1424 - 32 = 2016 (for n=256)
+
 /// Detect layout from slab data length and header.
 fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
     if data.len() < V0_HEADER {
@@ -193,6 +200,27 @@ fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
             engine_mark_price_off: 424, // V1D mark_price at engine+424
             engine_maint_margin_off: 80, // params_off(72) + 8 = 80
             engine_funding_index_off: 392,
+        });
+    }
+
+    // Try V12_15 (upstream sync, 4400-byte accounts with reserve cohorts).
+    let v1215_bitmap_bytes = max_accounts.div_ceil(8);
+    let v1215_accounts_off = V12_15_BITMAP_OFF + v1215_bitmap_bytes;
+    let v1215_total = v1215_accounts_off + max_accounts * V12_15_ACCOUNT_SIZE;
+
+    if data.len() >= v1215_total && data.len() <= v1215_total + 256 {
+        return Ok(SlabLayout {
+            engine_off: V12_15_ENGINE_OFF,
+            account_size: V12_15_ACCOUNT_SIZE,
+            bitmap_off: V12_15_BITMAP_OFF,
+            max_accounts,
+            acct_owner_off: 192,           // Account.owner at offset 192
+            acct_pos_size_lo_off: 64,      // position_basis_q: i128 at offset 64
+            acct_pos_size_hi_off: 72,      // hi-word at 72 (not used for i128, but kept for compat)
+            acct_entry_price_off: 120,     // entry_price: u64 at offset 120
+            engine_mark_price_off: 0,      // mark_price not in v12.15 engine (removed)
+            engine_maint_margin_off: 40,   // params at 32, maint_margin_bps at params+8 = 40
+            engine_funding_index_off: 0,   // funding index not present as single field (per-side now)
         });
     }
 
@@ -360,21 +388,26 @@ pub fn read_position(slab_data: &[u8], user_idx: u16) -> Result<PositionData, Pr
         return Err(ProgramError::ArithmeticOverflow);
     }
 
-    // PERC-9038: Read position_size as I128 = [lo: u64, hi: u64].
-    // Percolator's I128 uses sign+magnitude encoding: lo-word is the absolute
-    // magnitude, hi-word sign bit indicates direction (negative = short).
-    // Verify the hi-word magnitude bits (excluding sign) are zero to detect
-    // position sizes that exceed u64 — which would silently truncate.
-    let size = read_u64(slab_data, acct_off + layout.acct_pos_size_lo_off)?;
-    let pos_hi = read_u64(slab_data, acct_off + layout.acct_pos_size_hi_off)?;
-    let is_long: u8 = if (pos_hi as i64) < 0 { 0 } else { 1 };
-    // Check magnitude bits of hi-word (mask out sign bit)
-    if pos_hi & 0x7FFF_FFFF_FFFF_FFFF != 0 {
-        solana_program::msg!("read_position: position_size I128 exceeds u64 magnitude");
-        return Err(ProgramError::ArithmeticOverflow);
-    }
-    // position_basis_q is the full signed I128 (for EmergencyBurn: check == 0 means flat).
+    // Read position_basis_q as native i128 (two's complement in v12.15) or
+    // I128 sign+magnitude (pre-v12.15).
     let position_basis_q = read_i128(slab_data, acct_off + layout.acct_pos_size_lo_off)?;
+    let is_v12_15 = layout.account_size == V12_15_ACCOUNT_SIZE;
+    let (size, is_long) = if is_v12_15 {
+        // V12.15: native i128 (two's complement). Derive size and direction directly.
+        let abs = position_basis_q.unsigned_abs() as u64;
+        let long: u8 = if position_basis_q >= 0 { 1 } else { 0 };
+        (abs, long)
+    } else {
+        // Pre-v12.15: I128 sign+magnitude encoding.
+        let lo = read_u64(slab_data, acct_off + layout.acct_pos_size_lo_off)?;
+        let hi = read_u64(slab_data, acct_off + layout.acct_pos_size_hi_off)?;
+        let long: u8 = if (hi as i64) < 0 { 0 } else { 1 };
+        if hi & 0x7FFF_FFFF_FFFF_FFFF != 0 {
+            solana_program::msg!("read_position: position_size I128 exceeds u64 magnitude");
+            return Err(ProgramError::ArithmeticOverflow);
+        }
+        (lo, long)
+    };
     let entry_price_e6 = read_u64(slab_data, acct_off + layout.acct_entry_price_off)?;
 
     // PERC-9060: Propagate error instead of silently defaulting to 0.
