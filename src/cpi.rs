@@ -128,11 +128,13 @@ const V12_1_EP_ACCOUNT_SIZE: usize = 288;
 const V12_1_EP_BITMAP_OFF: usize = 1200; // engine_off(616) + 584 = 1200 absolute
 
 /// V12_15 layout constants (upstream sync — reserve cohorts, funding_rate_e9, MarketMode).
-/// Account grows to 4400 bytes (62 ReserveCohort × 64 bytes + overflow fields).
-/// Engine at 624, MAX_ACCOUNTS=256 (small feature). SLAB_LEN=1,128,448.
+/// Two variants: 62 cohorts (4400 bytes/account) and 8 cohorts (944 bytes, --features small).
+/// Engine at 624. Account field offsets 0-240 are identical for both variants.
 const V12_15_ENGINE_OFF: usize = 624;
-const V12_15_ACCOUNT_SIZE: usize = 4400;
-const V12_15_BITMAP_OFF: usize = 2016; // absolute: 624 + 1424 - 32 = 2016 (for n=256)
+const V12_15_ACCOUNT_SIZE: usize = 944;       // 8 cohorts (--features small, deployed)
+const V12_15_BITMAP_OFF: usize = 1856;        // absolute: 624 + 1264 - 32 = 1856 (for n=256, 8 cohorts)
+const V12_15_ACCOUNT_SIZE_FULL: usize = 4400;  // 62 cohorts (upstream default)
+const V12_15_BITMAP_OFF_FULL: usize = 2016;    // absolute for 62-cohort variant
 
 /// Detect layout from slab data length and header.
 fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
@@ -221,6 +223,27 @@ fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
             engine_mark_price_off: 0,      // mark_price not in v12.15 engine (removed)
             engine_maint_margin_off: 40,   // params at 32, maint_margin_bps at params+8 = 40
             engine_funding_index_off: 0,   // funding index not present as single field (per-side now)
+        });
+    }
+
+    // Try V12_15 full (62 cohorts, 4400-byte accounts).
+    let v1215f_bitmap_bytes = max_accounts.div_ceil(8);
+    let v1215f_accounts_off = V12_15_BITMAP_OFF_FULL + v1215f_bitmap_bytes;
+    let v1215f_total = v1215f_accounts_off + max_accounts * V12_15_ACCOUNT_SIZE_FULL;
+
+    if data.len() >= v1215f_total && data.len() <= v1215f_total + 256 {
+        return Ok(SlabLayout {
+            engine_off: V12_15_ENGINE_OFF,
+            account_size: V12_15_ACCOUNT_SIZE_FULL,
+            bitmap_off: V12_15_BITMAP_OFF_FULL,
+            max_accounts,
+            acct_owner_off: 192,
+            acct_pos_size_lo_off: 64,
+            acct_pos_size_hi_off: 72,
+            acct_entry_price_off: 120,
+            engine_mark_price_off: 0,
+            engine_maint_margin_off: 40,
+            engine_funding_index_off: 0,
         });
     }
 
