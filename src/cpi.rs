@@ -96,6 +96,7 @@ struct SlabLayout {
     engine_off: usize,
     account_size: usize,
     bitmap_off: usize,
+    accounts_off: usize,  // absolute offset of accounts array
     max_accounts: usize,
     // Account field offsets (layout-dependent)
     acct_owner_off: usize,
@@ -180,7 +181,7 @@ fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
     // to be at least as large as our layout requires. The magic + max_accounts
     // checks above already validate the header.
     if data.len() >= v0_total && data.len() <= v0_total + 64 {
-        return Ok(SlabLayout {
+        return Ok(SlabLayout { accounts_off: v0_accounts_off,
             engine_off: V0_ENGINE_OFF,
             account_size: V0_ACCOUNT_SIZE,
             bitmap_off: V0_BITMAP_OFF,
@@ -201,7 +202,7 @@ fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
     let v1d_total = v1d_accounts_off + max_accounts * V1D_ACCOUNT_SIZE;
 
     if data.len() >= v1d_total && data.len() <= v1d_total + 64 {
-        return Ok(SlabLayout {
+        return Ok(SlabLayout { accounts_off: v1d_accounts_off,
             engine_off: V1D_ENGINE_OFF,
             account_size: V1D_ACCOUNT_SIZE,
             bitmap_off: V1D_BITMAP_OFF,
@@ -226,7 +227,7 @@ fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
     let v1215_total = v1215_accounts_off + max_accounts * V12_15_ACCOUNT_SIZE;
 
     if data.len() >= v1215_total && data.len() <= v1215_total + 256 {
-        return Ok(SlabLayout {
+        return Ok(SlabLayout { accounts_off: v1215_accounts_off,
             engine_off: V12_15_ENGINE_OFF,
             account_size: V12_15_ACCOUNT_SIZE,
             bitmap_off: v1215_bitmap_off,
@@ -254,7 +255,7 @@ fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
     let v1215f_total = v1215f_accounts_off_aligned + max_accounts * V12_15_ACCOUNT_SIZE_FULL;
 
     if data.len() >= v1215f_total && data.len() <= v1215f_total + 256 {
-        return Ok(SlabLayout {
+        return Ok(SlabLayout { accounts_off: v1215f_accounts_off_aligned,
             engine_off: V12_15_ENGINE_OFF,
             account_size: V12_15_ACCOUNT_SIZE_FULL,
             bitmap_off: v1215_bitmap_off,
@@ -276,7 +277,7 @@ fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
     let v12ep_total = v12ep_accounts_off + max_accounts * V12_1_EP_ACCOUNT_SIZE;
 
     if data.len() >= v12ep_total && data.len() <= v12ep_total + 64 {
-        return Ok(SlabLayout {
+        return Ok(SlabLayout { accounts_off: v12ep_accounts_off,
             engine_off: V12_1_EP_ENGINE_OFF,
             account_size: V12_1_EP_ACCOUNT_SIZE,
             bitmap_off: V12_1_EP_BITMAP_OFF,
@@ -299,7 +300,7 @@ fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
     let v12_total = v12_accounts_off + max_accounts * V12_1_ACCOUNT_SIZE_LAYOUT;
 
     if data.len() >= v12_total && data.len() <= v12_total + 64 {
-        return Ok(SlabLayout {
+        return Ok(SlabLayout { accounts_off: v12_accounts_off,
             engine_off: V12_1_ENGINE_OFF_LAYOUT,
             account_size: V12_1_ACCOUNT_SIZE_LAYOUT,
             bitmap_off: V12_1_BITMAP_OFF_LAYOUT,
@@ -406,7 +407,7 @@ pub fn read_position(slab_data: &[u8], user_idx: u16) -> Result<PositionData, Pr
         return Err(NftError::UserIndexOutOfRange.into());
     }
 
-    let accounts_off = layout.bitmap_off + layout.max_accounts.div_ceil(8);
+    let accounts_off = layout.accounts_off;
     let acct_off = accounts_off + idx * layout.account_size;
     let acct_end = acct_off + layout.account_size;
 
