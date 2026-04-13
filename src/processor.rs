@@ -3,7 +3,6 @@ extern crate alloc;
 use solana_program::{
     account_info::{next_account_info, AccountInfo},
     entrypoint::ProgramResult,
-    instruction::AccountMeta,
     msg,
     program::invoke,
     program::invoke_signed,
@@ -244,18 +243,32 @@ fn process_mint_position_nft(
     // uninitialized TLV data follows the 3 valid extensions (parses zero-padded
     // bytes as invalid extension type). Metadata will be added via
     // initialize_token_metadata which auto-reallocs the account.
-    // Token-2022 mint space: ONLY the 3 pre-InitializeMint2 extensions.
-    // getMintLen([MetadataPointer, TransferHook, CloseAuth]) = 338 bytes.
-    // DO NOT include metadata space here — Token-2022 InitializeMint2 rejects
-    // accounts with zero-padded TLV data after the initialized extensions.
-    // Metadata space is added AFTER InitializeMint2 via system_program.realloc
-    // (Token-2022's initialize_token_metadata auto-reallocs via CPI).
+    // Token-2022 InitializeMint2 requires EXACTLY getMintLen(extensions) bytes.
+    // getMintLen([MetadataPointer, TransferHook, CloseAuth]) = 338.
+    // Metadata is a variable-length extension — Token-2022's initialize_token_metadata
+    // calls realloc() internally to grow the account. But the Solana runtime checks
+    // rent-exemption AFTER the tx. So we create the account at 338 bytes but fund it
+    // with enough lamports for the FINAL size (338 + metadata TLV).
     let mint_space: u64 = MINT_BASE_SIZE
         + ACCOUNT_TYPE_SIZE
         + token2022::METADATA_POINTER_EXTENSION_SIZE
         + token2022::TRANSFER_HOOK_EXTENSION_SIZE
         + token2022::MINT_CLOSE_AUTHORITY_EXTENSION_SIZE;
-    let mint_rent = rent.minimum_balance(mint_space as usize);
+    // Compute final size after metadata realloc for rent calculation
+    // Metadata TLV: type(2) + len(2) + update_authority(32) + mint(32)
+    // + name(4+len) + symbol(4+len) + uri(4+len) + additional_metadata(4, empty vec)
+    // Add 128 bytes safety buffer for Token-2022 internal padding/alignment.
+    let metadata_tlv_size: usize = {
+        let name_len = 4 + nft_name.len();
+        let symbol_len = 4 + NFT_SYMBOL.len();
+        let uri_len = 4 + nft_uri.len();
+        4 + 32 + 32 + name_len + symbol_len + uri_len + 4 // +4 for empty additional_metadata vec
+    };
+    let final_size = mint_space as usize + metadata_tlv_size + 128;
+    // Fund with rent for final_size (post-metadata-realloc) but allocate only mint_space.
+    // Token-2022 initialize_token_metadata will realloc the account larger, and the
+    // Solana runtime checks rent-exemption at the FINAL size after tx completes.
+    let mint_rent = rent.minimum_balance(final_size);
     invoke(
         &system_instruction::create_account(
             owner.key,
@@ -297,47 +310,23 @@ fn process_mint_position_nft(
         std::slice::from_ref(nft_mint),
     )?;
 
-    // ── Realloc mint for metadata, then initialize metadata ──
-    // Token-2022 InitializeMint2 requires EXACT space for pre-mint extensions (338 bytes).
-    // Metadata must be added AFTER InitializeMint2 by growing the account.
+    // ── Initialize metadata extension ──
+    // Token-2022 alloc_and_serialize_variable_len_extension handles realloc internally.
+    // The mint was overfunded at create_account time (rent for final_size) so
+    // the runtime rent-exemption check passes after Token-2022 grows the account.
     let mint_auth_seeds: &[&[u8]] = &[MINT_AUTHORITY_SEED, &[mint_auth_bump]];
-    {
-        // Compute metadata size
-        let name_borsh = 4 + nft_name.len();
-        let symbol_borsh = 4 + NFT_SYMBOL.len();
-        let uri_borsh = 4 + nft_uri.len();
-        // Token metadata TLV: type(2) + len(2) + update_auth(32) + mint(32) + name + symbol + uri
-        let metadata_tlv_size = 4 + 32 + 32 + name_borsh + symbol_borsh + uri_borsh;
-        let new_size = nft_mint.data_len() + metadata_tlv_size;
-        let new_rent = rent.minimum_balance(new_size);
-        let current_lamports = nft_mint.lamports();
-        let needed = new_rent.saturating_sub(current_lamports);
-
-        // Transfer additional rent from payer to mint
-        if needed > 0 {
-            invoke(
-                &system_instruction::transfer(owner.key, nft_mint.key, needed),
-                &[owner.clone(), nft_mint.clone(), system_program.clone()],
-            )?;
-        }
-
-        // Realloc the mint account
-        nft_mint.realloc(new_size, false)?;
-
-        // Now initialize metadata
-        invoke_signed(
-            &token2022::initialize_token_metadata(
-                nft_mint.key,
-                mint_auth.key,
-                mint_auth.key,
-                &nft_name,
-                NFT_SYMBOL,
-                nft_uri,
-            ),
-            &[nft_mint.clone(), mint_auth.clone()],
-            &[mint_auth_seeds],
-        )?;
-    }
+    invoke_signed(
+        &token2022::initialize_token_metadata(
+            nft_mint.key,
+            mint_auth.key,
+            mint_auth.key,
+            &nft_name,
+            NFT_SYMBOL,
+            nft_uri,
+        ),
+        &[nft_mint.clone(), mint_auth.clone()],
+        &[mint_auth_seeds],
+    )?;
 
     // ── PERC-9024: Verify owner_ata matches expected ATA derivation ──
     // Without this, a caller can pass an arbitrary account as owner_ata.
