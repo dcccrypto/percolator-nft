@@ -297,25 +297,44 @@ fn process_mint_position_nft(
         std::slice::from_ref(nft_mint),
     )?;
 
-    // ── Initialize metadata extension ──
-    // Token-2022 auto-reallocs the mint account to fit metadata content.
-    // This requires passing the payer (owner) and system_program for realloc CPI.
+    // ── Realloc mint for metadata, then initialize metadata ──
+    // Token-2022 InitializeMint2 requires EXACT space for pre-mint extensions (338 bytes).
+    // Metadata must be added AFTER InitializeMint2 by growing the account.
     let mint_auth_seeds: &[&[u8]] = &[MINT_AUTHORITY_SEED, &[mint_auth_bump]];
     {
-        let mut meta_ix = token2022::initialize_token_metadata(
-            nft_mint.key,
-            mint_auth.key, // update authority = mint authority PDA
-            mint_auth.key, // mint authority signs
-            &nft_name,
-            NFT_SYMBOL,
-            nft_uri,
-        );
-        // Add payer and system_program for Token-2022 auto-realloc
-        meta_ix.accounts.push(AccountMeta::new(*owner.key, true));  // payer (signer, writable)
-        meta_ix.accounts.push(AccountMeta::new_readonly(*system_program.key, false));
+        // Compute metadata size
+        let name_borsh = 4 + nft_name.len();
+        let symbol_borsh = 4 + NFT_SYMBOL.len();
+        let uri_borsh = 4 + nft_uri.len();
+        // Token metadata TLV: type(2) + len(2) + update_auth(32) + mint(32) + name + symbol + uri
+        let metadata_tlv_size = 4 + 32 + 32 + name_borsh + symbol_borsh + uri_borsh;
+        let new_size = nft_mint.data_len() + metadata_tlv_size;
+        let new_rent = rent.minimum_balance(new_size);
+        let current_lamports = nft_mint.lamports();
+        let needed = new_rent.saturating_sub(current_lamports);
+
+        // Transfer additional rent from payer to mint
+        if needed > 0 {
+            invoke(
+                &system_instruction::transfer(owner.key, nft_mint.key, needed),
+                &[owner.clone(), nft_mint.clone(), system_program.clone()],
+            )?;
+        }
+
+        // Realloc the mint account
+        nft_mint.realloc(new_size, false)?;
+
+        // Now initialize metadata
         invoke_signed(
-            &meta_ix,
-            &[nft_mint.clone(), mint_auth.clone(), owner.clone(), system_program.clone()],
+            &token2022::initialize_token_metadata(
+                nft_mint.key,
+                mint_auth.key,
+                mint_auth.key,
+                &nft_name,
+                NFT_SYMBOL,
+                nft_uri,
+            ),
+            &[nft_mint.clone(), mint_auth.clone()],
             &[mint_auth_seeds],
         )?;
     }
