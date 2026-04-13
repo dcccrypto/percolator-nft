@@ -239,8 +239,13 @@ fn process_mint_position_nft(
     // uninitialized TLV data follows the 3 valid extensions (parses zero-padded
     // bytes as invalid extension type). Metadata will be added via
     // initialize_token_metadata which auto-reallocs the account.
-    let mint_space = MINT_BASE_SIZE
+    // Token-2022 mint space: generous allocation matching the proven layout.
+    // 82 (base) + 1 (account type) + 172 (3 extensions) + 512 (metadata) + 4 (TLV header) = 771.
+    // All previous successful extension initializations used this size.
+    let mint_space: u64 = MINT_BASE_SIZE
         + ACCOUNT_TYPE_SIZE
+        + METADATA_EXTENSION_HEADER
+        + METADATA_MAX_LEN
         + token2022::METADATA_POINTER_EXTENSION_SIZE
         + token2022::TRANSFER_HOOK_EXTENSION_SIZE
         + token2022::MINT_CLOSE_AUTHORITY_EXTENSION_SIZE;
