@@ -153,11 +153,20 @@ fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
         return Err(NftError::UnrecognizedSlabLayout.into());
     }
 
-    // Read max_accounts from header offset 8.
-    let max_accounts = read_u16(data, 8)? as usize;
-    if max_accounts == 0 {
+    // Read max_accounts. V12_15 stores it in RiskParams (engine+32, offset 24 within params).
+    // Older layouts stored it in the header at offset 8.
+    // Try the V12_15 engine path first (engine at 616, params at +32, max_accounts at params+24).
+    let max_accounts_v1215 = if data.len() > 616 + 32 + 32 {
+        read_u64(data, 616 + 32 + 24)? as usize  // engine(616) + params(32) + max_accounts_off(24)
+    } else { 0 };
+    let max_accounts_header = read_u16(data, 8)? as usize;
+    let max_accounts = if max_accounts_v1215 > 0 && max_accounts_v1215 <= 4096 {
+        max_accounts_v1215
+    } else if max_accounts_header > 0 {
+        max_accounts_header
+    } else {
         return Err(NftError::UnrecognizedSlabLayout.into());
-    }
+    };
 
     // Try V0 first (most common on devnet).
     let v0_bitmap_bytes = max_accounts.div_ceil(8);
