@@ -50,7 +50,11 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
 // ═══════════════════════════════════════════════════════════════
 
 /// Token-2022 Mint account base size (without extensions).
-const MINT_BASE_SIZE: u64 = 82;
+/// Token-2022 pads the 82-byte Mint struct to 165 bytes (same as token accounts)
+/// before the AccountType discriminator and TLV extensions. Using 82 causes
+/// InitializeMint2 to fail with InvalidAccountData because the TLV area
+/// overlaps with the padded mint region.
+const MINT_BASE_SIZE: u64 = 165;
 /// PERC-9057: AccountType discriminator byte between base Mint data and TLV extensions.
 /// Token-2022 writes this 1-byte discriminator (value 1 for Mint) at offset 82.
 /// Previously omitted — worked because METADATA_MAX_LEN was a gross overestimate,
@@ -239,16 +243,21 @@ fn process_mint_position_nft(
     // uninitialized TLV data follows the 3 valid extensions (parses zero-padded
     // bytes as invalid extension type). Metadata will be added via
     // initialize_token_metadata which auto-reallocs the account.
-    // Token-2022 mint space: generous allocation matching the proven layout.
-    // 82 (base) + 1 (account type) + 172 (3 extensions) + 512 (metadata) + 4 (TLV header) = 771.
-    // All previous successful extension initializations used this size.
+    // Token-2022 mint space: base(165 padded) + account_type(1) + extensions.
+    // Matches spl-token-2022 getMintLen([MetadataPointer, TransferHook, CloseAuth]) = 338.
+    // TokenMetadata extension space included for initialize_token_metadata.
+    let metadata_data_len: u64 = {
+        let name_len = nft_name.len() as u64 + 4;
+        let symbol_len = NFT_SYMBOL.len() as u64 + 4;
+        let uri_len = nft_uri.len() as u64 + 4;
+        32 + 32 + name_len + symbol_len + uri_len
+    };
     let mint_space: u64 = MINT_BASE_SIZE
         + ACCOUNT_TYPE_SIZE
-        + METADATA_EXTENSION_HEADER
-        + METADATA_MAX_LEN
         + token2022::METADATA_POINTER_EXTENSION_SIZE
         + token2022::TRANSFER_HOOK_EXTENSION_SIZE
-        + token2022::MINT_CLOSE_AUTHORITY_EXTENSION_SIZE;
+        + token2022::MINT_CLOSE_AUTHORITY_EXTENSION_SIZE
+        + METADATA_EXTENSION_HEADER + metadata_data_len;
     let mint_rent = rent.minimum_balance(mint_space as usize);
     invoke(
         &system_instruction::create_account(
