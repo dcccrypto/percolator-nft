@@ -208,12 +208,12 @@ fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
     }
 
     // Try V12_15 (upstream sync, reserve cohorts, 8 cohorts / --features small).
-    // Compute bitmap offset from slab_types: bitmap is at ENGINE_OFF + ENGINE_REL_USED.
-    let v1215_bitmap_off = V12_15_ENGINE_OFF + slab_types::ENGINE_REL_USED; // 616 + 1016 = 1632
-    let v1215_bitmap_bytes = max_accounts.div_ceil(8);
-    // After bitmap: num_used(2) + pad(6) + next_account_id(8) + free_head(2) + next_free(2*n)
-    // Then accounts array starts at ENGINE_OFF + ENGINE_REL_ACCOUNTS
-    let v1215_accounts_off = V12_15_ENGINE_OFF + slab_types::ENGINE_REL_ACCOUNTS;
+    // V12_15 accounts are 920 bytes (8 reserve cohorts), NOT 320 like V12_1.
+    // slab_types::ENGINE_REL_ACCOUNTS is wrong here because it's computed from
+    // the V12_1 Account struct (320 bytes). We use the verified on-chain geometry:
+    // bitmap at engine+648, accounts at absolute 1832 (engine+1216).
+    let v1215_bitmap_off = V12_15_ENGINE_OFF + 648; // verified on-chain
+    let v1215_accounts_off = V12_15_ENGINE_OFF + 1216; // verified on-chain: 1832 absolute
     let v1215_total = v1215_accounts_off + max_accounts * V12_15_ACCOUNT_SIZE;
 
     if data.len() >= v1215_total && data.len() <= v1215_total + 256 {
