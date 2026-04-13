@@ -3,6 +3,7 @@ extern crate alloc;
 use solana_program::{
     account_info::{next_account_info, AccountInfo},
     entrypoint::ProgramResult,
+    instruction::AccountMeta,
     msg,
     program::invoke,
     program::invoke_signed,
@@ -243,21 +244,17 @@ fn process_mint_position_nft(
     // uninitialized TLV data follows the 3 valid extensions (parses zero-padded
     // bytes as invalid extension type). Metadata will be added via
     // initialize_token_metadata which auto-reallocs the account.
-    // Token-2022 mint space: base(165 padded) + account_type(1) + extensions.
-    // Matches spl-token-2022 getMintLen([MetadataPointer, TransferHook, CloseAuth]) = 338.
-    // TokenMetadata extension space included for initialize_token_metadata.
-    let metadata_data_len: u64 = {
-        let name_len = nft_name.len() as u64 + 4;
-        let symbol_len = NFT_SYMBOL.len() as u64 + 4;
-        let uri_len = nft_uri.len() as u64 + 4;
-        32 + 32 + name_len + symbol_len + uri_len
-    };
+    // Token-2022 mint space: ONLY the 3 pre-InitializeMint2 extensions.
+    // getMintLen([MetadataPointer, TransferHook, CloseAuth]) = 338 bytes.
+    // DO NOT include metadata space here — Token-2022 InitializeMint2 rejects
+    // accounts with zero-padded TLV data after the initialized extensions.
+    // Metadata space is added AFTER InitializeMint2 via system_program.realloc
+    // (Token-2022's initialize_token_metadata auto-reallocs via CPI).
     let mint_space: u64 = MINT_BASE_SIZE
         + ACCOUNT_TYPE_SIZE
         + token2022::METADATA_POINTER_EXTENSION_SIZE
         + token2022::TRANSFER_HOOK_EXTENSION_SIZE
-        + token2022::MINT_CLOSE_AUTHORITY_EXTENSION_SIZE
-        + METADATA_EXTENSION_HEADER + metadata_data_len;
+        + token2022::MINT_CLOSE_AUTHORITY_EXTENSION_SIZE;
     let mint_rent = rent.minimum_balance(mint_space as usize);
     invoke(
         &system_instruction::create_account(
@@ -301,19 +298,27 @@ fn process_mint_position_nft(
     )?;
 
     // ── Initialize metadata extension ──
+    // Token-2022 auto-reallocs the mint account to fit metadata content.
+    // This requires passing the payer (owner) and system_program for realloc CPI.
     let mint_auth_seeds: &[&[u8]] = &[MINT_AUTHORITY_SEED, &[mint_auth_bump]];
-    invoke_signed(
-        &token2022::initialize_token_metadata(
+    {
+        let mut meta_ix = token2022::initialize_token_metadata(
             nft_mint.key,
             mint_auth.key, // update authority = mint authority PDA
             mint_auth.key, // mint authority signs
             &nft_name,
             NFT_SYMBOL,
             nft_uri,
-        ),
-        &[nft_mint.clone(), mint_auth.clone()],
-        &[mint_auth_seeds],
-    )?;
+        );
+        // Add payer and system_program for Token-2022 auto-realloc
+        meta_ix.accounts.push(AccountMeta::new(*owner.key, true));  // payer (signer, writable)
+        meta_ix.accounts.push(AccountMeta::new_readonly(*system_program.key, false));
+        invoke_signed(
+            &meta_ix,
+            &[nft_mint.clone(), mint_auth.clone(), owner.clone(), system_program.clone()],
+            &[mint_auth_seeds],
+        )?;
+    }
 
     // ── PERC-9024: Verify owner_ata matches expected ATA derivation ──
     // Without this, a caller can pass an arbitrary account as owner_ata.
