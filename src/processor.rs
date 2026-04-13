@@ -234,13 +234,25 @@ fn process_mint_position_nft(
     let nft_uri = "";
 
     // ── Create Token-2022 mint account (with metadata pointer + metadata + transfer hook extensions) ──
+    // Token-2022 mint space: base(82) + account_type(1) + extensions TLV.
+    // Metadata must be included because initialize_token_metadata writes
+    // into the pre-allocated space (no auto-realloc).
+    // Use a generous metadata allocation to avoid truncation.
+    let metadata_size: u64 = {
+        // Metadata extension stores: update_auth(32) + mint(32) + name + symbol + uri as borsh strings
+        // Each borsh string: 4 (length prefix) + content bytes
+        let name_len = nft_name.len() as u64 + 4;
+        let symbol_len = NFT_SYMBOL.len() as u64 + 4;
+        let uri_len = nft_uri.len() as u64 + 4;
+        // TLV header(4) + update_authority(32) + mint(32) + name + symbol + uri
+        4 + 32 + 32 + name_len + symbol_len + uri_len
+    };
     let mint_space = MINT_BASE_SIZE
         + ACCOUNT_TYPE_SIZE
-        + METADATA_EXTENSION_HEADER
-        + METADATA_MAX_LEN
         + token2022::METADATA_POINTER_EXTENSION_SIZE
         + token2022::TRANSFER_HOOK_EXTENSION_SIZE
-        + token2022::MINT_CLOSE_AUTHORITY_EXTENSION_SIZE;
+        + token2022::MINT_CLOSE_AUTHORITY_EXTENSION_SIZE
+        + metadata_size;
     let mint_rent = rent.minimum_balance(mint_space as usize);
     invoke(
         &system_instruction::create_account(
