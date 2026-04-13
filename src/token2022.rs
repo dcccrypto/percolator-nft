@@ -164,10 +164,11 @@ fn borsh_string(s: &str) -> Vec<u8> {
     out
 }
 
-/// Build Token-2022 metadata initialize instruction.
-/// This uses the embedded metadata extension (no separate Metaplex program needed).
+/// Build Token-2022 metadata initialize instruction for embedded metadata.
+/// For embedded metadata (MetadataPointer points to mint itself), the mint
+/// serves as both the metadata account and the mint account.
 ///
-/// Accounts: [mint(w), update_authority, mint_authority(s)]
+/// Accounts: [metadata/mint(w), update_authority, mint(readonly), mint_authority(s)]
 pub fn initialize_token_metadata(
     mint: &Pubkey,
     update_authority: &Pubkey,
@@ -185,9 +186,10 @@ pub fn initialize_token_metadata(
     Instruction {
         program_id: TOKEN_2022_PROGRAM_ID,
         accounts: vec![
-            AccountMeta::new(*mint, false),
-            AccountMeta::new_readonly(*update_authority, false),
-            AccountMeta::new_readonly(*mint_authority, true),
+            AccountMeta::new(*mint, false),                      // metadata account (= mint for embedded)
+            AccountMeta::new_readonly(*update_authority, false),  // update authority
+            AccountMeta::new_readonly(*mint, false),              // mint (same pubkey, read-only)
+            AccountMeta::new_readonly(*mint_authority, true),     // mint authority (signer)
         ],
         data,
     }
