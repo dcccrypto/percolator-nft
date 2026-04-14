@@ -108,6 +108,17 @@ fn process_mint_position_nft(
         return Err(ProgramError::MissingRequiredSignature);
     }
 
+    // ── 3D.1e: Verify writable accounts are actually writable ──
+    if !nft_pda.is_writable {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    if !nft_mint.is_writable {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    if !owner_ata.is_writable {
+        return Err(ProgramError::InvalidAccountData);
+    }
+
     // ── Verify slab ownership ──
     verify_slab_owner(slab)?;
 
@@ -561,6 +572,17 @@ fn process_burn_position_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
         return Err(ProgramError::MissingRequiredSignature);
     }
 
+    // ── 3D.1e: Verify writable accounts are actually writable ──
+    if !nft_pda.is_writable {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    if !nft_mint.is_writable {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    if !holder_ata.is_writable {
+        return Err(ProgramError::InvalidAccountData);
+    }
+
     // ── PERC-9003: Verify PDA is owned by this program ──
     // Without this check an attacker can craft a 208-byte account (owned by
     // any program) with matching magic/slab/mint bytes and pass it as nft_pda.
@@ -743,7 +765,7 @@ fn process_burn_position_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
 // Tag 5: EmergencyBurn
 // ═══════════════════════════════════════════════════════════════
 
-fn process_emergency_burn(_program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+fn process_emergency_burn(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     let accounts_iter = &mut accounts.iter();
 
     let holder = next_account_info(accounts_iter)?; // 0: signer (NFT holder)
@@ -751,11 +773,43 @@ fn process_emergency_burn(_program_id: &Pubkey, accounts: &[AccountInfo]) -> Pro
     let nft_mint = next_account_info(accounts_iter)?; // 2: NFT mint (writable)
     let holder_ata = next_account_info(accounts_iter)?; // 3: Holder's ATA (writable)
     let slab = next_account_info(accounts_iter)?; // 4: Slab (verify liquidation)
-    let _mint_auth = next_account_info(accounts_iter)?; // 5: Mint authority PDA
-    let _token_program = next_account_info(accounts_iter)?; // 6: Token-2022
+    let mint_auth = next_account_info(accounts_iter)?; // 5: Mint authority PDA
+    let token_program = next_account_info(accounts_iter)?; // 6: Token-2022
 
     if !holder.is_signer {
         return Err(ProgramError::MissingRequiredSignature);
+    }
+
+    // ── 3D.1d: Validate token_program key ──
+    if *token_program.key != token2022::TOKEN_2022_PROGRAM_ID {
+        msg!("EmergencyBurn: invalid Token-2022 program key");
+        return Err(ProgramError::IncorrectProgramId);
+    }
+
+    // ── 3D.1a: Verify PDA is owned by this program ──
+    // Without this an attacker can craft a matching-magic account owned by a
+    // different program and pass it as nft_pda to bypass all state checks.
+    if nft_pda.owner != program_id {
+        msg!("EmergencyBurn rejected: PositionNft PDA not owned by this program");
+        return Err(ProgramError::IllegalOwner);
+    }
+
+    // ── 3D.1e: Verify writable accounts are actually writable ──
+    if !nft_pda.is_writable {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    if !nft_mint.is_writable {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    if !holder_ata.is_writable {
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    // ── Verify mint authority PDA ──
+    let (expected_mint_auth, mint_auth_bump) = mint_authority_pda(program_id);
+    if *mint_auth.key != expected_mint_auth {
+        msg!("EmergencyBurn: invalid mint authority PDA");
+        return Err(NftError::InvalidMintAuthority.into());
     }
 
     // ── Verify PDA state ──
@@ -768,6 +822,7 @@ fn process_emergency_burn(_program_id: &Pubkey, accounts: &[AccountInfo]) -> Pro
         if nft_state.magic != POSITION_NFT_MAGIC {
             return Err(ProgramError::InvalidAccountData);
         }
+        verify_pda_version(nft_state)?;
         if nft_state.slab != slab.key.to_bytes() {
             return Err(ProgramError::InvalidAccountData);
         }
@@ -778,6 +833,15 @@ fn process_emergency_burn(_program_id: &Pubkey, accounts: &[AccountInfo]) -> Pro
         (nft_state.user_idx, nft_state.account_id, nft_state.nft_mint)
         // pda_data Ref dropped here
     };
+
+    // ── 3D.1b: Verify PDA address matches expected derivation ──
+    // Even if magic/slab/mint fields match, any program-owned account at an
+    // arbitrary address could be substituted without this derivation check.
+    let (expected_pda, _) = position_nft_pda(slab.key, user_idx, program_id);
+    if *nft_pda.key != expected_pda {
+        msg!("EmergencyBurn rejected: PDA address does not match expected derivation");
+        return Err(NftError::InvalidNftPda.into());
+    }
 
     // ── Verify position is liquidated (position_basis_q == 0) ──
     // EmergencyBurn is for positions that have been liquidated on-chain.
@@ -827,9 +891,25 @@ fn process_emergency_burn(_program_id: &Pubkey, accounts: &[AccountInfo]) -> Pro
     }
 
     // ── Burn the NFT ──
+    // 3D.1d: Include token_program in invoke account slice.
     invoke(
         &token2022::burn(holder_ata.key, nft_mint.key, holder.key, 1),
-        &[holder_ata.clone(), nft_mint.clone(), holder.clone()],
+        &[holder_ata.clone(), nft_mint.clone(), holder.clone(), token_program.clone()],
+    )?;
+
+    // ── 3D.1c: Close the ATA (return rent to holder) ──
+    invoke(
+        &token2022::close_account(holder_ata.key, holder.key, holder.key),
+        &[holder_ata.clone(), holder.clone(), token_program.clone()],
+    )?;
+
+    // ── 3D.1c: Close the mint account (return rent to holder) ──
+    // The MintCloseAuthority extension designates mint_auth PDA as close authority.
+    let mint_auth_seeds: &[&[u8]] = &[MINT_AUTHORITY_SEED, &[mint_auth_bump]];
+    invoke_signed(
+        &token2022::close_account(nft_mint.key, holder.key, mint_auth.key),
+        &[nft_mint.clone(), holder.clone(), mint_auth.clone(), token_program.clone()],
+        &[mint_auth_seeds],
     )?;
 
     // ── Close the PDA (return rent to holder) ──

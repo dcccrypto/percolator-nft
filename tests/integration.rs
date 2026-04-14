@@ -805,7 +805,7 @@ fn test_read_position_all_fields_correct() {
     let collateral = 1_234_567u64;
     let size = 9_876_543u64;
     let entry_price = 48_500_000_000u64; // $48,500 in E6
-    let kind = 0u32;                     // User
+    let kind = 0u8;                      // User
     let account_id = 99u64;
 
     // Long position: hi-word = 0 (positive = long)
@@ -816,7 +816,7 @@ fn test_read_position_all_fields_correct() {
         size,
         0,
         entry_price,
-        kind,
+        kind.into(),
         account_id,
         50_000_000_000,
         500,
@@ -857,7 +857,7 @@ fn test_read_position_lp_kind_readable() {
         1, 0, 0, 0, 0, 0, 1, 0, 0, 0, // kind=1 (LP)
     );
     let pos = read_position(&slab, 0).expect("LP slot must be readable by cpi");
-    assert_eq!(pos.kind, 1u32, "kind must be 1 for LP account");
+    assert_eq!(pos.kind, 1u8, "kind must be 1 for LP account");
 }
 
 // ════════════════════════════════════════════════════════════════

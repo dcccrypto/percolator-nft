@@ -551,9 +551,22 @@ pub fn process_execute(
     let mint_auth_seeds: &[&[u8]] = &[MINT_AUTHORITY_SEED, &[mint_auth_bump]];
 
     // All borrows (slab_data, pda_data) are now dropped — CPI is safe.
+    // 3D.3b: Include the mint_auth AccountInfo as the program_id stand-in in
+    // the invoke_signed slice. The Solana runtime resolves accounts for a CPI
+    // by pubkey from the transaction's loaded account map. The NFT program
+    // (key = *program_id) is the currently executing program and is always
+    // present in the runtime's program account map. The runtime resolves it
+    // via the AccountMeta pubkey above without needing an explicit AccountInfo
+    // entry at that pubkey. We provide mint_auth twice so the slice length is
+    // consistent with the 3-account instruction; the runtime ignores the
+    // duplicate for accounts already resolvable from its program cache.
+    //
+    // PERC-9070: Full fix requires adding the NFT program key as extra
+    // account index 10 in ExtraAccountMetaList so its AccountInfo is
+    // explicitly available here as process_execute's accounts[10].
     invoke_signed(
         &cpi_ix,
-        &[mint_auth.clone(), slab.clone()],
+        &[mint_auth.clone(), slab.clone(), mint_auth.clone()],
         &[mint_auth_seeds],
     )?;
 
@@ -583,6 +596,11 @@ pub fn process_execute(
 const TOKEN_IX_TRANSFER: u8 = 3;
 /// SPL Token TransferChecked instruction tag.
 const TOKEN_IX_TRANSFER_CHECKED: u8 = 12;
+/// SPL Token-2022 TransferCheckedWithFee instruction tag.
+/// 3D.3a: Accept tag 26 in addition to 3 and 12 — Token-2022 uses this tag
+/// when the mint has a TransferFeeConfig extension. Without it, NFTs on
+/// fee-enabled mints fail with UnauthorizedDirectInvocation on every transfer.
+const TOKEN_IX_TRANSFER_CHECKED_WITH_FEE: u8 = 26;
 
 /// Verify that the current instruction was invoked via CPI from the Token-2022
 /// program, and that the outer instruction is a Transfer or TransferChecked
@@ -658,9 +676,28 @@ fn verify_cpi_caller_is_token2022(
             }
             Ok(())
         }
+        TOKEN_IX_TRANSFER_CHECKED_WITH_FEE => {
+            // 3D.3a: TransferCheckedWithFee — same account layout as TransferChecked.
+            // Accounts: [source, mint, dest, authority]
+            // Verify the mint matches to prevent cross-mint hook invocation.
+            if current_ix.accounts.len() < 2 {
+                msg!("Transfer rejected: TransferCheckedWithFee has insufficient accounts");
+                return Err(NftError::UnauthorizedDirectInvocation.into());
+            }
+            let ix_mint = &current_ix.accounts[1].pubkey;
+            if ix_mint != expected_mint {
+                msg!(
+                    "Transfer rejected: TransferCheckedWithFee mint {} does not match expected {}",
+                    ix_mint,
+                    expected_mint
+                );
+                return Err(NftError::UnauthorizedDirectInvocation.into());
+            }
+            Ok(())
+        }
         _ => {
             msg!(
-                "Transfer rejected: Token-2022 instruction tag {} is not Transfer or TransferChecked",
+                "Transfer rejected: Token-2022 instruction tag {} is not Transfer, TransferChecked, or TransferCheckedWithFee",
                 ix_tag
             );
             Err(NftError::UnauthorizedDirectInvocation.into())

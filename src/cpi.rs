@@ -71,7 +71,16 @@ fn read_u16(data: &[u8], off: usize) -> Result<u16, ProgramError> {
     Ok(u16::from_le_bytes(bytes))
 }
 
+/// Read a u8 from a byte slice at the given offset.
+fn read_u8(data: &[u8], off: usize) -> Result<u8, ProgramError> {
+    if off >= data.len() {
+        return Err(NftError::SlabDataTooShort.into());
+    }
+    Ok(data[off])
+}
+
 /// Read a u32 from a byte slice at the given offset.
+#[allow(dead_code)]
 fn read_u32(data: &[u8], off: usize) -> Result<u32, ProgramError> {
     let end = off.checked_add(4).ok_or(NftError::SlabDataTooShort)?;
     if end > data.len() {
@@ -137,7 +146,9 @@ const V12_1_EP_BITMAP_OFF: usize = 1200; // engine_off(616) + 584 = 1200 absolut
 /// Engine at 616 (SBF, align 8). Account offsets from slab_types::ACCT_OFF_*.
 const V12_15_ENGINE_OFF: usize = slab_types::ENGINE_OFF;  // 616
 const V12_15_ACCOUNT_SIZE: usize = 920;       // 8 cohorts, SBF (verified on-chain)
-const V12_15_ACCOUNT_SIZE_FULL: usize = 4400; // 62 cohorts (upstream default)
+// 3D.2b: Correct size for 62-cohort V12_15 accounts is 4376, not 4400.
+// Using 4400 caused the layout matcher to miss full-cohort slabs entirely.
+const V12_15_ACCOUNT_SIZE_FULL: usize = 4376; // 62 cohorts (upstream default)
 
 /// Detect layout from slab data length and header.
 fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
@@ -343,8 +354,8 @@ pub struct PositionData {
     /// Derived from the sign of position_size.I128 hi-word at acct_off+88.
     pub is_long: u8,
     /// Account kind: 0 = User (trader), 1 = LP (liquidity provider).
-    /// Only User accounts should get NFTs.
-    pub kind: u32,
+    /// Only User accounts should get NFTs. On-chain Account.kind is a u8.
+    pub kind: u8,
     /// Current global funding index (E18) from engine.
     pub global_funding_index_e18: i128,
     /// Byte offset to the engine block within slab data (layout-dependent).
@@ -425,7 +436,9 @@ pub fn read_position(slab_data: &[u8], user_idx: u16) -> Result<PositionData, Pr
             .unwrap(),
     );
 
-    let kind = read_u32(slab_data, acct_off + ACCT_KIND_OFF)?;
+    // 3D.2a: kind is a u8 on-chain (Account.kind field), not u32.
+    // Reading as u32 was wrong and would parse 3 extra bytes into the value.
+    let kind = read_u8(slab_data, acct_off + ACCT_KIND_OFF)?;
     // PERC-9037: Read collateral as U128 lo-word. The capital field is a
     // Percolator U128 stored as [lo: u64, hi: u64]. We only use the lo-word,
     // which is correct for values < 2^64. Verify the hi-word is zero to detect
