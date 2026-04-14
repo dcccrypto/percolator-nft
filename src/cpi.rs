@@ -261,6 +261,14 @@ fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
     // Try V12_15 full (62 cohorts, 4400-byte accounts).
     // Same engine offsets, different account size.
     let v1215f_bitmap_bytes = max_accounts.div_ceil(8);
+    // Between the end of the bitmap and the start of the accounts array, the
+    // #[repr(C)] EngineState contains these fields (see percolator/src/percolator.rs):
+    //   num_used_accounts: u16   →  2 bytes
+    //   implicit padding         →  6 bytes (aligns next field to u64 boundary)
+    //   next_account_id:  u64   →  8 bytes
+    //   free_head:        u16   →  2 bytes   ← totals 18
+    //   next_free: [u16; N]     →  max_accounts * 2 bytes
+    // Hence the formula: bitmap_end + 18 + max_accounts * 2 = start of accounts.
     let v1215f_accounts_off = v1215_bitmap_off + v1215f_bitmap_bytes + 18 + max_accounts * 2;
     let v1215f_accounts_off_aligned = (v1215f_accounts_off + 7) & !7;
     let v1215f_total = v1215f_accounts_off_aligned + max_accounts * V12_15_ACCOUNT_SIZE_FULL;
@@ -306,6 +314,12 @@ fn detect_layout(data: &[u8]) -> Result<SlabLayout, ProgramError> {
     }
 
     // Try V12_1 HOST (upstream rebase, 320-byte accounts).
+    // This variant covers native aarch64/x86-64 builds of the percolator engine
+    // (e.g. local integration tests and simulation). The SBF-deployed binary has
+    // different field alignment (→ V12_1_EP branch above). The HOST constants are
+    // validated by slab_types compile-time assertions, not by on-chain probing.
+    // Do NOT remove: local test harnesses that write a slab with the HOST layout
+    // will fail the V12_1_EP size check (288 vs 320 bytes) and fall through here.
     let v12_bitmap_bytes = max_accounts.div_ceil(8);
     let v12_accounts_off = V12_1_BITMAP_OFF_LAYOUT + v12_bitmap_bytes;
     let v12_total = v12_accounts_off + max_accounts * V12_1_ACCOUNT_SIZE_LAYOUT;
