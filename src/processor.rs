@@ -724,14 +724,14 @@ fn process_burn_position_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
     // ── Burn the NFT ──
     invoke(
         &token2022::burn(holder_ata.key, nft_mint.key, holder.key, 1),
-        &[holder_ata.clone(), nft_mint.clone(), holder.clone()],
+        &[holder_ata.clone(), nft_mint.clone(), holder.clone(), token_program.clone()],
     )?;
 
     // ���─ PERC-9032: Close the ATA (return rent to holder) ──
     // Without this, the empty ATA remains open with ~0.002 SOL locked.
     invoke(
         &token2022::close_account(holder_ata.key, holder.key, holder.key),
-        &[holder_ata.clone(), holder.clone()],
+        &[holder_ata.clone(), holder.clone(), token_program.clone()],
     )?;
 
     // ── PERC-9060: Close the mint account (return rent to holder) ──
@@ -742,7 +742,7 @@ fn process_burn_position_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
     let mint_auth_seeds: &[&[u8]] = &[MINT_AUTHORITY_SEED, &[mint_auth_bump]];
     invoke_signed(
         &token2022::close_account(nft_mint.key, holder.key, mint_auth.key),
-        &[nft_mint.clone(), holder.clone(), mint_auth.clone()],
+        &[nft_mint.clone(), holder.clone(), mint_auth.clone(), token_program.clone()],
         &[mint_auth_seeds],
     )?;
 
