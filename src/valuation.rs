@@ -65,9 +65,10 @@ pub struct PositionValuation {
 }
 
 // Engine field offsets are now layout-dependent — read from PositionData.
-// V0: mark_price=0, maint_margin=96
-// V1D: mark_price=424, maint_margin=80
-// V12_1: mark_price=928, maint_margin=104
+// V0:     mark_price=0,    maint_margin=96
+// V1D:    mark_price=424,  maint_margin=80
+// V12_1:  mark_price=928,  maint_margin=104 (engine at 616, params+maint_margin at 616+104)
+// V12_17: mark_price=0 (last_oracle_price at engine+624), maint_margin=32 (params+0, ENGINE_OFF=504)
 
 /// Process GetPositionValue instruction.
 ///

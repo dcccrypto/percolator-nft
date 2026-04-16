@@ -61,11 +61,11 @@
 //!
 //! | Feature flag | `MAX_ACCOUNTS` | `BITMAP_WORDS` | `RiskEngine` size |
 //! |--------------|----------------|----------------|-------------------|
-//! | (default)    | 4096           | 64             | 1 320 464         |
-//! | `medium`     | 1024           | 16             | 330 896           |
-//! | `small`      | 256            | 4              | 83 504            |
-//! | `test`       | 64             | 1              | 21 656            |
-//! | `cfg(kani)`  | 4              | 1              | 2 336             |
+//! | (default)    | 4096           | 64             | varies            |
+//! | `medium`     | 1024           | 16             | varies            |
+//! | `small`      | 256            | 4              | varies            |
+//! | `test`       | 64             | 1              | varies            |
+//! | `cfg(kani)`  | 4              | 1              | varies            |
 //!
 //! **Deployment rule**: if mainnet Percolator is built with `--features medium`,
 //! the NFT program MUST also be built with `--features medium`. A mismatch
@@ -92,7 +92,15 @@ use core::mem::{align_of, offset_of, size_of};
 /// this into every minted NFT so that re-vendoring against a new upstream
 /// layout invalidates older NFTs rather than silently decoding them with the
 /// wrong offsets.
-pub const LAYOUT_REVISION: u32 = 1;
+///
+/// Revision 2: v12.17 SBF layout.
+/// - MarketConfig: 544 → 432 bytes (upstream reorganization + dex_pool 32 bytes)
+/// - Account: 320 → 352 bytes (removed account_id/entry_price/cohorts;
+///   added f_snap + two-bucket warmup; capital is now the first field)
+/// - RiskParams: 352 → 184 bytes (stripped fork-specific fields not in v12.17)
+/// - InsuranceFund: 80 → 16 bytes (stripped to balance: U128 only)
+/// - ENGINE_OFF: 616 → 504 (align_up(72 + 432, 8))
+pub const LAYOUT_REVISION: u32 = 2;
 
 // ════════════════════════════════════════════════════════════════════════════
 // MAX_ACCOUNTS feature gating — verbatim from percolator/src/lib.rs:67-95
@@ -131,10 +139,19 @@ pub const BITMAP_WORDS: usize = (MAX_ACCOUNTS + 63) / 64;
 // ════════════════════════════════════════════════════════════════════════════
 
 pub const EXPECTED_SLAB_HEADER_SIZE: usize = 72;
-pub const EXPECTED_MARKET_CONFIG_SIZE: usize = 544;
-pub const EXPECTED_INSURANCE_FUND_SIZE: usize = 80;
-pub const EXPECTED_RISK_PARAMS_SIZE: usize = 352;
-pub const EXPECTED_ACCOUNT_SIZE: usize = 320;
+/// v12.17: MarketConfig shrunk from 544 to 432 bytes
+/// (upstream reorganization: many fields removed/reorganized, dex_pool 32 bytes added).
+pub const EXPECTED_MARKET_CONFIG_SIZE: usize = 432;
+/// v12.17: InsuranceFund stripped to balance: U128 only (16 bytes).
+pub const EXPECTED_INSURANCE_FUND_SIZE: usize = 16;
+/// v12.17: RiskParams stripped to 184 bytes (removed warmup_period_slots and
+/// all fork-specific funding/partial-liq/dynamic-fee fields; added h_min, h_max,
+/// resolve_price_deviation_bps).
+pub const EXPECTED_RISK_PARAMS_SIZE: usize = 184;
+/// v12.17: Account grew from 320 to 352 bytes (removed account_id, entry_price,
+/// fees_earned_total, funding_index, position_size, last_partial_liquidation_slot,
+/// warmup_started_at_slot, warmup_slope_per_step; added f_snap and two warmup buckets).
+pub const EXPECTED_ACCOUNT_SIZE: usize = 352;
 
 // All structs are 8-byte aligned because every 128-bit field uses the
 // [u64; 2]-backed U128/I128 wrappers instead of native i128/u128.
@@ -221,6 +238,17 @@ pub enum SideMode {
 const _: () = assert!(size_of::<SideMode>() == 1);
 const _: () = assert!(align_of::<SideMode>() == 1);
 
+/// MarketMode — v12.17 engine state flag.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarketMode {
+    Live = 0,
+    Resolved = 1,
+}
+
+const _: () = assert!(size_of::<MarketMode>() == 1);
+const _: () = assert!(align_of::<MarketMode>() == 1);
+
 // ════════════════════════════════════════════════════════════════════════════
 // SlabHeader — verbatim from percolator-prog/src/lib.rs:2154-2163
 // ════════════════════════════════════════════════════════════════════════════
@@ -260,6 +288,11 @@ const _: () = assert!(offset_of!(SlabHeader, _reserved) == 48);
 // program. The size is pinned, so if upstream grows or shrinks MarketConfig,
 // the `MARKET_CONFIG_SIZE` const below must be manually bumped and this
 // assertion will trip.
+//
+// v12.17: MarketConfig shrank from 544 to 432 bytes. The field reorganization
+// (including the addition of `dex_pool: [u8; 32]`) was already accounted for
+// in `percolator-prog`. The opaque blob approach means the NFT program only
+// needs to update this constant — no field-level changes required.
 
 #[repr(C, align(8))]
 #[derive(Clone, Copy)]
@@ -269,44 +302,65 @@ const _: () = assert!(size_of::<MarketConfig>() == EXPECTED_MARKET_CONFIG_SIZE);
 const _: () = assert!(align_of::<MarketConfig>() == 8);
 
 // ════════════════════════════════════════════════════════════════════════════
-// InsuranceFund — verbatim from percolator/src/lib.rs:309-335
+// InsuranceFund — v12.17: stripped to balance: U128 only (16 bytes).
+//
+// The v12.17 InsuranceFund (percolator/src/percolator.rs:340-342) was
+// radically simplified: fee_revenue, balance_incentive_reserve, isolated_balance,
+// insurance_isolation_bps, and all padding fields were removed, leaving only
+// `balance: U128`.
 // ════════════════════════════════════════════════════════════════════════════
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct InsuranceFund {
     pub balance: U128,
-    pub fee_revenue: U128,
-    pub balance_incentive_reserve: u64,
-    pub _rebate_pad: [u8; 8],
-    pub isolated_balance: U128,
-    pub insurance_isolation_bps: u16,
-    pub _isolation_padding: [u8; 14],
 }
 
 const _: () = assert!(size_of::<InsuranceFund>() == EXPECTED_INSURANCE_FUND_SIZE);
 const _: () = assert!(align_of::<InsuranceFund>() == 8);
+const _: () = assert!(offset_of!(InsuranceFund, balance) == 0);
 
 // ════════════════════════════════════════════════════════════════════════════
-// RiskParams — verbatim from percolator/src/lib.rs:339-419
+// RiskParams — v12.17 (SBF, 184 bytes)
 //
-// Native u128 fields (`min_nonzero_mm_req`, `min_nonzero_im_req`,
-// `fee_tier2_threshold`, `fee_tier3_threshold`) are replaced with [u64; 2]
-// wrappers for 8-byte alignment matching the SBF ABI. On SBF this is
-// byte-identical to upstream. On host this avoids Rust 1.77+ 16-byte
-// alignment that would produce a different `size_of` value.
+// Verbatim from percolator/src/percolator.rs:347-368 with native u128 fields
+// replaced by [u64; 2]-backed U128/I128 wrappers for target independence.
+//
+// v12.17 changes vs V12_1:
+// - Removed: warmup_period_slots, maintenance_fee_per_slot, risk_reduction_threshold,
+//   liquidation_buffer_bps, all funding rate fields, all partial liquidation fields,
+//   all dynamic fee fields (fee_tier2/3, fee_split_*, fee_utilization_surge_bps),
+//   use_mark_price_for_liquidation + bool_pad
+// - Added: h_min, h_max (warmup horizon bounds), resolve_price_deviation_bps
+// - maintenance_margin_bps is now the FIRST field (offset 0, not 8)
+//
+// SBF field offsets (from task spec):
+//   [  0..  8] maintenance_margin_bps      u64
+//   [  8.. 16] initial_margin_bps          u64
+//   [ 16.. 24] trading_fee_bps             u64
+//   [ 24.. 32] max_accounts                u64
+//   [ 32.. 48] new_account_fee             U128
+//   [ 48.. 56] max_crank_staleness_slots   u64
+//   [ 56.. 64] liquidation_fee_bps         u64
+//   [ 64.. 80] liquidation_fee_cap         U128
+//   [ 80.. 96] min_liquidation_abs         U128
+//   [ 96..112] min_initial_deposit         U128
+//   [112..128] min_nonzero_mm_req          U128 (native u128 wrapped)
+//   [128..144] min_nonzero_im_req          U128 (native u128 wrapped)
+//   [144..160] insurance_floor             U128
+//   [160..168] h_min                       u64
+//   [168..176] h_max                       u64
+//   [176..184] resolve_price_deviation_bps u64
 // ════════════════════════════════════════════════════════════════════════════
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RiskParams {
-    pub warmup_period_slots: u64,
     pub maintenance_margin_bps: u64,
     pub initial_margin_bps: u64,
     pub trading_fee_bps: u64,
     pub max_accounts: u64,
     pub new_account_fee: U128,
-    pub maintenance_fee_per_slot: U128,
     pub max_crank_staleness_slots: u64,
     pub liquidation_fee_bps: u64,
     pub liquidation_fee_cap: U128,
@@ -317,63 +371,81 @@ pub struct RiskParams {
     /// Native `u128` in upstream; wrapped here for target-independent alignment.
     pub min_nonzero_im_req: U128,
     pub insurance_floor: U128,
-
-    // ────── Fork-specific fields (see _percolator_core_reference.rs) ──────
-    pub risk_reduction_threshold: U128,
-    pub liquidation_buffer_bps: u64,
-
-    // ────── Funding rate (PERC-121) ──────
-    pub funding_premium_weight_bps: u64,
-    pub funding_settlement_interval_slots: u64,
-    pub funding_premium_dampening_e6: u64,
-    pub funding_premium_max_bps_per_slot: i64,
-
-    // ────── Partial liquidation (PERC-122) ──────
-    pub partial_liquidation_bps: u64,
-    pub partial_liquidation_cooldown_slots: u64,
-    /// Upstream is `bool`; stored as `u8` here so the struct has no trailing
-    /// niche and the `Default` derive works unconditionally.
-    pub use_mark_price_for_liquidation: u8,
-    pub _bool_pad: [u8; 7],
-    pub emergency_liquidation_margin_bps: u64,
-
-    // ────── Dynamic fees (PERC-120/283) ──────
-    pub fee_tier2_bps: u64,
-    pub fee_tier3_bps: u64,
-    /// Native `u128` in upstream; wrapped here for target-independent alignment.
-    pub fee_tier2_threshold: U128,
-    /// Native `u128` in upstream; wrapped here for target-independent alignment.
-    pub fee_tier3_threshold: U128,
-    pub fee_split_lp_bps: u64,
-    pub fee_split_protocol_bps: u64,
-    pub fee_split_creator_bps: u64,
-    pub fee_utilization_surge_bps: u64,
+    /// Minimum warmup horizon in slots (spec §6.1).
+    pub h_min: u64,
+    /// Maximum warmup horizon in slots (spec §6.1).
+    pub h_max: u64,
+    /// Max deviation (bps) from oracle for resolved settlement price (spec §10.7).
+    pub resolve_price_deviation_bps: u64,
 }
-
-// Note: Default is not derived because `#![forbid(unsafe_code)]` blocks the
-// simplest `core::mem::zeroed()` implementation, and a field-by-field Default
-// isn't needed by PR C. If a consumer wants a zero-filled RiskParams, they
-// can use `bytemuck::Zeroable` in the future (not derived here to minimize
-// coupling).
 
 const _: () = assert!(size_of::<RiskParams>() == EXPECTED_RISK_PARAMS_SIZE);
 const _: () = assert!(align_of::<RiskParams>() == 8);
-const _: () = assert!(offset_of!(RiskParams, warmup_period_slots) == 0);
-const _: () = assert!(offset_of!(RiskParams, maintenance_margin_bps) == 8);
-const _: () = assert!(offset_of!(RiskParams, max_accounts) == 32);
+const _: () = assert!(offset_of!(RiskParams, maintenance_margin_bps) == 0);
+const _: () = assert!(offset_of!(RiskParams, initial_margin_bps) == 8);
+const _: () = assert!(offset_of!(RiskParams, max_accounts) == 24);
+const _: () = assert!(offset_of!(RiskParams, new_account_fee) == 32);
+const _: () = assert!(offset_of!(RiskParams, max_crank_staleness_slots) == 48);
+const _: () = assert!(offset_of!(RiskParams, liquidation_fee_cap) == 64);
+const _: () = assert!(offset_of!(RiskParams, min_initial_deposit) == 96);
+const _: () = assert!(offset_of!(RiskParams, min_nonzero_mm_req) == 112);
+const _: () = assert!(offset_of!(RiskParams, insurance_floor) == 144);
+const _: () = assert!(offset_of!(RiskParams, h_min) == 160);
+const _: () = assert!(offset_of!(RiskParams, h_max) == 168);
+const _: () = assert!(offset_of!(RiskParams, resolve_price_deviation_bps) == 176);
 
 // ════════════════════════════════════════════════════════════════════════════
-// Account — verbatim from percolator/src/lib.rs:202-267
+// Account — v12.17 (SBF, 352 bytes)
 //
-// Native `i128`/`u128` fields replaced with [u64; 2] wrappers for target
-// independence. On SBF, byte-identical to upstream. On host, gives the SAME
-// size (320) as SBF, avoiding the Rust 1.77+ native i128 alignment mismatch.
+// Verbatim from percolator/src/percolator.rs:243-294 with native i128/u128
+// replaced by [u64; 2]-backed wrappers for target independence.
+//
+// v12.17 BREAKING CHANGES vs V12_1 (320 bytes):
+// - REMOVED: account_id (was first field, u64)
+// - REMOVED: warmup_started_at_slot, warmup_slope_per_step
+// - REMOVED: entry_price, funding_index, position_size (legacy fields)
+// - REMOVED: last_partial_liquidation_slot
+// - REMOVED: fees_earned_total
+// - REMOVED: last_fee_slot
+// - ADDED: f_snap (I128, funding snapshot at last attachment)
+// - ADDED: sched_present, sched_remaining_q, sched_anchor_q,
+//          sched_start_slot, sched_horizon, sched_release_q (scheduled warmup bucket)
+// - ADDED: pending_present, pending_remaining_q, pending_horizon,
+//          pending_created_slot (pending warmup bucket)
+// - capital is now the FIRST field (was at offset 8 after account_id)
+//
+// SBF field offsets (task spec v12.17):
+//   [  0.. 16] capital             U128
+//   [ 16.. 17] kind                u8
+//   [ 17.. 24] _kind_pad           [u8; 7]
+//   [ 24.. 40] pnl                 I128
+//   [ 40.. 56] reserved_pnl        U128
+//   [ 56.. 72] position_basis_q    I128
+//   [ 72.. 88] adl_a_basis         U128
+//   [ 88..104] adl_k_snap          I128
+//   [104..120] f_snap              I128
+//   [120..128] adl_epoch_snap      u64
+//   [128..160] matcher_program     [u8; 32]
+//   [160..192] matcher_context     [u8; 32]
+//   [192..224] owner               [u8; 32]
+//   [224..240] fee_credits         I128
+//   [240..241] sched_present       u8
+//   [241..248] _sched_pad          [u8; 7]
+//   [248..264] sched_remaining_q   U128
+//   [264..280] sched_anchor_q      U128
+//   [280..288] sched_start_slot    u64
+//   [288..296] sched_horizon       u64
+//   [296..312] sched_release_q     U128
+//   [312..313] pending_present     u8
+//   [313..320] _pending_pad        [u8; 7]
+//   [320..336] pending_remaining_q U128
+//   [336..344] pending_horizon     u64
+//   [344..352] pending_created_slot u64
 // ════════════════════════════════════════════════════════════════════════════
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Account {
-    pub account_id: u64,
     pub capital: U128,
     /// 0 = User, 1 = LP (upstream migrated from `AccountKind` enum to `u8`).
     pub kind: u8,
@@ -384,18 +456,19 @@ pub struct Account {
     /// Native `u128` upstream; wrapped here.
     pub reserved_pnl: U128,
 
-    pub warmup_started_at_slot: u64,
-    /// Native `u128` upstream; wrapped here.
-    pub warmup_slope_per_step: U128,
-
     /// Native `i128` upstream; wrapped here. The primary position size/side
-    /// field (PERC-121 basis-q representation).
+    /// field (v12.15+ basis-q representation).
     pub position_basis_q: I128,
 
     /// Native `u128` upstream; wrapped here.
     pub adl_a_basis: U128,
     /// Native `i128` upstream; wrapped here.
     pub adl_k_snap: I128,
+
+    /// Per-account funding snapshot at last attachment (v12.17).
+    /// Native `i128` upstream; wrapped here.
+    pub f_snap: I128,
+
     pub adl_epoch_snap: u64,
 
     pub matcher_program: [u8; 32],
@@ -404,16 +477,26 @@ pub struct Account {
     pub owner: [u8; 32],
 
     pub fee_credits: I128,
-    pub last_fee_slot: u64,
-    pub fees_earned_total: U128,
 
-    // ────── Legacy fields (kept by upstream fork, see line 248-263) ──────
-    pub entry_price: u64,
-    pub funding_index: i64,
-    /// Native `i128` upstream; wrapped here. Legacy — upstream is migrating
-    /// to `position_basis_q` but keeps this around for the prog-wrapper path.
-    pub position_size: I128,
-    pub last_partial_liquidation_slot: u64,
+    // ---- Scheduled warmup reserve bucket (spec §4.3) ----
+    pub sched_present: u8,
+    pub _sched_pad: [u8; 7],
+    /// Native `u128` upstream; wrapped here.
+    pub sched_remaining_q: U128,
+    /// Native `u128` upstream; wrapped here.
+    pub sched_anchor_q: U128,
+    pub sched_start_slot: u64,
+    pub sched_horizon: u64,
+    /// Native `u128` upstream; wrapped here.
+    pub sched_release_q: U128,
+
+    // ---- Pending warmup reserve bucket ----
+    pub pending_present: u8,
+    pub _pending_pad: [u8; 7],
+    /// Native `u128` upstream; wrapped here.
+    pub pending_remaining_q: U128,
+    pub pending_horizon: u64,
+    pub pending_created_slot: u64,
 }
 
 impl Account {
@@ -421,65 +504,106 @@ impl Account {
     pub const KIND_LP: u8 = 1;
 }
 
-// Note: Default is not derived — see RiskParams comment above for rationale.
-
 const _: () = assert!(size_of::<Account>() == EXPECTED_ACCOUNT_SIZE);
 const _: () = assert!(align_of::<Account>() == 8);
 
 // Field offsets — these are the values PR C will use via `offset_of!` at
 // runtime. Pinned here so any drift fails at compile time.
-pub const ACCT_OFF_ACCOUNT_ID: usize = offset_of!(Account, account_id);
 pub const ACCT_OFF_CAPITAL: usize = offset_of!(Account, capital);
 pub const ACCT_OFF_KIND: usize = offset_of!(Account, kind);
+pub const ACCT_OFF_PNL: usize = offset_of!(Account, pnl);
+pub const ACCT_OFF_RESERVED_PNL: usize = offset_of!(Account, reserved_pnl);
 pub const ACCT_OFF_POSITION_BASIS_Q: usize = offset_of!(Account, position_basis_q);
+pub const ACCT_OFF_ADL_A_BASIS: usize = offset_of!(Account, adl_a_basis);
+pub const ACCT_OFF_ADL_K_SNAP: usize = offset_of!(Account, adl_k_snap);
+pub const ACCT_OFF_F_SNAP: usize = offset_of!(Account, f_snap);
+pub const ACCT_OFF_ADL_EPOCH_SNAP: usize = offset_of!(Account, adl_epoch_snap);
+pub const ACCT_OFF_MATCHER_PROGRAM: usize = offset_of!(Account, matcher_program);
+pub const ACCT_OFF_MATCHER_CONTEXT: usize = offset_of!(Account, matcher_context);
 pub const ACCT_OFF_OWNER: usize = offset_of!(Account, owner);
-pub const ACCT_OFF_ENTRY_PRICE: usize = offset_of!(Account, entry_price);
-pub const ACCT_OFF_FUNDING_INDEX: usize = offset_of!(Account, funding_index);
-pub const ACCT_OFF_POSITION_SIZE: usize = offset_of!(Account, position_size);
+pub const ACCT_OFF_FEE_CREDITS: usize = offset_of!(Account, fee_credits);
+pub const ACCT_OFF_SCHED_PRESENT: usize = offset_of!(Account, sched_present);
+pub const ACCT_OFF_SCHED_REMAINING_Q: usize = offset_of!(Account, sched_remaining_q);
+pub const ACCT_OFF_SCHED_ANCHOR_Q: usize = offset_of!(Account, sched_anchor_q);
+pub const ACCT_OFF_SCHED_START_SLOT: usize = offset_of!(Account, sched_start_slot);
+pub const ACCT_OFF_SCHED_HORIZON: usize = offset_of!(Account, sched_horizon);
+pub const ACCT_OFF_SCHED_RELEASE_Q: usize = offset_of!(Account, sched_release_q);
+pub const ACCT_OFF_PENDING_PRESENT: usize = offset_of!(Account, pending_present);
+pub const ACCT_OFF_PENDING_REMAINING_Q: usize = offset_of!(Account, pending_remaining_q);
+pub const ACCT_OFF_PENDING_HORIZON: usize = offset_of!(Account, pending_horizon);
+pub const ACCT_OFF_PENDING_CREATED_SLOT: usize = offset_of!(Account, pending_created_slot);
 
-// Pinned offsets for Account fields — all 8-byte aligned because 128-bit
-// fields use [u64; 2]-backed U128/I128 wrappers:
-//
-//   [  0..  8] account_id      u64
-//   [  8.. 24] capital         U128
-//   [ 24.. 25] kind            u8
-//   [ 25.. 32] _kind_pad       [u8; 7]
-//   [ 32.. 48] pnl             I128
-//   [ 48.. 64] reserved_pnl    U128
-//   [ 64.. 72] warmup_started_at_slot  u64
-//   [ 72.. 88] warmup_slope_per_step   U128
-//   [ 88..104] position_basis_q        I128  ← offset 88 (not 96) with [u64;2] wrappers
-//   [104..120] adl_a_basis     U128
-//   [120..136] adl_k_snap      I128
-//   [136..144] adl_epoch_snap  u64
-//   [144..176] matcher_program [u8; 32]
-//   [176..208] matcher_context [u8; 32]
-//   [208..240] owner           [u8; 32]
-//   [240..256] fee_credits     I128
-//   [256..264] last_fee_slot   u64
-//   [264..280] fees_earned_total  U128
-//   [280..288] entry_price     u64
-//   [288..296] funding_index   i64
-//   [296..312] position_size   I128
-//   [312..320] last_partial_liquidation_slot  u64
-const _: () = assert!(ACCT_OFF_ACCOUNT_ID == 0);
-const _: () = assert!(ACCT_OFF_CAPITAL == 8);
-const _: () = assert!(ACCT_OFF_KIND == 24);
-const _: () = assert!(ACCT_OFF_POSITION_BASIS_Q == 88);
-const _: () = assert!(ACCT_OFF_OWNER == 208);
-const _: () = assert!(ACCT_OFF_ENTRY_PRICE == 280);
-const _: () = assert!(ACCT_OFF_FUNDING_INDEX == 288);
-const _: () = assert!(ACCT_OFF_POSITION_SIZE == 296);
+// Pinned offsets for Account fields (SBF v12.17):
+const _: () = assert!(ACCT_OFF_CAPITAL == 0);
+const _: () = assert!(ACCT_OFF_KIND == 16);
+const _: () = assert!(ACCT_OFF_PNL == 24);
+const _: () = assert!(ACCT_OFF_RESERVED_PNL == 40);
+const _: () = assert!(ACCT_OFF_POSITION_BASIS_Q == 56);
+const _: () = assert!(ACCT_OFF_ADL_A_BASIS == 72);
+const _: () = assert!(ACCT_OFF_ADL_K_SNAP == 88);
+const _: () = assert!(ACCT_OFF_F_SNAP == 104);
+const _: () = assert!(ACCT_OFF_ADL_EPOCH_SNAP == 120);
+const _: () = assert!(ACCT_OFF_MATCHER_PROGRAM == 128);
+const _: () = assert!(ACCT_OFF_MATCHER_CONTEXT == 160);
+const _: () = assert!(ACCT_OFF_OWNER == 192);
+const _: () = assert!(ACCT_OFF_FEE_CREDITS == 224);
+const _: () = assert!(ACCT_OFF_SCHED_PRESENT == 240);
+const _: () = assert!(ACCT_OFF_SCHED_REMAINING_Q == 248);
+const _: () = assert!(ACCT_OFF_SCHED_ANCHOR_Q == 264);
+const _: () = assert!(ACCT_OFF_SCHED_START_SLOT == 280);
+const _: () = assert!(ACCT_OFF_SCHED_HORIZON == 288);
+const _: () = assert!(ACCT_OFF_SCHED_RELEASE_Q == 296);
+const _: () = assert!(ACCT_OFF_PENDING_PRESENT == 312);
+const _: () = assert!(ACCT_OFF_PENDING_REMAINING_Q == 320);
+const _: () = assert!(ACCT_OFF_PENDING_HORIZON == 336);
+const _: () = assert!(ACCT_OFF_PENDING_CREATED_SLOT == 344);
 
 // ════════════════════════════════════════════════════════════════════════════
-// RiskEngine — verbatim from percolator/src/lib.rs:422-561
+// RiskEngine — v12.17 (SBF)
 //
-// The huge top-level struct. Native i128/u128 fields are wrapped with
-// [u64; 2]-backed U128/I128 for target independence. The parametric tail
-// (`used`, `num_used_accounts`, `next_account_id`, `free_head`, `next_free`,
-// `accounts`) depends on MAX_ACCOUNTS and so the total size varies with the
-// feature flag — validated below via the closed-form
-// `EXPECTED_RISK_ENGINE_SIZE`.
+// Verbatim from percolator/src/percolator.rs:370-459 with native i128/u128
+// replaced by [u64; 2]-backed U128/I128 wrappers for target independence.
+//
+// v12.17 BREAKING CHANGES vs V12_1:
+// - InsuranceFund is now 16 bytes (was 80)
+// - RiskParams is now 184 bytes (was 352)
+// - Added: market_mode (u8), resolved_price, resolved_slot,
+//   resolved_payout_h_num, resolved_payout_h_den, resolved_payout_ready,
+//   resolved_k_long_terminal_delta, resolved_k_short_terminal_delta,
+//   resolved_live_price
+// - Added: neg_pnl_account_count, fund_px_last, f_long_num, f_short_num,
+//   f_epoch_start_long_num, f_epoch_start_short_num
+// - Removed: funding_rate_bps_per_slot_last, max_crank_staleness_slots (dup),
+//   liq_cursor, crank_cursor, sweep_start_idx, various cursor padding,
+//   last_full_sweep_start/completed_slot, lifetime_liquidations,
+//   lifetime_force_realize_closes, last_oracle_price dup, mark_price_e6,
+//   funding_index_qpb_e6, last_funding_slot, funding_frozen, funding_frozen_rate,
+//   emergency_oi_mode, emergency_start_slot, last_breaker_slot,
+//   trade_twap_e6, twap_last_slot, many LP aggregates
+// - next_account_id removed from slab management tail
+//
+// SBF offsets (from task spec):
+//   vault: 0           (U128)
+//   insurance_fund: 16 (InsuranceFund = 16)
+//   params: 32         (RiskParams = 184)
+//   current_slot: 216  (u64)
+//   market_mode: 224   (u8)
+//   ...
+//   c_tot: 336         (U128)
+//   pnl_pos_tot: 352   (U128)
+//   pnl_matured_pos_tot: 368 (U128)
+//   ...
+//   neg_pnl_account_count: 616 (u64)
+//   last_oracle_price: 624     (u64)
+//   fund_px_last: 632          (u64)
+//   f_long_num: 648            (I128)
+//   f_short_num: 664           (I128)
+//   ...
+//   bitmap (used array): 712   ([u64; BITMAP_WORDS])
+//   num_used_accounts: 712 + 8*BITMAP_WORDS  (u16)
+//   free_head: ...             (u16)
+//   next_free: ...             ([u16; MAX_ACCOUNTS])
+//   accounts: varies           ([Account; MAX_ACCOUNTS])
 // ════════════════════════════════════════════════════════════════════════════
 
 #[repr(C)]
@@ -489,94 +613,123 @@ pub struct RiskEngine {
     pub insurance_fund: InsuranceFund,
     pub params: RiskParams,
     pub current_slot: u64,
-    pub funding_rate_bps_per_slot_last: i64,
+
+    /// Market mode (Live=0, Resolved=1).
+    pub market_mode: MarketMode,
+    pub _market_mode_pad: [u8; 7],
+
+    // Resolved market state
+    pub resolved_price: u64,
+    pub resolved_slot: u64,
+    /// Native `u128` upstream; wrapped here.
+    pub resolved_payout_h_num: U128,
+    /// Native `u128` upstream; wrapped here.
+    pub resolved_payout_h_den: U128,
+    pub resolved_payout_ready: u8,
+    pub _resolved_ready_pad: [u8; 7],
+    /// Native `i128` upstream; wrapped here.
+    pub resolved_k_long_terminal_delta: I128,
+    /// Native `i128` upstream; wrapped here.
+    pub resolved_k_short_terminal_delta: I128,
+    pub resolved_live_price: u64,
+
     pub last_crank_slot: u64,
-    pub max_crank_staleness_slots: u64,
+
     pub c_tot: U128,
-    /// Native u128 upstream; wrapped here.
+    /// Native `u128` upstream; wrapped here.
     pub pnl_pos_tot: U128,
-    /// Native u128 upstream; wrapped here.
+    /// Native `u128` upstream; wrapped here.
     pub pnl_matured_pos_tot: U128,
-    pub liq_cursor: u16,
+
     pub gc_cursor: u16,
-    pub _cursor_pad0: [u8; 4],
-    pub last_full_sweep_start_slot: u64,
-    pub last_full_sweep_completed_slot: u64,
-    pub crank_cursor: u16,
-    pub sweep_start_idx: u16,
-    pub _cursor_pad1: [u8; 4],
-    pub lifetime_liquidations: u64,
+    pub _gc_pad: [u8; 6],
+
+    /// ADL side state
+    /// Native `u128` upstream; wrapped here.
     pub adl_mult_long: U128,
+    /// Native `u128` upstream; wrapped here.
     pub adl_mult_short: U128,
+    /// Native `i128` upstream; wrapped here.
     pub adl_coeff_long: I128,
+    /// Native `i128` upstream; wrapped here.
     pub adl_coeff_short: I128,
     pub adl_epoch_long: u64,
     pub adl_epoch_short: u64,
+    /// Native `i128` upstream; wrapped here.
     pub adl_epoch_start_k_long: I128,
+    /// Native `i128` upstream; wrapped here.
     pub adl_epoch_start_k_short: I128,
+    /// Native `u128` upstream; wrapped here.
     pub oi_eff_long_q: U128,
+    /// Native `u128` upstream; wrapped here.
     pub oi_eff_short_q: U128,
+
     pub side_mode_long: SideMode,
     pub side_mode_short: SideMode,
     pub _side_mode_pad: [u8; 6],
+
     pub stored_pos_count_long: u64,
     pub stored_pos_count_short: u64,
     pub stale_account_count_long: u64,
     pub stale_account_count_short: u64,
+
+    /// Native `u128` upstream; wrapped here.
     pub phantom_dust_bound_long_q: U128,
+    /// Native `u128` upstream; wrapped here.
     pub phantom_dust_bound_short_q: U128,
+
     pub materialized_account_count: u64,
+
+    /// Count of accounts with PNL < 0 (spec §4.7, v12.16.4).
+    pub neg_pnl_account_count: u64,
+
+    /// Last oracle price used in accrue_market_to (P_last).
     pub last_oracle_price: u64,
+    /// Last funding-sample price (fund_px_last, spec §5.5 step 11).
+    pub fund_px_last: u64,
     pub last_market_slot: u64,
-    pub funding_price_sample_last: u64,
-    pub total_open_interest: U128,
-    pub long_oi: U128,
-    pub short_oi: U128,
-    pub net_lp_pos: I128,
-    pub lp_sum_abs: U128,
-    pub lp_max_abs: U128,
-    pub lp_max_abs_sweep: U128,
-    pub mark_price_e6: u64,
-    pub funding_index_qpb_e6: i64,
-    pub last_funding_slot: u64,
-    /// Upstream is `bool`; stored as `u8` here for Default compatibility.
-    pub funding_frozen: u8,
-    pub _ff_pad: [u8; 7],
-    pub funding_frozen_rate_snapshot: i64,
-    pub emergency_oi_mode: u8,
-    pub _eom_pad: [u8; 7],
-    pub emergency_start_slot: u64,
-    pub last_breaker_slot: u64,
-    pub trade_twap_e6: u64,
-    pub twap_last_slot: u64,
-    pub lifetime_force_realize_closes: u64,
+
+    /// Cumulative funding numerator for long side (v12.15).
+    /// Native `i128` upstream; wrapped here.
+    pub f_long_num: I128,
+    /// Cumulative funding numerator for short side (v12.15).
+    /// Native `i128` upstream; wrapped here.
+    pub f_short_num: I128,
+    /// F snapshot at epoch start for long side.
+    /// Native `i128` upstream; wrapped here.
+    pub f_epoch_start_long_num: I128,
+    /// F snapshot at epoch start for short side.
+    /// Native `i128` upstream; wrapped here.
+    pub f_epoch_start_short_num: I128,
 
     // ────── Parametric tail (sizes depend on MAX_ACCOUNTS) ──────
     pub used: [u64; BITMAP_WORDS],
     pub num_used_accounts: u16,
-    pub _nua_pad: [u8; 6],
-    pub next_account_id: u64,
     pub free_head: u16,
     pub next_free: [u16; MAX_ACCOUNTS],
     pub accounts: [Account; MAX_ACCOUNTS],
 }
 
-/// Closed-form expected size of `RiskEngine`, derived from the field trail.
-/// Adapts to whichever `MAX_ACCOUNTS` feature is active. If any vendored
-/// field drifts or is reordered, this will not equal `size_of::<RiskEngine>()`
-/// and the crate fails to compile.
+/// Closed-form expected size of `RiskEngine`, derived from the task spec
+/// field offsets and tail layout.
+///
+/// From task spec:
+///   bitmap (used) at engine+712 → fixed_prefix_through_f_epoch = 712
+///   bitmap = 8 * BITMAP_WORDS
+///   num_used_accounts(u16) + free_head(u16) = 4 bytes, pad to 8 = +4 pad
+///   next_free = 2 * MAX_ACCOUNTS
+///   Align to Account (8) before accounts array.
+///   accounts = 352 * MAX_ACCOUNTS
 pub const EXPECTED_RISK_ENGINE_SIZE: usize = {
     const fn align_up(x: usize, a: usize) -> usize {
         (x + (a - 1)) & !(a - 1)
     }
-    // Fixed prefix size up to and including `lifetime_force_realize_closes`,
-    // with every 128-bit field on 8-byte alignment (the U128/I128 wrapper
-    // layout). Computed field-by-field in the PR B design analysis and
-    // cross-checked against upstream's `_SBF_ENGINE_ALIGN == 8` assertion.
-    let fixed_prefix: usize = 1016;
+    // Fixed prefix: all fields up to (but not including) `used` bitmap.
+    // From task spec: bitmap starts at engine+712.
+    let fixed_prefix: usize = 712;
     let used_bytes: usize = 8 * BITMAP_WORDS;
-    // num_used_accounts(u16) + pad(6) + next_account_id(u64) + free_head(u16)
-    let mid: usize = 2 + 6 + 8 + 2;
+    // num_used_accounts(u16) + free_head(u16) = 4 bytes; next u64 boundary = 8 bytes total
+    let mid: usize = 4;
     let next_free_bytes: usize = 2 * MAX_ACCOUNTS;
     let unaligned = fixed_prefix + used_bytes + mid + next_free_bytes;
     // Account alignment is 8, so round up to 8 before the array starts.
@@ -587,23 +740,32 @@ pub const EXPECTED_RISK_ENGINE_SIZE: usize = {
 const _: () = assert!(size_of::<RiskEngine>() == EXPECTED_RISK_ENGINE_SIZE);
 const _: () = assert!(align_of::<RiskEngine>() == EXPECTED_ENGINE_ALIGN);
 
-// Offsets up to and including `lifetime_force_realize_closes` are MAX_ACCOUNTS-
-// independent; the tail offsets depend on the feature flag.
+// Feature-independent relative offsets (verified against task spec):
 pub const ENGINE_REL_PARAMS: usize = offset_of!(RiskEngine, params);
 pub const ENGINE_REL_MAINT_MARGIN_BPS: usize = offset_of!(RiskEngine, params.maintenance_margin_bps);
 pub const ENGINE_REL_MAX_ACCOUNTS_FIELD: usize = offset_of!(RiskEngine, params.max_accounts);
-pub const ENGINE_REL_MARK_PRICE_E6: usize = offset_of!(RiskEngine, mark_price_e6);
-pub const ENGINE_REL_FUNDING_INDEX_QPB_E6: usize = offset_of!(RiskEngine, funding_index_qpb_e6);
+pub const ENGINE_REL_C_TOT: usize = offset_of!(RiskEngine, c_tot);
+pub const ENGINE_REL_PNL_POS_TOT: usize = offset_of!(RiskEngine, pnl_pos_tot);
+pub const ENGINE_REL_NEG_PNL_ACCOUNT_COUNT: usize = offset_of!(RiskEngine, neg_pnl_account_count);
+pub const ENGINE_REL_LAST_ORACLE_PRICE: usize = offset_of!(RiskEngine, last_oracle_price);
+pub const ENGINE_REL_FUND_PX_LAST: usize = offset_of!(RiskEngine, fund_px_last);
+pub const ENGINE_REL_F_LONG_NUM: usize = offset_of!(RiskEngine, f_long_num);
+pub const ENGINE_REL_F_SHORT_NUM: usize = offset_of!(RiskEngine, f_short_num);
 pub const ENGINE_REL_USED: usize = offset_of!(RiskEngine, used);
 pub const ENGINE_REL_ACCOUNTS: usize = offset_of!(RiskEngine, accounts);
 
-// Feature-independent pinned offsets (verified by hand against the field trail):
-const _: () = assert!(ENGINE_REL_PARAMS == 96);
-const _: () = assert!(ENGINE_REL_MAINT_MARGIN_BPS == 104); // 96 + 8
-const _: () = assert!(ENGINE_REL_MAX_ACCOUNTS_FIELD == 128); // 96 + 32
-const _: () = assert!(ENGINE_REL_MARK_PRICE_E6 == 928);
-const _: () = assert!(ENGINE_REL_FUNDING_INDEX_QPB_E6 == 936);
-const _: () = assert!(ENGINE_REL_USED == 1016);
+// Pin the feature-independent offsets against the task spec:
+const _: () = assert!(ENGINE_REL_PARAMS == 32);
+const _: () = assert!(ENGINE_REL_MAINT_MARGIN_BPS == 32); // params at 32, maint_margin at params+0
+const _: () = assert!(ENGINE_REL_MAX_ACCOUNTS_FIELD == 32 + 24); // params+24
+const _: () = assert!(ENGINE_REL_C_TOT == 336);
+const _: () = assert!(ENGINE_REL_PNL_POS_TOT == 352);
+const _: () = assert!(ENGINE_REL_NEG_PNL_ACCOUNT_COUNT == 616);
+const _: () = assert!(ENGINE_REL_LAST_ORACLE_PRICE == 624);
+const _: () = assert!(ENGINE_REL_FUND_PX_LAST == 632);
+const _: () = assert!(ENGINE_REL_F_LONG_NUM == 648);
+const _: () = assert!(ENGINE_REL_F_SHORT_NUM == 664);
+const _: () = assert!(ENGINE_REL_USED == 712);
 
 // ════════════════════════════════════════════════════════════════════════════
 // Slab geometry — verbatim from percolator-prog/src/lib.rs:47-72
@@ -618,6 +780,7 @@ const fn align_up_runtime(x: usize, a: usize) -> usize {
 }
 
 /// Byte offset of `RiskEngine` within the slab account data.
+/// v12.17: align_up(72 + 432, 8) = align_up(504, 8) = 504
 pub const ENGINE_OFF: usize = align_up_runtime(HEADER_LEN + CONFIG_LEN, ENGINE_ALIGN);
 pub const ENGINE_LEN: usize = size_of::<RiskEngine>();
 pub const SLAB_LEN: usize = ENGINE_OFF + ENGINE_LEN;
@@ -625,10 +788,10 @@ pub const SLAB_LEN: usize = ENGINE_OFF + ENGINE_LEN;
 // Pin the slab geometry so a future change to SlabHeader or MarketConfig
 // is caught at compile time.
 const _: () = assert!(HEADER_LEN == 72);
-const _: () = assert!(CONFIG_LEN == 544);
+const _: () = assert!(CONFIG_LEN == 432);
 const _: () = assert!(ENGINE_ALIGN == 8);
-const _: () = assert!(ENGINE_OFF == 616); // align_up(72 + 544, 8) = 616
-const _: () = assert!(ENGINE_OFF % 8 == 0);
+const _: () = assert!(ENGINE_OFF == 504); // align_up(72 + 432, 8) = 504
+const _: () = assert!(ENGINE_OFF.is_multiple_of(8));
 
 // ════════════════════════════════════════════════════════════════════════════
 // Pre-computed absolute slab offsets — convenience for PR C
@@ -637,18 +800,28 @@ const _: () = assert!(ENGINE_OFF % 8 == 0);
 // These compose `ENGINE_OFF` with the relative offsets above so PR C's
 // `read_position` can slice the slab data directly without arithmetic.
 
-pub const SLAB_OFF_MAGIC: usize = ENGINE_OFF - HEADER_LEN - CONFIG_LEN; // = 0
+pub const SLAB_OFF_MAGIC: usize = 0;
 pub const SLAB_OFF_MAINT_MARGIN_BPS: usize = ENGINE_OFF + ENGINE_REL_MAINT_MARGIN_BPS;
 pub const SLAB_OFF_MAX_ACCOUNTS: usize = ENGINE_OFF + ENGINE_REL_MAX_ACCOUNTS_FIELD;
-pub const SLAB_OFF_MARK_PRICE_E6: usize = ENGINE_OFF + ENGINE_REL_MARK_PRICE_E6;
-pub const SLAB_OFF_FUNDING_INDEX_QPB_E6: usize = ENGINE_OFF + ENGINE_REL_FUNDING_INDEX_QPB_E6;
+pub const SLAB_OFF_C_TOT: usize = ENGINE_OFF + ENGINE_REL_C_TOT;
+pub const SLAB_OFF_PNL_POS_TOT: usize = ENGINE_OFF + ENGINE_REL_PNL_POS_TOT;
+pub const SLAB_OFF_NEG_PNL_ACCOUNT_COUNT: usize = ENGINE_OFF + ENGINE_REL_NEG_PNL_ACCOUNT_COUNT;
+pub const SLAB_OFF_LAST_ORACLE_PRICE: usize = ENGINE_OFF + ENGINE_REL_LAST_ORACLE_PRICE;
+pub const SLAB_OFF_FUND_PX_LAST: usize = ENGINE_OFF + ENGINE_REL_FUND_PX_LAST;
+pub const SLAB_OFF_F_LONG_NUM: usize = ENGINE_OFF + ENGINE_REL_F_LONG_NUM;
+pub const SLAB_OFF_F_SHORT_NUM: usize = ENGINE_OFF + ENGINE_REL_F_SHORT_NUM;
 pub const SLAB_OFF_USED: usize = ENGINE_OFF + ENGINE_REL_USED;
 pub const SLAB_OFF_ACCOUNTS: usize = ENGINE_OFF + ENGINE_REL_ACCOUNTS;
 
-// Sanity pins on the absolute offsets:
+// Sanity pins on the absolute offsets (ENGINE_OFF = 504):
 const _: () = assert!(SLAB_OFF_MAGIC == 0);
-const _: () = assert!(SLAB_OFF_MAINT_MARGIN_BPS == 616 + 104);
-const _: () = assert!(SLAB_OFF_MAX_ACCOUNTS == 616 + 128);
-const _: () = assert!(SLAB_OFF_MARK_PRICE_E6 == 616 + 928);
-const _: () = assert!(SLAB_OFF_FUNDING_INDEX_QPB_E6 == 616 + 936);
-const _: () = assert!(SLAB_OFF_USED == 616 + 1016);
+const _: () = assert!(SLAB_OFF_MAINT_MARGIN_BPS == 504 + 32);   // 536
+const _: () = assert!(SLAB_OFF_MAX_ACCOUNTS == 504 + 56);        // 560
+const _: () = assert!(SLAB_OFF_C_TOT == 504 + 336);              // 840
+const _: () = assert!(SLAB_OFF_PNL_POS_TOT == 504 + 352);        // 856
+const _: () = assert!(SLAB_OFF_NEG_PNL_ACCOUNT_COUNT == 504 + 616); // 1120
+const _: () = assert!(SLAB_OFF_LAST_ORACLE_PRICE == 504 + 624);  // 1128
+const _: () = assert!(SLAB_OFF_FUND_PX_LAST == 504 + 632);       // 1136
+const _: () = assert!(SLAB_OFF_F_LONG_NUM == 504 + 648);         // 1152
+const _: () = assert!(SLAB_OFF_F_SHORT_NUM == 504 + 664);        // 1168
+const _: () = assert!(SLAB_OFF_USED == 504 + 712);               // 1216
