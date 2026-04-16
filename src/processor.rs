@@ -868,7 +868,7 @@ fn process_emergency_burn(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
                 "EmergencyBurn rejected: position is still open (position_basis_q={})",
                 position.position_basis_q,
             );
-            return Err(NftError::PositionNotOpen.into());
+            return Err(NftError::PositionNotClosed.into());
         }
     }
 
