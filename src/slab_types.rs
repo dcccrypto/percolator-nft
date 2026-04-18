@@ -139,9 +139,15 @@ pub const BITMAP_WORDS: usize = (MAX_ACCOUNTS + 63) / 64;
 // ════════════════════════════════════════════════════════════════════════════
 
 pub const EXPECTED_SLAB_HEADER_SIZE: usize = 72;
-/// v12.17: MarketConfig shrunk from 544 to 432 bytes
+/// v12.17 upstream: MarketConfig shrunk from 544 to 432 bytes
 /// (upstream reorganization: many fields removed/reorganized, dex_pool 32 bytes added).
-pub const EXPECTED_MARKET_CONFIG_SIZE: usize = 432;
+/// Fork (post Phase A/B/E, 2026-04): 80 bytes added back — `max_pnl_cap`,
+/// `last_audit_pause_slot`, `oi_cap_multiplier_bps`, `dispute_window_slots`,
+/// `dispute_bond_amount`, `lp_collateral_enabled`, `lp_collateral_ltv_bps`,
+/// `_new_fields_pad`, `pending_admin[32]` → total 512 bytes.
+/// Verified via `core::mem::size_of::<percolator_prog::state::MarketConfig>()` on
+/// native x86_64 and via SBF-aligned field-by-field sum (u128 align=8 on SBF).
+pub const EXPECTED_MARKET_CONFIG_SIZE: usize = 512;
 /// v12.17: InsuranceFund stripped to balance: U128 only (16 bytes).
 pub const EXPECTED_INSURANCE_FUND_SIZE: usize = 16;
 /// v12.17: RiskParams stripped to 184 bytes (removed warmup_period_slots and
@@ -780,7 +786,7 @@ const fn align_up_runtime(x: usize, a: usize) -> usize {
 }
 
 /// Byte offset of `RiskEngine` within the slab account data.
-/// v12.17: align_up(72 + 432, 8) = align_up(504, 8) = 504
+/// Fork post Phase A/B/E: align_up(72 + 512, 8) = align_up(584, 8) = 584
 pub const ENGINE_OFF: usize = align_up_runtime(HEADER_LEN + CONFIG_LEN, ENGINE_ALIGN);
 pub const ENGINE_LEN: usize = size_of::<RiskEngine>();
 pub const SLAB_LEN: usize = ENGINE_OFF + ENGINE_LEN;
@@ -788,10 +794,10 @@ pub const SLAB_LEN: usize = ENGINE_OFF + ENGINE_LEN;
 // Pin the slab geometry so a future change to SlabHeader or MarketConfig
 // is caught at compile time.
 const _: () = assert!(HEADER_LEN == 72);
-const _: () = assert!(CONFIG_LEN == 432);
+const _: () = assert!(CONFIG_LEN == 512);
 const _: () = assert!(ENGINE_ALIGN == 8);
-const _: () = assert!(ENGINE_OFF == 504); // align_up(72 + 432, 8) = 504
-const _: () = assert!(ENGINE_OFF.is_multiple_of(8));
+const _: () = assert!(ENGINE_OFF == 584); // align_up(72 + 512, 8) = 584
+const _: () = assert!(ENGINE_OFF % 8 == 0);
 
 // ════════════════════════════════════════════════════════════════════════════
 // Pre-computed absolute slab offsets — convenience for PR C
@@ -813,15 +819,15 @@ pub const SLAB_OFF_F_SHORT_NUM: usize = ENGINE_OFF + ENGINE_REL_F_SHORT_NUM;
 pub const SLAB_OFF_USED: usize = ENGINE_OFF + ENGINE_REL_USED;
 pub const SLAB_OFF_ACCOUNTS: usize = ENGINE_OFF + ENGINE_REL_ACCOUNTS;
 
-// Sanity pins on the absolute offsets (ENGINE_OFF = 504):
+// Sanity pins on the absolute offsets (ENGINE_OFF = 584 after Phase A/B/E):
 const _: () = assert!(SLAB_OFF_MAGIC == 0);
-const _: () = assert!(SLAB_OFF_MAINT_MARGIN_BPS == 504 + 32);   // 536
-const _: () = assert!(SLAB_OFF_MAX_ACCOUNTS == 504 + 56);        // 560
-const _: () = assert!(SLAB_OFF_C_TOT == 504 + 336);              // 840
-const _: () = assert!(SLAB_OFF_PNL_POS_TOT == 504 + 352);        // 856
-const _: () = assert!(SLAB_OFF_NEG_PNL_ACCOUNT_COUNT == 504 + 616); // 1120
-const _: () = assert!(SLAB_OFF_LAST_ORACLE_PRICE == 504 + 624);  // 1128
-const _: () = assert!(SLAB_OFF_FUND_PX_LAST == 504 + 632);       // 1136
-const _: () = assert!(SLAB_OFF_F_LONG_NUM == 504 + 648);         // 1152
-const _: () = assert!(SLAB_OFF_F_SHORT_NUM == 504 + 664);        // 1168
-const _: () = assert!(SLAB_OFF_USED == 504 + 712);               // 1216
+const _: () = assert!(SLAB_OFF_MAINT_MARGIN_BPS == 584 + 32);   // 616
+const _: () = assert!(SLAB_OFF_MAX_ACCOUNTS == 584 + 56);        // 640
+const _: () = assert!(SLAB_OFF_C_TOT == 584 + 336);              // 920
+const _: () = assert!(SLAB_OFF_PNL_POS_TOT == 584 + 352);        // 936
+const _: () = assert!(SLAB_OFF_NEG_PNL_ACCOUNT_COUNT == 584 + 616); // 1200
+const _: () = assert!(SLAB_OFF_LAST_ORACLE_PRICE == 584 + 624);  // 1208
+const _: () = assert!(SLAB_OFF_FUND_PX_LAST == 584 + 632);       // 1216
+const _: () = assert!(SLAB_OFF_F_LONG_NUM == 584 + 648);         // 1232
+const _: () = assert!(SLAB_OFF_F_SHORT_NUM == 584 + 664);        // 1248
+const _: () = assert!(SLAB_OFF_USED == 584 + 712);               // 1296
