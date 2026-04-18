@@ -973,3 +973,299 @@ fn test_percolator_prog_constants_are_distinct_and_nonzero() {
         "PERCOLATOR_MAINNET must not be zero key"
     );
 }
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PERC-N1: v12.17 slot-reuse bypass fix tests
+// ══════════════════════════════════════════════════════════════════════════════
+//
+// These tests verify the `position_owner` check added to BurnPositionNft,
+// SettleFunding, and GetPositionValue to close the slot-reuse bypass introduced
+// in v12.17 when `account_id` was removed from the Account struct.
+//
+// Attack scenario:
+//   1. user_A mints NFT for slab slot N — nft_state.account_id = 0 (v12.17),
+//      nft_state.position_owner = user_A.to_bytes()
+//   2. user_A closes their position → slot N is freed
+//   3. Slot N is reassigned to user_B → slab Account.owner becomes user_B
+//   4. user_A calls BurnPositionNft with the original NFT:
+//      - Old check: 0 != 0 → false → passes (BYPASSED)
+//      - New check: user_B != user_A → true → SlotReused (BLOCKED)
+
+/// Helper: build a minimal V0-layout slab buffer with `max_accounts=1` and
+/// a specific owner at slot 0. Returns a vec with the correct layout detected
+/// by `detect_layout` in cpi.rs.
+///
+/// V0 layout:
+///   - SLAB_MAGIC at bytes [0..8]
+///   - max_accounts (u16) at bytes [8..10]
+///   - bitmap at byte 608, length = ceil(max_accounts/8) = 1
+///   - accounts at byte 609, each 240 bytes
+///   - acct_owner_off within account = 184
+///   - acct_has_account_id = true (V0), so account_id at offset 0 within acct
+///   - acct_kind_off = 24 (kind=0 → User)
+///
+/// With slot 0 allocated (bitmap bit 0 set) and position closed (all zeros
+/// except owner), the slot has size=0 (flat) and account_id=0.
+fn build_v0_slab_with_owner(owner: &solana_sdk::pubkey::Pubkey) -> Vec<u8> {
+    let max_accounts: u16 = 1;
+    let v0_bitmap_off: usize = 608;
+    let bitmap_bytes: usize = 1; // ceil(1/8)
+    let v0_account_size: usize = 240;
+    let total = v0_bitmap_off + bitmap_bytes + max_accounts as usize * v0_account_size;
+    let mut data = vec![0u8; total];
+    // Magic
+    data[0..8].copy_from_slice(&0x5045_5243_4F4C_4154u64.to_le_bytes());
+    // max_accounts header (used by V0 layout detection path)
+    data[8..10].copy_from_slice(&max_accounts.to_le_bytes());
+    // Bitmap: slot 0 allocated
+    data[v0_bitmap_off] = 0x01;
+    // Write owner at accounts_off(609) + acct_owner_off(184) = 793
+    let accounts_off = v0_bitmap_off + bitmap_bytes;
+    let owner_off = accounts_off + 184;
+    data[owner_off..owner_off + 32].copy_from_slice(owner.as_ref());
+    // kind at accounts_off + 24 = 0 (User) — already zeroed
+    // position_basis_q at accounts_off + 80 = 0 (flat) — already zeroed
+    // capital at accounts_off + 8 = 0 — already zeroed
+    // account_id at accounts_off + 0 = 0 — already zeroed (V0 stores it)
+    data
+}
+
+/// Build a PositionNft PDA buffer with the given slab key, nft_mint key, and
+/// position_owner set to the supplied 32-byte array.
+fn make_pda_data_with_owner(
+    slab_key: &solana_sdk::pubkey::Pubkey,
+    nft_mint_key: &solana_sdk::pubkey::Pubkey,
+    position_owner: [u8; 32],
+) -> Vec<u8> {
+    let mut buf = vec![0u8; POSITION_NFT_LEN];
+    // magic [0..8]
+    buf[..8].copy_from_slice(&POSITION_NFT_MAGIC.to_le_bytes());
+    // version [8]
+    buf[8] = POSITION_NFT_VERSION;
+    // slab [16..48]
+    buf[16..48].copy_from_slice(slab_key.as_ref());
+    // nft_mint [56..88]
+    buf[56..88].copy_from_slice(nft_mint_key.as_ref());
+    // account_id [152..160] = 0 (v12.17 style — field absent)
+    // position_owner [160..192]
+    buf[160..192].copy_from_slice(&position_owner);
+    buf
+}
+
+/// PERC-N1 primary: BurnPositionNft — slot reused, position_owner changed → SlotReused.
+///
+/// Scenario:
+///   - NFT PDA records position_owner = user_A
+///   - Slab slot 0 now shows owner = user_B (slot was reassigned)
+///   - account_id is 0 in both PDA and slab (v12.17 style) → old check passes
+///   - New owner check must catch this and return SlotReused
+#[test]
+fn test_burn_slot_reuse_detected_via_position_owner() {
+    use percolator_nft::{
+        cpi::PERCOLATOR_MAINNET, error::NftError, processor::process,
+        token2022::TOKEN_2022_PROGRAM_ID,
+    };
+    use solana_program::{account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey};
+    use solana_sdk::pubkey::Pubkey as SdkPubkey;
+
+    let program_id = SdkPubkey::new_unique();
+    let slab_key = SdkPubkey::new_unique();
+    let nft_mint_key = SdkPubkey::new_unique();
+    // user_A: the original position owner at mint time
+    let user_a = SdkPubkey::new_unique();
+    // user_B: new occupant of the slab slot after reassignment
+    let user_b = SdkPubkey::new_unique();
+
+    use percolator_nft::state::{mint_authority_pda, position_nft_pda};
+    let prog_pk = Pubkey::new_from_array(program_id.to_bytes());
+    let slab_pk = Pubkey::new_from_array(slab_key.to_bytes());
+    let nft_mint_pk = Pubkey::new_from_array(nft_mint_key.to_bytes());
+    let (pda_pk, _) = position_nft_pda(&slab_pk, 0, &prog_pk);
+    let (mint_auth_pk, _) = mint_authority_pda(&prog_pk);
+
+    let mut holder_lamports: u64 = 1_000_000;
+    let mut pda_lamports: u64 = 1_000_000;
+    let mut mint_lamports: u64 = 1_000_000;
+    let mut ata_lamports: u64 = 1_000_000;
+    let mut slab_lamports: u64 = 1_000_000;
+    let mut auth_lamports: u64 = 0;
+    let mut token_lamports: u64 = 0;
+
+    let holder_key_sdk = user_a; // user_A is the NFT holder
+    let holder_pk = Pubkey::new_from_array(holder_key_sdk.to_bytes());
+
+    // PDA records position_owner = user_A (minted when user_A held slot 0)
+    let mut pda_data = make_pda_data_with_owner(&slab_key, &nft_mint_key, user_a.to_bytes());
+    // Slab slot 0 now shows owner = user_B (slot was reassigned)
+    let mut slab_data = build_v0_slab_with_owner(&user_b);
+
+    // Build a valid ATA: Token-2022 owned, balance=1, owner=user_A, mint=nft_mint
+    let mut ata_data = vec![0u8; 165];
+    ata_data[0..32].copy_from_slice(nft_mint_key.as_ref()); // mint
+    ata_data[32..64].copy_from_slice(holder_key_sdk.as_ref()); // owner
+    ata_data[64..72].copy_from_slice(&1u64.to_le_bytes()); // amount = 1
+    ata_data[108] = 1; // state = Initialized
+
+    let mut holder_data: Vec<u8> = vec![];
+    let mut mint_data: Vec<u8> = vec![0u8; 82];
+    let mut auth_data: Vec<u8> = vec![];
+    let mut token_data: Vec<u8> = vec![];
+
+    let system_program_id = solana_program::system_program::id();
+    let token_prog_id = Pubkey::new_from_array(TOKEN_2022_PROGRAM_ID.to_bytes());
+    let percolator_pk = Pubkey::new_from_array(PERCOLATOR_MAINNET.to_bytes());
+
+    let holder_ai = AccountInfo::new(
+        &holder_pk, true, false,
+        &mut holder_lamports, &mut holder_data, &system_program_id, false, 0,
+    );
+    let pda_ai = AccountInfo::new(
+        &pda_pk, false, true,
+        &mut pda_lamports, &mut pda_data, &prog_pk, false, 0,
+    );
+    let nft_mint_ai = AccountInfo::new(
+        &nft_mint_pk, false, true,
+        &mut mint_lamports, &mut mint_data, &token_prog_id, false, 0,
+    );
+    let ata_ai = AccountInfo::new(
+        &holder_pk, false, true,
+        &mut ata_lamports, &mut ata_data, &token_prog_id, false, 0,
+    );
+    let slab_ai = AccountInfo::new(
+        &slab_pk, false, false,
+        &mut slab_lamports, &mut slab_data, &percolator_pk, false, 0,
+    );
+    let auth_ai = AccountInfo::new(
+        &mint_auth_pk, false, false,
+        &mut auth_lamports, &mut auth_data, &system_program_id, false, 0,
+    );
+    let token_ai = AccountInfo::new(
+        &token_prog_id, false, false,
+        &mut token_lamports, &mut token_data, &system_program_id, false, 0,
+    );
+
+    let accounts = [holder_ai, pda_ai, nft_mint_ai, ata_ai, slab_ai, auth_ai, token_ai];
+    let result = process(&prog_pk, &accounts, &[1u8]); // tag=1 = BurnPositionNft
+    let expected: ProgramError = NftError::SlotReused.into();
+    assert_eq!(
+        result.unwrap_err(),
+        expected,
+        "Expected SlotReused when position_owner changed (slot reuse)"
+    );
+}
+
+/// PERC-N1 migration guard: BurnPositionNft — position_owner == [0; 32] (pre-fix NFT)
+/// skips the new owner check and falls through to the normal size check.
+///
+/// Ensures backward compatibility: NFTs minted before the fix have position_owner
+/// zeroed, and should NOT be blocked by the new guard on legitimate burns.
+#[test]
+fn test_burn_migration_guard_skips_check_for_zero_position_owner() {
+    use percolator_nft::{
+        cpi::PERCOLATOR_MAINNET, error::NftError, processor::process,
+        token2022::TOKEN_2022_PROGRAM_ID,
+    };
+    use solana_program::{account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey};
+    use solana_sdk::pubkey::Pubkey as SdkPubkey;
+
+    let program_id = SdkPubkey::new_unique();
+    let slab_key = SdkPubkey::new_unique();
+    let nft_mint_key = SdkPubkey::new_unique();
+    let holder_key_sdk = SdkPubkey::new_unique();
+
+    use percolator_nft::state::{mint_authority_pda, position_nft_pda};
+    let prog_pk = Pubkey::new_from_array(program_id.to_bytes());
+    let slab_pk = Pubkey::new_from_array(slab_key.to_bytes());
+    let nft_mint_pk = Pubkey::new_from_array(nft_mint_key.to_bytes());
+    let holder_pk = Pubkey::new_from_array(holder_key_sdk.to_bytes());
+    let (pda_pk, _) = position_nft_pda(&slab_pk, 0, &prog_pk);
+    let (mint_auth_pk, _) = mint_authority_pda(&prog_pk);
+
+    let mut holder_lamports: u64 = 1_000_000;
+    let mut pda_lamports: u64 = 1_000_000;
+    let mut mint_lamports: u64 = 1_000_000;
+    let mut ata_lamports: u64 = 1_000_000;
+    let mut slab_lamports: u64 = 1_000_000;
+    let mut auth_lamports: u64 = 0;
+    let mut token_lamports: u64 = 0;
+
+    // PDA with position_owner = [0; 32] (pre-fix NFT)
+    let mut pda_data = make_pda_data_with_owner(&slab_key, &nft_mint_key, [0u8; 32]);
+    // Slab with a different owner — migration guard should skip the owner check
+    let mut slab_data = build_v0_slab_with_owner(&holder_key_sdk);
+    // Slab slot 0 has size=0 (position closed), so burn should not be blocked
+
+    let mut ata_data = vec![0u8; 165];
+    ata_data[0..32].copy_from_slice(nft_mint_key.as_ref());
+    ata_data[32..64].copy_from_slice(holder_key_sdk.as_ref());
+    ata_data[64..72].copy_from_slice(&1u64.to_le_bytes());
+    ata_data[108] = 1;
+
+    let mut holder_data: Vec<u8> = vec![];
+    let mut mint_data: Vec<u8> = vec![0u8; 82];
+    let mut auth_data: Vec<u8> = vec![];
+    let mut token_data: Vec<u8> = vec![];
+
+    let system_program_id = solana_program::system_program::id();
+    let token_prog_id = Pubkey::new_from_array(TOKEN_2022_PROGRAM_ID.to_bytes());
+    let percolator_pk = Pubkey::new_from_array(PERCOLATOR_MAINNET.to_bytes());
+
+    let holder_ai = AccountInfo::new(
+        &holder_pk, true, false,
+        &mut holder_lamports, &mut holder_data, &system_program_id, false, 0,
+    );
+    let pda_ai = AccountInfo::new(
+        &pda_pk, false, true,
+        &mut pda_lamports, &mut pda_data, &prog_pk, false, 0,
+    );
+    let nft_mint_ai = AccountInfo::new(
+        &nft_mint_pk, false, true,
+        &mut mint_lamports, &mut mint_data, &token_prog_id, false, 0,
+    );
+    let ata_ai = AccountInfo::new(
+        &holder_pk, false, true,
+        &mut ata_lamports, &mut ata_data, &token_prog_id, false, 0,
+    );
+    let slab_ai = AccountInfo::new(
+        &slab_pk, false, false,
+        &mut slab_lamports, &mut slab_data, &percolator_pk, false, 0,
+    );
+    let auth_ai = AccountInfo::new(
+        &mint_auth_pk, false, false,
+        &mut auth_lamports, &mut auth_data, &system_program_id, false, 0,
+    );
+    let token_ai = AccountInfo::new(
+        &token_prog_id, false, false,
+        &mut token_lamports, &mut token_data, &system_program_id, false, 0,
+    );
+
+    let accounts = [holder_ai, pda_ai, nft_mint_ai, ata_ai, slab_ai, auth_ai, token_ai];
+    let result = process(&prog_pk, &accounts, &[1u8]); // tag=1 = BurnPositionNft
+
+    // Migration guard skips owner check → position.size == 0 → burn would proceed to
+    // CPI (which fails without runtime). The critical assertion is that we do NOT get
+    // SlotReused — the guard correctly bypasses the check for pre-fix NFTs.
+    // We accept any error except SlotReused (CPI invocations require the runtime).
+    let slot_reused_err: ProgramError = NftError::SlotReused.into();
+    match result {
+        Ok(_) => {} // shouldn't reach here without runtime, but would be fine
+        Err(e) => assert_ne!(
+            e, slot_reused_err,
+            "Migration guard must NOT return SlotReused for pre-fix NFT with zeroed position_owner"
+        ),
+    }
+}
+
+/// PERC-N1: NftError::SlotReused must have error code 20.
+/// This pins the wire format so the SDK can decode it.
+#[test]
+fn test_slot_reused_error_code() {
+    use percolator_nft::error::NftError;
+    use solana_sdk::program_error::ProgramError;
+    let err: ProgramError = NftError::SlotReused.into();
+    assert_eq!(
+        err,
+        ProgramError::Custom(20),
+        "SlotReused must be error code 20"
+    );
+}
