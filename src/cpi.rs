@@ -165,10 +165,11 @@ const V12_15_ACCOUNT_SIZE: usize = 920;       // 8 cohorts, SBF (verified on-cha
 // Using 4400 caused the layout matcher to miss full-cohort slabs entirely.
 const V12_15_ACCOUNT_SIZE_FULL: usize = 4376; // 62 cohorts (upstream default)
 
-/// V12_17 layout constants — v12.17 SBF target (engine_off=504, account=352 bytes).
-/// MarketConfig shrank from 544→432 bytes, ENGINE_OFF: 616→504.
-/// Account restructured: removed account_id/entry_price/cohorts, added f_snap+warmup.
-const V12_17_ENGINE_OFF: usize = slab_types::ENGINE_OFF;   // 504
+/// V12_17 layout constants — v12.17 SBF target, fork post Phase A/B/E.
+/// MarketConfig went 544 (upstream pre-v12.17) → 432 (v12.17) → 512 (fork post Phase A/B/E).
+/// ENGINE_OFF = align_up(72 + 512, 8) = 584. Account restructured: removed
+/// account_id/entry_price/cohorts, added f_snap+warmup, size = 352 bytes.
+const V12_17_ENGINE_OFF: usize = slab_types::ENGINE_OFF;   // 584
 const V12_17_ACCOUNT_SIZE: usize = slab_types::EXPECTED_ACCOUNT_SIZE; // 352
 
 /// Detect layout from slab data length and header.
