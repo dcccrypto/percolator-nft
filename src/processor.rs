@@ -224,6 +224,9 @@ fn process_mint_position_nft(
     nft_state.user_idx = user_idx;
     nft_state.nft_mint = nft_mint.key.to_bytes();
     nft_state.account_id = position.account_id;
+    // PERC-N1: record the 32-byte position owner pubkey for v12.17 slot-reuse detection.
+    // On v12.17 slabs `account_id` is always 0; `position_owner` is the live discriminator.
+    nft_state.position_owner = position.owner.to_bytes();
     nft_state.entry_price_e6 = position.entry_price_e6;
     nft_state.position_size = position.size;
     nft_state.is_long = position.is_long;
@@ -630,6 +633,8 @@ fn process_burn_position_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
     }
     let user_idx = nft_state.user_idx;
     let nft_account_id = nft_state.account_id;
+    // PERC-N1: extract position_owner for slot-reuse check below.
+    let nft_position_owner = nft_state.position_owner;
     let _ = nft_state;
     drop(pda_data);
 
@@ -671,6 +676,17 @@ fn process_burn_position_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
                 position.account_id,
             );
             return Err(NftError::InvalidAccountId.into());
+        }
+        // PERC-N1: v12.17 slot-reuse bypass fix — verify position owner has not changed.
+        // On v12.17 slabs `account_id` is always 0 so the check above is dead.
+        // `position_owner` is set at mint time and is the live slot-reuse identifier.
+        // MIGRATION GUARD: skip if position_owner == [0u8; 32] (pre-fix NFT minted before
+        // this commit). Tagged remove-after-devnet-wipe.
+        if nft_position_owner != [0u8; 32]
+            && position.owner.to_bytes() != nft_position_owner
+        {
+            msg!("Burn rejected: position owner changed — slot reuse detected (PERC-N1)");
+            return Err(NftError::SlotReused.into());
         }
         // PERC-9035: Only block burn on open trade (size != 0). Residual collateral is fine.
         if position.size != 0 {
@@ -1035,6 +1051,17 @@ fn process_settle_funding(_program_id: &Pubkey, accounts: &[AccountInfo]) -> Pro
         );
         drop(slab_data);
         return Err(NftError::InvalidAccountId.into());
+    }
+
+    // PERC-N1: v12.17 slot-reuse bypass fix — verify position owner has not changed.
+    // On v12.17 slabs `account_id` is always 0 so the check above is dead.
+    // MIGRATION GUARD: skip if position_owner == [0u8; 32] (pre-fix NFT). Tagged remove-after-devnet-wipe.
+    if nft_state.position_owner != [0u8; 32]
+        && position.owner.to_bytes() != nft_state.position_owner
+    {
+        msg!("SettleFunding rejected: position owner changed — slot reuse detected (PERC-N1)");
+        drop(slab_data);
+        return Err(NftError::SlotReused.into());
     }
 
     drop(slab_data);

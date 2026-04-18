@@ -110,6 +110,17 @@ pub fn process_get_position_value(_program_id: &Pubkey, accounts: &[AccountInfo]
     let slab_data = slab.try_borrow_data()?;
     let position = read_position(&slab_data, nft_state.user_idx)?;
 
+    // PERC-N1: v12.17 slot-reuse bypass fix — verify position owner has not changed.
+    // On v12.17 slabs `account_id` is always 0; `account_id != stored` is always false.
+    // `position_owner` is the live discriminator that changes across slot occupants.
+    // MIGRATION GUARD: skip if position_owner == [0u8; 32] (pre-fix NFT). Tagged remove-after-devnet-wipe.
+    if nft_state.position_owner != [0u8; 32]
+        && position.owner.to_bytes() != nft_state.position_owner
+    {
+        msg!("GetPositionValue rejected: position owner changed — slot reuse detected (PERC-N1)");
+        return Err(NftError::SlotReused.into());
+    }
+
     // ── PERC-9060: Verify slab slot still matches PDA snapshot ──
     // If the original position was closed and the slab slot reused for a
     // different position, entry_price_e6 and/or is_long will differ from

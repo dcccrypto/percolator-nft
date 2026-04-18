@@ -44,6 +44,10 @@ pub enum NftError {
     LpAccountNotAllowed = 18,
     /// Position account_id mismatch — slot was reallocated to a different account.
     InvalidAccountId = 19,
+    /// PERC-N1: Slot-reuse detected via position_owner mismatch (v12.17 bypass fix).
+    /// The slab slot at user_idx was closed and reassigned to a different owner
+    /// after this NFT was minted. The original NFT is now invalid for this slot.
+    SlotReused = 20,
 }
 
 impl From<NftError> for ProgramError {

@@ -63,11 +63,30 @@ pub struct PositionNft {
     // ── Slot reuse protection (8 bytes) ──
     /// Account ID at mint time — monotonically increasing u64 unique per account.
     /// Verified on burn/settle to detect if the slab slot was reallocated.
+    /// Always 0 on v12.17+ (field removed from Account struct); use `position_owner` instead.
     pub account_id: u64, // 152..160
 
-    // ── Reserved (48 bytes, split for bytemuck Pod compatibility) ──
+    // ── Slot reuse protection: position owner pubkey (32 bytes) ──
+    /// Owner pubkey of the position at mint time.
+    ///
+    /// PERC-N1 / v12.17 slot-reuse bypass fix: on v12.17 slabs `account_id` is always 0
+    /// (field removed from Account), so `account_id != nft_state.account_id` is always
+    /// `0 != 0` = false and never fires. `position_owner` is the live identifier that
+    /// DOES change when a slab slot is closed and reassigned to a different user.
+    ///
+    /// Compared against `position.owner` (the 32-byte owner pubkey read from the live slab)
+    /// in BurnPositionNft, SettleFunding, and GetPositionValue.
+    ///
+    /// MIGRATION GUARD: existing PositionNft accounts minted before this fix have
+    /// `position_owner == [0u8; 32]`. The owner check is skipped for those accounts to avoid
+    /// breaking legitimate burns/settles on pre-fix NFTs. Remove this guard once all pre-fix
+    /// NFTs have been retired (tagged: remove-after-devnet-wipe).
+    ///
+    /// Occupies what was previously `_reserved0`. Struct size is unchanged (208 bytes).
+    pub position_owner: [u8; 32], // 160..192
+
+    // ── Reserved (16 bytes) ──
     // Total struct size = 208 bytes (multiple of 16, required by i128 Pod alignment).
-    pub _reserved0: [u8; 32], // 160..192
     pub _reserved1: [u8; 16], // 192..208
 }
 
