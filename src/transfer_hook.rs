@@ -600,12 +600,46 @@ pub fn process_execute(
         &[mint_auth_seeds],
     )?;
 
-    // ── 4. Write updated funding index to PDA (after CPI completes) ──
+    // ── 4. Write updated funding index AND position owner to PDA (after CPI completes) ──
+    //
+    // PERC-N1-FIX: After the tag-69 CPI above, percolator-prog has written
+    // `engine.accounts[user_idx].owner = dest_wallet_pk` into the slab (see
+    // percolator-prog `handle_transfer_ownership_cpi` — the write is
+    // unconditional once the caller-PDA and NFT-program-id checks pass).
+    // Mirror that change in the PDA's `position_owner` snapshot so the
+    // PERC-N1 slot-reuse guard in BurnPositionNft / SettleFunding /
+    // GetPositionValue continues to see `position.owner == nft_state.position_owner`
+    // for the legitimate post-transfer holder.
+    //
+    // Without this mirror write, `nft_state.position_owner` stays frozen at
+    // the original minter's pubkey while `slab.Account.owner` advances to the
+    // new wallet on every transfer. Every subsequent operation by the new
+    // holder fails with `NftError::SlotReused` even though no slot reuse
+    // occurred — bricking the NFT after the first transfer and breaking the
+    // entire secondary-market premise of this wrapper.
+    //
+    // The two writes share a single `try_borrow_mut_data()` and are atomic
+    // with the CPI via Solana's transaction-level rollback: if either write
+    // fails the runtime reverts the tag-69 owner change as well, so the
+    // PDA and slab can never diverge.
+    //
+    // Slot-reuse detection is preserved. The hook is the ONLY writer of
+    // `nft_state.position_owner` outside of MintPositionNft. If a slab slot
+    // is externally reassigned (e.g. the position is closed and Percolator
+    // allocates the slot to a different user via its own crank or admin
+    // path) the hook never runs, the PDA's `position_owner` stays stale,
+    // and the slot-reuse guard correctly rejects on the next operation.
+    //
+    // Closed-position fast path is unaffected: that branch returns Ok
+    // before reaching the CPI and before reaching this block, so neither
+    // `slab.Account.owner` nor `nft_state.position_owner` changes — they
+    // remain in sync at whatever values they held pre-transfer.
     {
         let mut pda_data = nft_pda.try_borrow_mut_data()?;
         let nft_state =
             bytemuck::from_bytes_mut::<PositionNft>(&mut pda_data[..POSITION_NFT_LEN]);
         nft_state.last_funding_index_e18 = new_funding;
+        nft_state.position_owner = dest_wallet_pk.to_bytes();
     }
 
     msg!(
