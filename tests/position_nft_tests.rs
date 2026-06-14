@@ -1422,6 +1422,98 @@ fn make_v12_17_pda(
     buf
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// PERC-N1 transfer-hook position-owner write-back regression
+//
+// These three tests pin the post-fix invariant: after the transfer hook
+// runs (process_execute) on a legitimate Token-2022 transfer, it must
+// leave the PDA in a state where `nft_state.position_owner` equals the
+// new slab `Account.owner` (= dest_wallet_pk). The hook's mirror write
+// is what keeps BurnPositionNft, SettleFunding, and GetPositionValue
+// from spurious-rejecting the new holder with NftError::SlotReused.
+//
+// We don't invoke `process_execute` end-to-end (it CPIs into Token-2022
+// and percolator-prog, which require the BPF runtime). Instead we hand-
+// build the byte-level state the fixed hook produces and assert that the
+// three downstream read paths no longer return SlotReused on it. Together
+// with `test_burn_slot_reuse_detected_via_position_owner` (which asserts
+// the inverse — true slot reuse is still rejected), these pin both
+// directions of the PERC-N1 guard.
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Build a V0-layout slab with an OPEN position at slot 0.
+///
+/// V0 uses sign+magnitude I128 for `position_size` (acct_off+80 lo / +88 hi).
+/// `is_long` is encoded as: hi-word top bit clear ⇒ long, set ⇒ short.
+fn build_v0_slab_open_position(
+    owner: &solana_sdk::pubkey::Pubkey,
+    position_size: u64,
+    entry_price_e6: u64,
+    is_long: bool,
+    collateral: u64,
+    mark_price_e6: u64,
+    maint_margin_bps: u64,
+) -> Vec<u8> {
+    let max_accounts: u16 = 1;
+    let v0_bitmap_off: usize = 608;
+    let bitmap_bytes: usize = 1;
+    let v0_account_size: usize = 240;
+    let total = v0_bitmap_off + bitmap_bytes + max_accounts as usize * v0_account_size;
+    let mut data = vec![0u8; total];
+    // SLAB_MAGIC = "PERCOLAT"
+    data[0..8].copy_from_slice(&0x5045_5243_4F4C_4154u64.to_le_bytes());
+    // max_accounts header.
+    data[8..10].copy_from_slice(&max_accounts.to_le_bytes());
+    // Bitmap bit 0 set ⇒ slot 0 allocated.
+    data[v0_bitmap_off] = 0x01;
+    let accounts_off = v0_bitmap_off + bitmap_bytes;
+    // capital (U128 lo at +8) — actual collateral.
+    data[accounts_off + 8..accounts_off + 16].copy_from_slice(&collateral.to_le_bytes());
+    // kind = 0 (User) — already zeroed.
+    // position_size: I128 sign+magnitude.
+    data[accounts_off + 80..accounts_off + 88].copy_from_slice(&position_size.to_le_bytes());
+    let hi: u64 = if is_long { 0 } else { 0x8000_0000_0000_0000 };
+    data[accounts_off + 88..accounts_off + 96].copy_from_slice(&hi.to_le_bytes());
+    // entry_price at +96.
+    data[accounts_off + 96..accounts_off + 104].copy_from_slice(&entry_price_e6.to_le_bytes());
+    // owner at +184.
+    let owner_off = accounts_off + 184;
+    data[owner_off..owner_off + 32].copy_from_slice(owner.as_ref());
+    // V0 engine offsets (engine_off = 480):
+    //   mark_price at engine+0 (= 480), maint_margin at engine+96 (= 576).
+    // V0 layout has mark_price=0 because V0 reads mark from config, but the
+    // is_position_healthy helper still calls read_u64_at(engine+0); writing
+    // a non-zero value here lets the health check proceed past the stale-
+    // price short-circuit.
+    let engine_off: usize = 480;
+    data[engine_off..engine_off + 8].copy_from_slice(&mark_price_e6.to_le_bytes());
+    data[engine_off + 96..engine_off + 104].copy_from_slice(&maint_margin_bps.to_le_bytes());
+    data
+}
+
+/// Build a PositionNft PDA buffer matching an open-position snapshot.
+fn make_pda_data_open(
+    slab_key: &solana_sdk::pubkey::Pubkey,
+    nft_mint_key: &solana_sdk::pubkey::Pubkey,
+    position_owner: [u8; 32],
+    entry_price_e6: u64,
+    position_size: u64,
+    is_long: u8,
+) -> Vec<u8> {
+    let mut buf = vec![0u8; POSITION_NFT_LEN];
+    buf[..8].copy_from_slice(&POSITION_NFT_MAGIC.to_le_bytes());
+    buf[8] = POSITION_NFT_VERSION;
+    buf[16..48].copy_from_slice(slab_key.as_ref());
+    buf[56..88].copy_from_slice(nft_mint_key.as_ref());
+    buf[88..96].copy_from_slice(&entry_price_e6.to_le_bytes());
+    buf[96..104].copy_from_slice(&position_size.to_le_bytes());
+    buf[104] = is_long;
+    // account_id [152..160] = 0 (matches the V0 slab helper, which leaves
+    // acct_off+0 zeroed); the equality check passes either way.
+    buf[160..192].copy_from_slice(&position_owner);
+    buf
+}
+
 /// **PERC-N2 PROOF OF BUG**.
 ///
 /// A position with deeply negative `account.pnl` (−900K out of 1M capital,
@@ -1986,4 +2078,312 @@ fn test_perc_n2_legacy_layout_notional_quote_is_zero() {
     let v = compute_position_value(&slab_data, nft_state).unwrap();
     assert!(!v.layout_v12_17);
     assert_eq!(v.notional_quote, 0, "notional_quote must be 0 on legacy layouts");
+}
+
+/// Regression: BurnPositionNft on a closed position whose `position_owner`
+/// already mirrors the live slab owner (the state the fixed transfer hook
+/// produces) must NOT be rejected by the PERC-N1 guard.
+///
+/// We accept any error EXCEPT `SlotReused`: the burn handler runs CPIs to
+/// Token-2022 (burn, close_account, close_account on the mint) that
+/// require the BPF runtime, so the call cannot complete in a unit test.
+/// The contract under test is: the PERC-N1 guard at processor.rs:704 does
+/// not fire for the legitimate post-transfer state.
+#[test]
+fn test_burn_proceeds_after_hook_writes_position_owner() {
+    use percolator_nft::{
+        cpi::PERCOLATOR_MAINNET, error::NftError, processor::process,
+        token2022::TOKEN_2022_PROGRAM_ID,
+    };
+    use percolator_nft::state::{mint_authority_pda, position_nft_pda};
+    use solana_program::{account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey};
+    use solana_sdk::pubkey::Pubkey as SdkPubkey;
+
+    let program_id = SdkPubkey::new_unique();
+    let slab_key = SdkPubkey::new_unique();
+    let nft_mint_key = SdkPubkey::new_unique();
+    // user_b is the post-transfer holder: the hook fix wrote position_owner
+    // = user_b at transfer time, and slab.Account[0].owner = user_b (set
+    // by tag-69 CPI at the same time).
+    let user_b = SdkPubkey::new_unique();
+
+    let prog_pk = Pubkey::new_from_array(program_id.to_bytes());
+    let slab_pk = Pubkey::new_from_array(slab_key.to_bytes());
+    let nft_mint_pk = Pubkey::new_from_array(nft_mint_key.to_bytes());
+    let holder_pk = Pubkey::new_from_array(user_b.to_bytes());
+    let (pda_pk, _) = position_nft_pda(&slab_pk, 0, &prog_pk);
+    let (mint_auth_pk, _) = mint_authority_pda(&prog_pk);
+
+    // PDA records position_owner = user_b (post-fix state).
+    let mut pda_data = make_pda_data_with_owner(&slab_key, &nft_mint_key, user_b.to_bytes());
+    // Slab: closed position owned by user_b (matches the PDA).
+    let mut slab_data = build_v0_slab_with_owner(&user_b);
+
+    // Holder ATA: Token-2022, balance=1, owner=user_b, mint=nft_mint.
+    let mut ata_data = vec![0u8; 165];
+    ata_data[0..32].copy_from_slice(nft_mint_key.as_ref());
+    ata_data[32..64].copy_from_slice(user_b.as_ref());
+    ata_data[64..72].copy_from_slice(&1u64.to_le_bytes());
+    ata_data[108] = 1;
+
+    let mut holder_lamports: u64 = 1_000_000;
+    let mut pda_lamports: u64 = 1_000_000;
+    let mut mint_lamports: u64 = 1_000_000;
+    let mut ata_lamports: u64 = 1_000_000;
+    let mut slab_lamports: u64 = 1_000_000;
+    let mut auth_lamports: u64 = 0;
+    let mut token_lamports: u64 = 0;
+    let mut holder_data: Vec<u8> = vec![];
+    let mut mint_data: Vec<u8> = vec![0u8; 82];
+    let mut auth_data: Vec<u8> = vec![];
+    let mut token_data: Vec<u8> = vec![];
+
+    let system_program_id = solana_program::system_program::id();
+    let token_prog_id = Pubkey::new_from_array(TOKEN_2022_PROGRAM_ID.to_bytes());
+    let percolator_pk = Pubkey::new_from_array(PERCOLATOR_MAINNET.to_bytes());
+
+    let holder_ai = AccountInfo::new(
+        &holder_pk, true, false,
+        &mut holder_lamports, &mut holder_data, &system_program_id, false, 0,
+    );
+    let pda_ai = AccountInfo::new(
+        &pda_pk, false, true,
+        &mut pda_lamports, &mut pda_data, &prog_pk, false, 0,
+    );
+    let nft_mint_ai = AccountInfo::new(
+        &nft_mint_pk, false, true,
+        &mut mint_lamports, &mut mint_data, &token_prog_id, false, 0,
+    );
+    let ata_ai = AccountInfo::new(
+        &holder_pk, false, true,
+        &mut ata_lamports, &mut ata_data, &token_prog_id, false, 0,
+    );
+    let slab_ai = AccountInfo::new(
+        &slab_pk, false, false,
+        &mut slab_lamports, &mut slab_data, &percolator_pk, false, 0,
+    );
+    let auth_ai = AccountInfo::new(
+        &mint_auth_pk, false, false,
+        &mut auth_lamports, &mut auth_data, &system_program_id, false, 0,
+    );
+    let token_ai = AccountInfo::new(
+        &token_prog_id, false, false,
+        &mut token_lamports, &mut token_data, &system_program_id, false, 0,
+    );
+
+    let accounts = [holder_ai, pda_ai, nft_mint_ai, ata_ai, slab_ai, auth_ai, token_ai];
+    let result = process(&prog_pk, &accounts, &[1u8]); // tag 1 = BurnPositionNft
+
+    let slot_reused: ProgramError = NftError::SlotReused.into();
+    match result {
+        Ok(_) => {}
+        Err(e) => assert_ne!(
+            e, slot_reused,
+            "PERC-N1 guard must NOT fire when position_owner mirrors the live slab owner \
+             (the state the fixed transfer hook produces). Got: {:?}", e
+        ),
+    }
+}
+
+/// Regression: SettleFunding on an OPEN position whose `position_owner`
+/// already mirrors the live slab owner (post-fix hook state) must NOT be
+/// rejected by the PERC-N1 guard.
+///
+/// SettleFunding requires `position.size != 0`, so this test exercises the
+/// open-position path the brick bug primarily hits — the entire secondary-
+/// market use case is selling NFTs against open positions.
+///
+/// SettleFunding has no CPIs, so the call should complete with `Ok(())`
+/// (funding index gets refreshed inside the PDA in-place).
+#[test]
+fn test_settle_proceeds_after_hook_writes_position_owner() {
+    use percolator_nft::{
+        cpi::PERCOLATOR_MAINNET, processor::process,
+        token2022::TOKEN_2022_PROGRAM_ID,
+    };
+    use percolator_nft::state::{mint_authority_pda, position_nft_pda};
+    use solana_program::{account_info::AccountInfo, pubkey::Pubkey};
+    use solana_sdk::pubkey::Pubkey as SdkPubkey;
+
+    let program_id = SdkPubkey::new_unique();
+    let slab_key = SdkPubkey::new_unique();
+    let nft_mint_key = SdkPubkey::new_unique();
+    let user_b = SdkPubkey::new_unique();
+
+    let prog_pk = Pubkey::new_from_array(program_id.to_bytes());
+    let slab_pk = Pubkey::new_from_array(slab_key.to_bytes());
+    let nft_mint_pk = Pubkey::new_from_array(nft_mint_key.to_bytes());
+    let holder_pk = Pubkey::new_from_array(user_b.to_bytes());
+    let (pda_pk, _) = position_nft_pda(&slab_pk, 0, &prog_pk);
+    let (_mint_auth_pk, _) = mint_authority_pda(&prog_pk);
+
+    let entry_price: u64 = 50_000_000;
+    let size: u64 = 1_000_000;
+
+    // Slab: open position owned by user_b, matching PDA snapshot.
+    let mut slab_data = build_v0_slab_open_position(
+        &user_b,
+        size,
+        entry_price,
+        true,           // long
+        1_000_000,      // collateral
+        51_000_000,     // mark price (irrelevant — settle doesn't run health check)
+        500,            // maint margin bps (irrelevant for settle)
+    );
+    // PDA: matches everything, including position_owner.
+    let mut pda_data = make_pda_data_open(
+        &slab_key,
+        &nft_mint_key,
+        user_b.to_bytes(),
+        entry_price,
+        size,
+        1, // is_long
+    );
+
+    let mut ata_data = vec![0u8; 165];
+    ata_data[0..32].copy_from_slice(nft_mint_key.as_ref());
+    ata_data[32..64].copy_from_slice(user_b.as_ref());
+    ata_data[64..72].copy_from_slice(&1u64.to_le_bytes());
+    ata_data[108] = 1;
+
+    let mut holder_lamports: u64 = 1_000_000;
+    let mut pda_lamports: u64 = 1_000_000;
+    let mut slab_lamports: u64 = 1_000_000;
+    let mut ata_lamports: u64 = 1_000_000;
+    let mut holder_data: Vec<u8> = vec![];
+
+    let system_program_id = solana_program::system_program::id();
+    let token_prog_id = Pubkey::new_from_array(TOKEN_2022_PROGRAM_ID.to_bytes());
+    let percolator_pk = Pubkey::new_from_array(PERCOLATOR_MAINNET.to_bytes());
+
+    let holder_ai = AccountInfo::new(
+        &holder_pk, true, false,
+        &mut holder_lamports, &mut holder_data, &system_program_id, false, 0,
+    );
+    let pda_ai = AccountInfo::new(
+        &pda_pk, false, true,
+        &mut pda_lamports, &mut pda_data, &prog_pk, false, 0,
+    );
+    let slab_ai = AccountInfo::new(
+        &slab_pk, false, false,
+        &mut slab_lamports, &mut slab_data, &percolator_pk, false, 0,
+    );
+    let ata_ai = AccountInfo::new(
+        &holder_pk, false, true,
+        &mut ata_lamports, &mut ata_data, &token_prog_id, false, 0,
+    );
+
+    // SettleFunding accounts: [holder, nft_pda, slab, holder_ata]
+    let accounts = [holder_ai, pda_ai, slab_ai, ata_ai];
+    let result = process(&prog_pk, &accounts, &[2u8]); // tag 2
+
+    assert!(
+        result.is_ok(),
+        "Post-fix SettleFunding on an open, mirror-owned position must succeed. Got: {:?}",
+        result
+    );
+}
+
+/// Regression: GetPositionValue on an OPEN position whose `position_owner`
+/// already mirrors the live slab owner (post-fix hook state) must NOT be
+/// rejected by the PERC-N1 guard.
+///
+/// We assert any-error-except-SlotReused. Downstream valuation logic may
+/// surface other failures depending on the engine bytes (e.g. zero mark
+/// price would short-circuit unrealized_pnl to 0), but those are out of
+/// scope for the PERC-N1 regression — what matters is that the guard at
+/// valuation.rs:117 does not false-positive on the legitimate state.
+#[test]
+fn test_get_position_value_proceeds_after_hook_writes_position_owner() {
+    use percolator_nft::{
+        cpi::PERCOLATOR_MAINNET, error::NftError, processor::process,
+        token2022::TOKEN_2022_PROGRAM_ID,
+    };
+    use percolator_nft::state::position_nft_pda;
+    use solana_program::{account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey};
+    use solana_sdk::pubkey::Pubkey as SdkPubkey;
+
+    let program_id = SdkPubkey::new_unique();
+    let slab_key = SdkPubkey::new_unique();
+    let nft_mint_key = SdkPubkey::new_unique();
+    let user_b = SdkPubkey::new_unique();
+
+    let prog_pk = Pubkey::new_from_array(program_id.to_bytes());
+    let slab_pk = Pubkey::new_from_array(slab_key.to_bytes());
+    let _nft_mint_pk = Pubkey::new_from_array(nft_mint_key.to_bytes());
+    let (pda_pk, _) = position_nft_pda(&slab_pk, 0, &prog_pk);
+
+    let entry_price: u64 = 50_000_000;
+    let size: u64 = 1_000_000;
+
+    let mut slab_data = build_v0_slab_open_position(
+        &user_b,
+        size,
+        entry_price,
+        true,
+        1_000_000,
+        51_000_000,
+        500,
+    );
+    let mut pda_data = make_pda_data_open(
+        &slab_key,
+        &nft_mint_key,
+        user_b.to_bytes(),
+        entry_price,
+        size,
+        1,
+    );
+
+    let mut pda_lamports: u64 = 1_000_000;
+    let mut slab_lamports: u64 = 1_000_000;
+
+    let percolator_pk = Pubkey::new_from_array(PERCOLATOR_MAINNET.to_bytes());
+
+    let pda_ai = AccountInfo::new(
+        &pda_pk, false, false,
+        &mut pda_lamports, &mut pda_data, &prog_pk, false, 0,
+    );
+    let slab_ai = AccountInfo::new(
+        &slab_pk, false, false,
+        &mut slab_lamports, &mut slab_data, &percolator_pk, false, 0,
+    );
+
+    // GetPositionValue accounts: [nft_pda, slab]
+    let accounts = [pda_ai, slab_ai];
+    let result = process(&prog_pk, &accounts, &[3u8]); // tag 3
+    let _ = TOKEN_2022_PROGRAM_ID; // silence unused-import lint in cfg paths
+
+    let slot_reused: ProgramError = NftError::SlotReused.into();
+    match result {
+        Ok(_) => {}
+        Err(e) => assert_ne!(
+            e, slot_reused,
+            "PERC-N1 guard must NOT fire on GetPositionValue when position_owner mirrors \
+             the live slab owner. Got: {:?}", e
+        ),
+    }
+}
+
+/// Layout pin: `PositionNft.position_owner` occupies bytes 160..192.
+///
+/// The fix in `process_execute` writes 32 bytes at this offset alongside
+/// `last_funding_index_e18` (128..144). If the struct ever drifts — e.g.
+/// a new field is inserted before `position_owner` — the byte-level write
+/// would corrupt unrelated state. This test pins the offset against the
+/// struct definition so any drift is caught at compile-fail / test-fail
+/// time, before the field-mutation hook can corrupt production PDAs.
+#[test]
+fn test_position_nft_position_owner_offset_pinned() {
+    use percolator_nft::state::PositionNft;
+    use std::mem::offset_of;
+    assert_eq!(
+        offset_of!(PositionNft, position_owner),
+        160,
+        "position_owner offset must be 160 (the byte range the transfer hook writes)"
+    );
+    assert_eq!(
+        std::mem::size_of::<[u8; 32]>(),
+        32,
+        "position_owner must be 32 bytes (full pubkey)"
+    );
 }
