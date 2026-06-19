@@ -56,6 +56,25 @@ const MINT_BASE_SIZE: u64 = 165;
 /// AccountType discriminator byte between base Mint data and TLV extensions.
 const ACCOUNT_TYPE_SIZE: u64 = 1;
 
+fn token_metadata_tlv_size(name: &str, symbol: &str, uri: &str) -> usize {
+    let name_len = 4 + name.len();
+    let symbol_len = 4 + symbol.len();
+    let uri_len = 4 + uri.len();
+    4 + 32 + 32 + name_len + symbol_len + uri_len + 4
+}
+
+fn mint_extension_space() -> u64 {
+    MINT_BASE_SIZE
+        + ACCOUNT_TYPE_SIZE
+        + token2022::METADATA_POINTER_EXTENSION_SIZE
+        + token2022::TRANSFER_HOOK_EXTENSION_SIZE
+        + token2022::MINT_CLOSE_AUTHORITY_EXTENSION_SIZE
+}
+
+fn position_nft_mint_account_size(name: &str, symbol: &str, uri: &str) -> usize {
+    mint_extension_space() as usize + token_metadata_tlv_size(name, symbol, uri) + 128
+}
+
 fn process_mint_position_nft(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -213,25 +232,14 @@ fn process_mint_position_nft(
     let nft_uri = "";
 
     // ── Create Token-2022 mint account ──
-    let mint_space: u64 = MINT_BASE_SIZE
-        + ACCOUNT_TYPE_SIZE
-        + token2022::METADATA_POINTER_EXTENSION_SIZE
-        + token2022::TRANSFER_HOOK_EXTENSION_SIZE
-        + token2022::MINT_CLOSE_AUTHORITY_EXTENSION_SIZE;
-    let metadata_tlv_size: usize = {
-        let name_len = 4 + nft_name.len();
-        let symbol_len = 4 + NFT_SYMBOL.len();
-        let uri_len = 4 + nft_uri.len();
-        4 + 32 + 32 + name_len + symbol_len + uri_len + 4
-    };
-    let final_size = mint_space as usize + metadata_tlv_size + 128;
-    let mint_rent = rent.minimum_balance(final_size);
+    let mint_account_size = position_nft_mint_account_size(&nft_name, NFT_SYMBOL, nft_uri);
+    let mint_rent = rent.minimum_balance(mint_account_size);
     invoke(
         &system_instruction::create_account(
             owner.key,
             nft_mint.key,
             mint_rent,
-            mint_space,
+            mint_account_size as u64,
             &token2022::TOKEN_2022_PROGRAM_ID,
         ),
         &[owner.clone(), nft_mint.clone(), system_program.clone()],
@@ -426,6 +434,27 @@ fn process_mint_position_nft(
         nft_mint.key
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mint_account_size_includes_embedded_metadata_tlv() {
+        const NFT_SYMBOL: &str = "PERC-POS";
+        let base_extension_space = mint_extension_space() as usize;
+        let long_name = alloc::format!("Percolator Position \u{2014} LONG");
+        let short_name = alloc::format!("Percolator Position \u{2014} SHORT");
+
+        for name in [&long_name, &short_name] {
+            let metadata_space = token_metadata_tlv_size(name, NFT_SYMBOL, "");
+            let allocated_space = position_nft_mint_account_size(name, NFT_SYMBOL, "");
+
+            assert_eq!(allocated_space, base_extension_space + metadata_space + 128);
+            assert!(allocated_space > base_extension_space);
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
