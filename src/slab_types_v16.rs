@@ -87,8 +87,14 @@ pub const V16_ACCOUNT_VERSION: u16 = 1;
 pub const V16_MAX_PORTFOLIO_ASSETS_N: usize = 16;
 /// `ceil(V16_MAX_PORTFOLIO_ASSETS_N / 64)` = 1.
 pub const V16_ACTIVE_BITMAP_WORDS: usize = 1;
-/// Largest active-leg count the wrapper permits per portfolio (CU envelope).
-/// An NFT's `asset_index` must be `< WRAPPER_MAX_PORTFOLIO_ASSETS`.
+/// Largest active-leg *count* the wrapper permits per portfolio (CU envelope).
+/// This is NOT a bound on the asset *identifier* (`legs[].asset_index`): an
+/// NFT's `asset_index` is matched against the engine's market-group asset
+/// registry, whose domain is `config.max_market_slots` (a `u32`, always
+/// `>= max_portfolio_assets`; engine `v16.rs:1975`). A position may legitimately
+/// trade an asset identifier `>= WRAPPER_MAX_PORTFOLIO_ASSETS` (#94). Eligibility
+/// is therefore decided by `active_leg_slot_for_asset` (a scan for a matching
+/// active leg), never by comparing `asset_index` to this count.
 pub const WRAPPER_MAX_PORTFOLIO_ASSETS: u16 = 14;
 
 /// v17: source-domains are now a fixed inline sparse array of this capacity.

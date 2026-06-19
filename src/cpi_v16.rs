@@ -60,7 +60,7 @@ pub fn derive_nft_registry(wrapper_program_id: &Pubkey, market_group: &Pubkey) -
 
 use crate::error::NftError;
 use crate::slab_types_v16::{
-    LegTransferGate, PortfolioAccountV16Account, PortfolioDecodeError, WRAPPER_MAX_PORTFOLIO_ASSETS,
+    LegTransferGate, PortfolioAccountV16Account, PortfolioDecodeError,
 };
 use crate::state_v16::PositionNftV16;
 
@@ -98,17 +98,28 @@ pub fn map_decode_err(e: PortfolioDecodeError) -> ProgramError {
 
 /// MintPositionNft eligibility. Returns the leg array slot to snapshot.
 ///
-/// Caller must be the portfolio owner; the requested `asset_index` must be in
-/// range and have an active leg. (No LP/User `kind` gate — v16 portfolios are
-/// trading accounts; LP vaults are a separate program surface.)
+/// Caller must be the portfolio owner; the requested `asset_index` must have an
+/// active leg. (No LP/User `kind` gate — v16 portfolios are trading accounts;
+/// LP vaults are a separate program surface.)
+///
+/// `asset_index` is the asset *identifier* (matched against `legs[].asset_index`,
+/// engine `v16.rs` `active_leg_slot_for_asset`), NOT the `legs` array slot. Its
+/// valid domain is the market-group asset registry size (`config.max_market_slots`,
+/// a `u32` — engine `v16.rs:2606`), which is independent of, and `>=`,
+/// `WRAPPER_MAX_PORTFOLIO_ASSETS` (the per-portfolio *active-leg count* cap;
+/// engine asserts `max_portfolio_assets <= max_market_slots`, `v16.rs:1975`).
+/// Earlier code rejected any `asset_index >= WRAPPER_MAX_PORTFOLIO_ASSETS (14)`,
+/// which wrongly rejected legitimate positions on asset identifiers `>= 14` in
+/// market groups with more than 14 assets (#94). The leg scan below is the
+/// correct and sufficient gate: it succeeds iff an active leg genuinely trades
+/// the requested asset, returning `LegNotActive` otherwise — identical to every
+/// other handler (burn / settle / transfer-gate). No upper bound is needed; the
+/// instruction decode already constrains `asset_index` to `u16`.
 pub fn mint_leg_slot(
     portfolio: &PortfolioAccountV16Account,
     caller_owner: &[u8; 32],
     asset_index: u32,
 ) -> Result<usize, NftError> {
-    if asset_index >= WRAPPER_MAX_PORTFOLIO_ASSETS as u32 {
-        return Err(NftError::LegNotActive);
-    }
     if &portfolio.owner() != caller_owner {
         return Err(NftError::NotNftHolder);
     }
@@ -193,7 +204,7 @@ pub fn transfer_gate_check(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::slab_types_v16::{V16PodI128, V16PodU32, V16PodU64};
+    use crate::slab_types_v16::{V16PodI128, V16PodU32, V16PodU64, WRAPPER_MAX_PORTFOLIO_ASSETS};
     use crate::state_v16::{PositionNftV16, POSITION_NFT_V16_MAGIC, POSITION_NFT_V16_VERSION};
     use bytemuck::Zeroable;
 
@@ -254,8 +265,43 @@ mod tests {
         assert_eq!(mint_leg_slot(&p, &[2u8; 32], 9), Err(NftError::NotNftHolder));
         // no active leg for that asset
         assert_eq!(mint_leg_slot(&p, &owner, 10), Err(NftError::LegNotActive));
-        // out of range (>= WRAPPER_MAX_PORTFOLIO_ASSETS = 14)
-        assert_eq!(mint_leg_slot(&p, &owner, 14), Err(NftError::LegNotActive));
+    }
+
+    /// Regression for #94: an `asset_index >= WRAPPER_MAX_PORTFOLIO_ASSETS (14)`
+    /// is a legitimate asset identifier in a market group with more than 14
+    /// assets (the engine validates `asset_index < config.max_market_slots`, a
+    /// `u32` — NOT against the per-portfolio active-leg count). The old code
+    /// rejected any such index before scanning, stranding valid positions; mint
+    /// must now succeed when an active leg genuinely trades that asset.
+    #[test]
+    fn mint_eligibility_high_asset_index_regression() {
+        let owner = [1u8; 32];
+
+        // A single active leg trading asset identifier 20 (>= 14): the engine
+        // allows this whenever the market group configures >= 21 assets.
+        let p = portfolio_with_leg(owner, 20, 100, 500);
+        assert_eq!(
+            mint_leg_slot(&p, &owner, 20),
+            Ok(4),
+            "asset_index 20 must mint (was wrongly rejected pre-#94)"
+        );
+
+        // Just above the old cap: still valid when an active leg trades it.
+        let p14 = portfolio_with_leg(owner, 14, 100, 500);
+        assert_eq!(mint_leg_slot(&p14, &owner, 14), Ok(4));
+
+        // And the eligibility decision still rests on a real active leg: a high
+        // asset_index with NO matching active leg correctly returns LegNotActive
+        // (not a blanket range rejection).
+        assert_eq!(mint_leg_slot(&p, &owner, 21), Err(NftError::LegNotActive));
+        // Ownership is still enforced for high indices.
+        assert_eq!(
+            mint_leg_slot(&p, &[2u8; 32], 20),
+            Err(NftError::NotNftHolder)
+        );
+        // The constant itself remains the per-portfolio active-leg cap, not an
+        // asset-id domain bound (referenced to keep this invariant explicit).
+        assert!(WRAPPER_MAX_PORTFOLIO_ASSETS == 14);
     }
 
     #[test]

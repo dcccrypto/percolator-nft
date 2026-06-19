@@ -97,8 +97,10 @@ impl PositionNftV16 {
 }
 
 /// Derive the PositionNft PDA for a `(portfolio_account, asset_index)` pair
-/// (design §4.1 Option B — per-leg NFT). `asset_index` is encoded as u16 LE
-/// (`WRAPPER_MAX_PORTFOLIO_ASSETS = 14`, so it always fits).
+/// (design §4.1 Option B — per-leg NFT). `asset_index` is the asset identifier
+/// (matched against `legs[].asset_index`), encoded as u16 LE — the instruction
+/// decode constrains it to `u16`, which is the seed's only domain requirement
+/// (it is NOT bounded by `WRAPPER_MAX_PORTFOLIO_ASSETS`; see #94).
 pub fn position_nft_pda(
     portfolio_account: &Pubkey,
     asset_index: u16,
