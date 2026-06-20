@@ -482,6 +482,47 @@ fn process_mint_position_nft(
 }
 
 // ═══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
+// #102: close the Token-2022 ExtraAccountMetaList PDA on burn.
+//
+// MintPositionNft creates a program-owned `extra_metas` PDA (seeds:
+// [b"extra-account-metas", nft_mint]) that the TransferHook runtime requires
+// for the mint's lifetime. Once the NFT is burned and its mint closed, that PDA
+// is orphaned — no later instruction can reference the (now-closed) mint to
+// derive it — permanently leaking its rent (~0.00207 SOL per NFT). Closing it
+// as part of burn returns that rent to the holder. The PDA is program-owned, so
+// it is drained directly (same lamport-transfer pattern as the PositionNft PDA
+// close); no signer/CPI is needed. Idempotent: if the account was never created
+// or is already closed, it is skipped so the burn never fails on it.
+fn close_extra_metas(
+    program_id: &Pubkey,
+    extra_metas: &AccountInfo,
+    nft_mint: &Pubkey,
+    holder: &AccountInfo,
+) -> ProgramResult {
+    let (expected, _) = extra_account_metas_pda(nft_mint, program_id);
+    if *extra_metas.key != expected {
+        msg!("Burn rejected: extra_metas PDA does not match expected derivation");
+        return Err(NftError::InvalidNftPda.into());
+    }
+    // Never-created / already-closed → nothing to reclaim; don't fail the burn.
+    if extra_metas.owner != program_id || extra_metas.data_is_empty() {
+        return Ok(());
+    }
+    if !extra_metas.is_writable {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    let dest = holder.lamports();
+    let amt = extra_metas.lamports();
+    **holder.try_borrow_mut_lamports()? = dest
+        .checked_add(amt)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
+    **extra_metas.try_borrow_mut_lamports()? = 0;
+    extra_metas.try_borrow_mut_data()?.fill(0);
+    Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════════
 // Tag 1: BurnPositionNft
 // ═══════════════════════════════════════════════════════════════
 
@@ -495,6 +536,7 @@ fn process_burn_position_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
     let portfolio = next_account_info(accounts_iter)?; // 4: Portfolio account
     let mint_auth = next_account_info(accounts_iter)?; // 5: Mint authority PDA
     let token_program = next_account_info(accounts_iter)?; // 6: Token-2022
+    let extra_metas = next_account_info(accounts_iter)?; // 7: ExtraAccountMetaList PDA (writable, closed) — #102
 
     if !holder.is_signer {
         return Err(ProgramError::MissingRequiredSignature);
@@ -610,8 +652,13 @@ fn process_burn_position_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
         .ok_or(ProgramError::ArithmeticOverflow)?;
     **nft_pda.try_borrow_mut_lamports()? = 0;
 
-    let mut pda_data = nft_pda.try_borrow_mut_data()?;
-    pda_data.fill(0);
+    {
+        let mut pda_data = nft_pda.try_borrow_mut_data()?;
+        pda_data.fill(0);
+    }
+
+    // ── #102: close the ExtraAccountMetaList PDA (return rent to holder) ──
+    close_extra_metas(program_id, extra_metas, nft_mint.key, holder)?;
 
     msg!(
         "PositionNft burned: portfolio={}, asset_index={}",
@@ -635,6 +682,7 @@ fn process_emergency_burn(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
     let portfolio = next_account_info(accounts_iter)?; // 4: Portfolio account
     let mint_auth = next_account_info(accounts_iter)?; // 5: Mint authority PDA
     let token_program = next_account_info(accounts_iter)?; // 6: Token-2022
+    let extra_metas = next_account_info(accounts_iter)?; // 7: ExtraAccountMetaList PDA (writable, closed) — #102
 
     if !holder.is_signer {
         return Err(ProgramError::MissingRequiredSignature);
@@ -746,8 +794,13 @@ fn process_emergency_burn(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
         .ok_or(ProgramError::ArithmeticOverflow)?;
     **nft_pda.try_borrow_mut_lamports()? = 0;
 
-    let mut pda_data = nft_pda.try_borrow_mut_data()?;
-    pda_data.fill(0);
+    {
+        let mut pda_data = nft_pda.try_borrow_mut_data()?;
+        pda_data.fill(0);
+    }
+
+    // ── #102: close the ExtraAccountMetaList PDA (return rent to holder) ──
+    close_extra_metas(program_id, extra_metas, nft_mint.key, holder)?;
 
     msg!(
         "PositionNft emergency burned: portfolio={}, asset_index={}",
