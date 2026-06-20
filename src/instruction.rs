@@ -14,15 +14,20 @@ use solana_program::program_error::ProgramError;
 ///   1. `[writable]`          PositionNft PDA (created)
 ///   2. `[writable, signer]`  NFT mint (Token-2022, created — fresh keypair)
 ///   3. `[writable]`          Owner's NFT token account (ATA, created)
-///   4. `[]`                  Slab account (read position data)
+///   4. `[]`                  Portfolio account (read position data)
 ///   5. `[]`                  Mint authority PDA
 ///   6. `[]`                  Token-2022 program
 ///   7. `[]`                  Associated token account program
 ///   8. `[]`                  System program
 ///   9. `[writable]`          ExtraAccountMetaList PDA (created);
 ///      seeds: `[b"extra-account-metas", nft_mint]`
+///  10. `[]`                  Per-market NftRegistry PDA (read-only) — #109;
+///      seeds: `[b"nft_registry", market_group]` UNDER the percolator wrapper
+///      (portfolio.owner). Mint fails (`RegistryNotConfigured`) unless it exists,
+///      is wrapper-owned, and registers THIS NFT program — otherwise the minted
+///      NFT would be permanently non-transferable (core B-3 transfer gate).
 ///
-/// Data: tag(1) + user_idx(2)
+/// Data: tag(1) + asset_index(2)
 pub const TAG_MINT_POSITION_NFT: u8 = 0;
 
 /// Tag 1: BurnPositionNft

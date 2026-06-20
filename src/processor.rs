@@ -109,6 +109,35 @@ const MINT_BASE_SIZE: u64 = 165;
 /// AccountType discriminator byte between base Mint data and TLV extensions.
 const ACCOUNT_TYPE_SIZE: u64 = 1;
 
+/// percolator-prog `state::HEADER_LEN`: the 16-byte account header precedes the
+/// `NftRegistryV16` POD. (Same value already used locally for RepairExtraMetas.)
+const CORE_HEADER_LEN: usize = 16;
+/// Minimum length of a valid NftRegistry account: 16-byte header + 72-byte POD.
+const NFT_REGISTRY_ACCOUNT_LEN: usize = CORE_HEADER_LEN + 72;
+/// Byte offset of `NftRegistryV16.nft_program_id` within the account
+/// (POD field offset 32, after the wrapper header).
+const NFT_REGISTRY_PROGRAM_ID_OFFSET: usize = CORE_HEADER_LEN + 32;
+
+/// Panic-safe predicate for the per-market NftRegistry account: `true` iff the
+/// account is long enough to be a real `NftRegistryV16` and its stored
+/// `nft_program_id` equals `program_id`. Uses `get(..)` (never indexing) so a
+/// short / empty / never-created account returns `false`, never panics.
+///
+/// Shared by `process_mint_position_nft` and its unit tests so the on-chain
+/// check and the test oracle can never drift. This is exactly equivalent to the
+/// core B-3 check `derive_nft_mint_authority(nft_program_id) == mint_auth`,
+/// because this program's `mint_auth == find_program_address([b"mint_authority"],
+/// program_id)` — the same seed the core uses under `nft_program_id`.
+fn registry_registers_program(data: &[u8], program_id: &Pubkey) -> bool {
+    if data.len() < NFT_REGISTRY_ACCOUNT_LEN {
+        return false;
+    }
+    match data.get(NFT_REGISTRY_PROGRAM_ID_OFFSET..NFT_REGISTRY_PROGRAM_ID_OFFSET + 32) {
+        Some(id) => id == program_id.as_ref(),
+        None => false,
+    }
+}
+
 fn process_mint_position_nft(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -126,6 +155,7 @@ fn process_mint_position_nft(
     let ata_program = next_account_info(accounts_iter)?; // 7: ATA program
     let system_program = next_account_info(accounts_iter)?; // 8: System program
     let extra_metas = next_account_info(accounts_iter)?; // 9: ExtraAccountMetaList PDA (writable, created)
+    let nft_registry = next_account_info(accounts_iter)?; // 10: per-market NftRegistry PDA (read-only) — #109
 
     // ── Verify well-known program account keys ──
     if *token_program.key != token2022::TOKEN_2022_PROGRAM_ID {
@@ -180,6 +210,43 @@ fn process_mint_position_nft(
     // The percolator program id is the wrapper that OWNS the portfolio account.
     let percolator_prog_id: Pubkey = *portfolio.owner;
     drop(portfolio_data);
+
+    // ── #109: validate the per-market NftRegistry BEFORE any irreversible work ──
+    // Previously MintPositionNft derived this PDA only to embed it in the
+    // ExtraAccountMetaList; it never checked the registry exists and registers
+    // THIS NFT program. The core's B-3 TransferPortfolioOwnership handler is
+    // fail-closed — it derives the trusted mint authority from
+    // registry.nft_program_id and rejects any mint_auth that does not match, and
+    // rejects a missing/uninitialized registry outright. Because SetNftProgramId
+    // is set-once/immutable, minting against an absent or foreign registry would
+    // produce a permanently non-transferable NFT with no signal to the minter.
+    // Validate here so mint fails fast and atomically (before any account/rent).
+    {
+        // (a) Pin the account to the canonical per-market PDA (the same one B-3
+        //     re-derives via find_program_address under the wrapper program id).
+        let (expected_registry, _) =
+            cpi_v16::derive_nft_registry(&percolator_prog_id, &market_group);
+        if *nft_registry.key != expected_registry {
+            msg!("MintPositionNft: nft_registry is not the canonical per-market PDA (#109)");
+            return Err(NftError::RegistryNotConfigured.into());
+        }
+        // (b) The registry must be owned by the wrapper that owns the portfolio.
+        //     A never-created registry is System-owned and fails here. (a)+(b)
+        //     together make the account unforgeable: only the wrapper can create
+        //     a wrapper-owned account at this PDA, and it only writes a real
+        //     NftRegistryV16 there.
+        if *nft_registry.owner != percolator_prog_id {
+            msg!("MintPositionNft: nft_registry not owned by the percolator program (#109)");
+            return Err(NftError::RegistryNotConfigured.into());
+        }
+        // (c)+(d) Length-guarded, panic-safe read of nft_program_id; require it
+        //     registers THIS NFT program (equivalent to B-3's mint-authority check).
+        let registry_data = nft_registry.try_borrow_data()?;
+        if !registry_registers_program(&registry_data, program_id) {
+            msg!("MintPositionNft: nft_registry missing/short or registers a different NFT program (#109)");
+            return Err(NftError::RegistryNotConfigured.into());
+        }
+    }
 
     // ── Verify PDA derivation ──
     let (expected_pda, bump) = position_nft_pda(portfolio.key, asset_index, program_id);
@@ -1052,6 +1119,64 @@ mod holder_ata_canonical_tests {
             !holder_ata_key_matches(&non_canonical_token_account, &holder, &nft_mint),
             "holder-only paths must reject non-canonical token accounts even when the token account data has amount=1, owner=holder, and mint=nft_mint"
         );
+    }
+}
+
+#[cfg(test)]
+mod registry_validation_tests {
+    use super::*;
+
+    /// Build an 88-byte registry image like the core `SetNftProgramId` writes:
+    /// `nft_program_id` at account offset `CORE_HEADER_LEN + 32` (= 48).
+    fn registry_image(nft_program_id: &Pubkey) -> [u8; NFT_REGISTRY_ACCOUNT_LEN] {
+        let mut d = [0u8; NFT_REGISTRY_ACCOUNT_LEN];
+        d[NFT_REGISTRY_PROGRAM_ID_OFFSET..NFT_REGISTRY_PROGRAM_ID_OFFSET + 32]
+            .copy_from_slice(nft_program_id.as_ref());
+        d
+    }
+
+    #[test]
+    fn offsets_match_core_nft_registry_layout() {
+        // percolator-prog: HEADER_LEN=16, NftRegistryV16.nft_program_id at POD
+        // offset 32, POD size 72 → account offset 48, account len 88.
+        assert_eq!(CORE_HEADER_LEN, 16);
+        assert_eq!(NFT_REGISTRY_PROGRAM_ID_OFFSET, 48);
+        assert_eq!(NFT_REGISTRY_ACCOUNT_LEN, 88);
+    }
+
+    #[test]
+    fn accepts_registry_that_registers_this_program() {
+        let me = Pubkey::new_from_array([5u8; 32]);
+        assert!(registry_registers_program(&registry_image(&me), &me));
+    }
+
+    #[test]
+    fn rejects_registry_that_registers_a_different_program() {
+        let me = Pubkey::new_from_array([5u8; 32]);
+        let other = Pubkey::new_from_array([6u8; 32]);
+        assert!(
+            !registry_registers_program(&registry_image(&other), &me),
+            "a registry bound to a different NFT program must be rejected at mint (#109)"
+        );
+    }
+
+    #[test]
+    fn rejects_short_or_empty_registry_without_panic() {
+        let me = Pubkey::new_from_array([5u8; 32]);
+        let full = registry_image(&me);
+        // Empty (never-created / System-owned 0-byte), header-only, and one byte
+        // short of a full registry must all reject — and must NOT panic.
+        assert!(!registry_registers_program(&[], &me));
+        assert!(!registry_registers_program(&full[..CORE_HEADER_LEN], &me));
+        assert!(!registry_registers_program(&full[..NFT_REGISTRY_ACCOUNT_LEN - 1], &me));
+    }
+
+    #[test]
+    fn rejects_zeroed_registry() {
+        // A correctly-sized but all-zero account (allocated-but-uninitialized)
+        // registers the zero program id, which is never this program.
+        let me = Pubkey::new_from_array([5u8; 32]);
+        assert!(!registry_registers_program(&[0u8; NFT_REGISTRY_ACCOUNT_LEN], &me));
     }
 }
 

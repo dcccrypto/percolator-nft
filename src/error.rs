@@ -65,6 +65,12 @@ pub enum NftError {
     /// snapshotted at mint (the leg slot was closed and reused by a newer
     /// position with a higher, never-reused market_id).
     MarketIdMismatch = 25,
+    /// MintPositionNft: the per-market `NftRegistry` PDA is absent, not owned by
+    /// the wrapper, too short, or registers a *different* NFT program. The core's
+    /// B-3 transfer gate is fail-closed (NftRegistryNotFound / NftInvalidMintAuthority)
+    /// and `SetNftProgramId` is set-once/immutable, so minting against such a
+    /// registry would yield a permanently non-transferable NFT. Reject at mint. (#109)
+    RegistryNotConfigured = 26,
 }
 
 impl From<NftError> for ProgramError {
