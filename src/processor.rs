@@ -47,6 +47,59 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     }
 }
 
+/// Returns true when `holder_ata_key` is the canonical Token-2022 ATA
+/// for `holder` and `expected_mint`.
+fn holder_ata_key_matches(
+    holder_ata_key: &Pubkey,
+    holder: &Pubkey,
+    expected_mint: &Pubkey,
+) -> bool {
+    *holder_ata_key == token2022::get_associated_token_address(holder, expected_mint)
+}
+
+/// Verifies that `holder_ata` is the canonical Token-2022 ATA for the holder
+/// and expected NFT mint, then checks the token account owner, initialized state,
+/// amount, and mint fields.
+fn verify_holder_ata_account(
+    holder_ata: &AccountInfo,
+    holder: &AccountInfo,
+    expected_mint: &Pubkey,
+) -> ProgramResult {
+    if !holder_ata_key_matches(holder_ata.key, holder.key, expected_mint) {
+        msg!("Holder ATA does not match canonical derivation");
+        return Err(NftError::NotNftHolder.into());
+    }
+
+    if *holder_ata.owner != token2022::TOKEN_2022_PROGRAM_ID {
+        return Err(NftError::NotNftHolder.into());
+    }
+
+    let ata_data = holder_ata.try_borrow_data()?;
+    if ata_data.len() < 165 {
+        return Err(NftError::NotNftHolder.into());
+    }
+
+    let amount = u64::from_le_bytes(ata_data[64..72].try_into().unwrap());
+    let ata_owner = Pubkey::new_from_array(ata_data[32..64].try_into().unwrap());
+    let ata_mint = Pubkey::new_from_array(ata_data[0..32].try_into().unwrap());
+    let ata_initialized =
+        ata_data[108] == pinocchio_token::state::AccountState::Initialized as u8;
+    drop(ata_data);
+
+    if !ata_initialized {
+        return Err(NftError::NotNftHolder.into());
+    }
+    if amount != 1 || ata_owner != *holder.key {
+        return Err(NftError::NotNftHolder.into());
+    }
+    if ata_mint != *expected_mint {
+        msg!("Holder ATA mint does not match expected NFT mint");
+        return Err(NftError::NotNftHolder.into());
+    }
+
+    Ok(())
+}
+
 // ═══════════════════════════════════════════════════════════════
 // Tag 0: MintPositionNft
 // ═══════════════════════════════════════════════════════════════
@@ -515,31 +568,8 @@ fn process_burn_position_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
             .map_err(ProgramError::from)?;
     }
 
-    // ── Verify holder owns the NFT (ATA balance check) ──
-    if *holder_ata.owner != token2022::TOKEN_2022_PROGRAM_ID {
-        return Err(NftError::NotNftHolder.into());
-    }
-    let ata_data = holder_ata.try_borrow_data()?;
-    if ata_data.len() < 165 {
-        return Err(NftError::NotNftHolder.into());
-    }
-    let amount = u64::from_le_bytes(ata_data[64..72].try_into().unwrap());
-    let ata_owner = Pubkey::new_from_array(ata_data[32..64].try_into().unwrap());
-    let ata_mint = Pubkey::new_from_array(ata_data[0..32].try_into().unwrap());
-    let ata_initialized =
-        ata_data[108] == pinocchio_token::state::AccountState::Initialized as u8;
-    drop(ata_data);
-
-    if !ata_initialized {
-        return Err(NftError::NotNftHolder.into());
-    }
-    if amount != 1 || ata_owner != *holder.key {
-        return Err(NftError::NotNftHolder.into());
-    }
-    if ata_mint != *nft_mint.key {
-        msg!("Burn rejected: ATA mint does not match NFT mint");
-        return Err(NftError::NotNftHolder.into());
-    }
+    // ── Verify holder owns the NFT via the canonical Token-2022 ATA ──
+    verify_holder_ata_account(holder_ata, holder, nft_mint.key)?;
 
     // ── Burn the NFT ──
     invoke(
@@ -638,7 +668,7 @@ fn process_emergency_burn(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
     }
 
     // ── Read and validate PositionNftV16 state ──
-    let (asset_index_u16, nft_mint_bytes, nft_state_copy) = {
+    let (asset_index_u16, nft_state_copy) = {
         let pda_data = nft_pda.try_borrow_data()?;
         if pda_data.len() < POSITION_NFT_V16_LEN {
             return Err(ProgramError::InvalidAccountData);
@@ -654,10 +684,9 @@ fn process_emergency_burn(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
             return Err(NftError::InvalidNftPda.into());
         }
         (
-            nft_state.asset_index.get() as u16,
-            nft_state.nft_mint,
-            *nft_state,
-        )
+        nft_state.asset_index.get() as u16,
+        *nft_state,
+    )
     };
 
     // ── Verify PDA address matches expected derivation ──
@@ -678,28 +707,8 @@ fn process_emergency_burn(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
             .map_err(ProgramError::from)?;
     }
 
-    // ── Verify holder owns the NFT ──
-    if *holder_ata.owner != token2022::TOKEN_2022_PROGRAM_ID {
-        return Err(NftError::NotNftHolder.into());
-    }
-    let ata_data = holder_ata.try_borrow_data()?;
-    if ata_data.len() < 165 {
-        return Err(NftError::NotNftHolder.into());
-    }
-    let amount = u64::from_le_bytes(ata_data[64..72].try_into().unwrap());
-    let ata_owner = Pubkey::new_from_array(ata_data[32..64].try_into().unwrap());
-    let ata_mint = Pubkey::new_from_array(ata_data[0..32].try_into().unwrap());
-    let ata_initialized =
-        ata_data[108] == pinocchio_token::state::AccountState::Initialized as u8;
-    drop(ata_data);
-
-    if !ata_initialized
-        || amount != 1
-        || ata_owner != *holder.key
-        || ata_mint.to_bytes() != nft_mint_bytes
-    {
-        return Err(NftError::NotNftHolder.into());
-    }
+    // ── Verify holder owns the NFT via the canonical Token-2022 ATA ──
+    verify_holder_ata_account(holder_ata, holder, nft_mint.key)?;
 
     // ── Burn the NFT ──
     invoke(
@@ -794,29 +803,9 @@ fn process_settle_funding(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
         return Err(NftError::InvalidNftPda.into());
     }
 
-    // ── Verify holder owns the NFT ──
-    let ata_data = holder_ata.try_borrow_data()?;
-    if ata_data.len() < 165 {
-        return Err(NftError::NotNftHolder.into());
-    }
-    let ata_amount = u64::from_le_bytes(ata_data[64..72].try_into().unwrap());
-    let ata_owner = Pubkey::new_from_array(ata_data[32..64].try_into().unwrap());
-    let ata_mint = Pubkey::new_from_array(ata_data[0..32].try_into().unwrap());
-    let ata_initialized =
-        ata_data[108] == pinocchio_token::state::AccountState::Initialized as u8;
-    drop(ata_data);
-
-    if !ata_initialized {
-        return Err(NftError::NotNftHolder.into());
-    }
-    if ata_amount != 1 || ata_owner != *holder.key {
-        msg!("SettleFunding: caller does not hold the NFT");
-        return Err(NftError::NotNftHolder.into());
-    }
-    if ata_mint.to_bytes() != nft_state.nft_mint {
-        msg!("SettleFunding: ATA mint does not match PDA nft_mint");
-        return Err(NftError::InvalidNftPda.into());
-    }
+    // ── Verify holder owns the NFT via the canonical Token-2022 ATA ──
+    let expected_nft_mint = Pubkey::new_from_array(nft_state.nft_mint);
+    verify_holder_ata_account(holder_ata, holder, &expected_nft_mint)?;
 
     // Take snapshot of nft_state fields needed for the leg check (cannot hold
     // nft_state borrow while borrowing portfolio_data since both are mut).
@@ -993,3 +982,23 @@ fn process_repair_extra_metas(
     );
     Ok(())
 }
+
+#[cfg(test)]
+mod holder_ata_canonical_tests {
+    use super::*;
+
+    #[test]
+    fn holder_ata_key_guard_rejects_non_canonical_token_account() {
+        let holder = Pubkey::new_from_array([7u8; 32]);
+        let nft_mint = Pubkey::new_from_array([9u8; 32]);
+        let canonical_ata = token2022::get_associated_token_address(&holder, &nft_mint);
+        let non_canonical_token_account = Pubkey::new_from_array([3u8; 32]);
+
+        assert!(holder_ata_key_matches(&canonical_ata, &holder, &nft_mint));
+        assert!(
+            !holder_ata_key_matches(&non_canonical_token_account, &holder, &nft_mint),
+            "holder-only paths must reject non-canonical token accounts even when the token account data has amount=1, owner=holder, and mint=nft_mint"
+        );
+    }
+}
+
