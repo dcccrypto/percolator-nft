@@ -167,18 +167,122 @@ impl NftInstruction {
             .ok_or(ProgramError::InvalidInstructionData)?;
         match tag {
             TAG_MINT_POSITION_NFT => {
-                if rest.len() < 2 {
+                if rest.len() != 2 {
                     return Err(ProgramError::InvalidInstructionData);
                 }
+
                 let asset_index = u16::from_le_bytes([rest[0], rest[1]]);
                 Ok(NftInstruction::MintPositionNft { asset_index })
             }
-            TAG_BURN_POSITION_NFT => Ok(NftInstruction::BurnPositionNft),
-            TAG_SETTLE_FUNDING => Ok(NftInstruction::SettleFunding),
-            TAG_GET_POSITION_VALUE => Ok(NftInstruction::GetPositionValue),
-            TAG_EMERGENCY_BURN => Ok(NftInstruction::EmergencyBurn),
-            TAG_REPAIR_EXTRA_METAS => Ok(NftInstruction::RepairExtraMetas),
+            TAG_BURN_POSITION_NFT => {
+                if !rest.is_empty() {
+                    return Err(ProgramError::InvalidInstructionData);
+                }
+                Ok(NftInstruction::BurnPositionNft)
+            }
+            TAG_SETTLE_FUNDING => {
+                if !rest.is_empty() {
+                    return Err(ProgramError::InvalidInstructionData);
+                }
+                Ok(NftInstruction::SettleFunding)
+            }
+            TAG_GET_POSITION_VALUE => {
+                if !rest.is_empty() {
+                    return Err(ProgramError::InvalidInstructionData);
+                }
+                Ok(NftInstruction::GetPositionValue)
+            }
+            TAG_EMERGENCY_BURN => {
+                if !rest.is_empty() {
+                    return Err(ProgramError::InvalidInstructionData);
+                }
+                Ok(NftInstruction::EmergencyBurn)
+            }
+            TAG_REPAIR_EXTRA_METAS => {
+                if !rest.is_empty() {
+                    return Err(ProgramError::InvalidInstructionData);
+                }
+                Ok(NftInstruction::RepairExtraMetas)
+            }
             _ => Err(ProgramError::InvalidInstructionData),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mint_position_nft_rejects_trailing_bytes() {
+        let data = [TAG_MINT_POSITION_NFT, 7, 0, 99, 100];
+
+        let result = NftInstruction::unpack(&data);
+
+        assert!(
+            matches!(result, Err(ProgramError::InvalidInstructionData)),
+            "MintPositionNft should reject trailing bytes"
+        );
+    }
+
+    #[test]
+    fn fixed_size_instruction_tags_reject_trailing_bytes() {
+        let fixed_tags = [
+            TAG_BURN_POSITION_NFT,
+            TAG_SETTLE_FUNDING,
+            TAG_GET_POSITION_VALUE,
+            TAG_EMERGENCY_BURN,
+            TAG_REPAIR_EXTRA_METAS,
+        ];
+
+        for tag in fixed_tags {
+            let data = [tag, 99];
+
+            let result = NftInstruction::unpack(&data);
+
+            assert!(
+                matches!(result, Err(ProgramError::InvalidInstructionData)),
+                "tag {} should reject trailing bytes",
+                tag
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_size_instruction_tags_accept_exact_payloads() {
+        let fixed_tags = [
+            TAG_BURN_POSITION_NFT,
+            TAG_SETTLE_FUNDING,
+            TAG_GET_POSITION_VALUE,
+            TAG_EMERGENCY_BURN,
+            TAG_REPAIR_EXTRA_METAS,
+        ];
+
+        for tag in fixed_tags {
+            let data = [tag];
+
+            let result = NftInstruction::unpack(&data);
+
+            assert!(
+                result.is_ok(),
+                "tag {} should accept exact-size payload",
+                tag
+            );
+        }
+    }
+
+    #[test]
+    fn mint_position_nft_accepts_exact_payload() {
+        let data = [TAG_MINT_POSITION_NFT, 7, 0];
+
+        let result = NftInstruction::unpack(&data);
+
+        assert!(
+            matches!(
+                result,
+                Ok(NftInstruction::MintPositionNft { asset_index: 7 })
+            ),
+            "MintPositionNft should accept exactly two asset_index bytes"
+        );
     }
 }
