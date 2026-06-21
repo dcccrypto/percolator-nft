@@ -32,9 +32,7 @@ extern crate alloc;
 use solana_program::{
     account_info::{next_account_info, AccountInfo},
     entrypoint::ProgramResult,
-    instruction::{AccountMeta, Instruction},
     msg,
-    program::invoke_signed,
     program_error::ProgramError,
     pubkey::Pubkey,
     sysvar::instructions as sysvar_instructions,
@@ -49,7 +47,7 @@ use crate::{
     slab_types_v16,
     state_v16::{
         mint_authority_pda, position_nft_pda, verify_position_nft, PositionNftV16,
-        MINT_AUTHORITY_SEED, POSITION_NFT_V16_LEN,
+        POSITION_NFT_V16_LEN,
     },
     token2022,
 };
@@ -70,11 +68,11 @@ pub fn extra_account_metas_pda(mint: &Pubkey, program_id: &Pubkey) -> (Pubkey, u
     Pubkey::find_program_address(&[EXTRA_METAS_SEED, mint.as_ref()], program_id)
 }
 
-/// Instruction tag for B-3 `TransferPortfolioOwnership` in the wrapper.
-/// Tag 72 is the CPI-only ownership reassignment handler (3-account flow):
-///   data: tag(1) + new_owner(32) + asset_index_le(2)
-///   accounts: [mint_auth(signer), portfolio(writable), nft_registry(read-only)]
-const TAG_B3_TRANSFER_PORTFOLIO_OWNERSHIP: u8 = 72;
+// #105 escrow-at-mint: the transfer hook no longer reassigns portfolio ownership
+// (the position stays escrowed to the NFT program's mint-authority PDA for its
+// whole wrapped life — see process_execute). The B-3 ownership CPI moved to mint
+// (escrow) and the UnwrapEscrowedPortfolio CPI to burn (release); both live in
+// processor.rs.
 
 // ═══════════════════════════════════════════════════════════════
 // CPI caller verification — ensure Execute is called via Token-2022
@@ -363,7 +361,7 @@ pub fn process_execute(
     // mint_auth is used as the CPI signer for B-3. Without verification an
     // attacker could pass a different PDA, causing the CPI to fail or —
     // if the wrapper does not re-derive — allowing an unauthorized transfer.
-    let (expected_mint_auth, mint_auth_bump) = mint_authority_pda(program_id);
+    let (expected_mint_auth, _mint_auth_bump) = mint_authority_pda(program_id);
     if *mint_auth.key != expected_mint_auth {
         msg!("Transfer rejected: invalid mint authority PDA");
         return Err(NftError::InvalidMintAuthority.into());
@@ -420,8 +418,7 @@ pub fn process_execute(
     verify_portfolio_program(portfolio)?;
 
     // ── Decode portfolio and run both gate checks ─────────────────────
-    // All portfolio data must be read and borrows dropped before the CPI.
-    let (market_group, new_f_snap);
+    let market_group;
     {
         let portfolio_data = portfolio.try_borrow_data()?;
         let p = slab_types_v16::decode_portfolio(&portfolio_data).map_err(map_decode_err)?;
@@ -429,13 +426,10 @@ pub fn process_execute(
         market_group = Pubkey::new_from_array(p.provenance_header.market_group_id);
 
         // Slot-reuse guard (market_id anchor — monotonic, never reused).
-        let slot = verify_bound_leg(p, &nft_state_copy).map_err(ProgramError::from)?;
+        let _slot = verify_bound_leg(p, &nft_state_copy).map_err(ProgramError::from)?;
 
         // Transfer-gate check (flags: active leg + no lock/stale/resolved/mid-close).
         transfer_gate_check(p, asset_index_u16 as u32).map_err(ProgramError::from)?;
-
-        // Capture leg's current f_snap for the post-CPI snapshot refresh.
-        new_f_snap = p.legs[slot].f_snap;
         // portfolio_data (Ref) is dropped here.
     }
 
@@ -452,66 +446,28 @@ pub fn process_execute(
         return Err(NftError::InvalidNftPda.into());
     }
 
-    // ── CPI to wrapper B-3: TransferPortfolioOwnership (tag 72) ───────
+    // ── #105 escrow-at-mint: NO ownership reassignment on transfer ───────────
     //
-    // data: tag(1) + new_owner(32) + asset_index_le16(2) = 35 bytes
-    // accounts:
-    //   0. mint_auth   — signer (proves THIS NFT program called)
-    //   1. portfolio   — writable (B-3 updates portfolio.owner)
-    //   2. nft_registry — read-only (wrapper validates it is the canonical registry)
+    // Under the escrow-at-mint custody model the position is owned by this NFT
+    // program's mint-authority PDA for its ENTIRE wrapped life — set once at
+    // mint (MintPositionNft → B-3) and released only at burn
+    // (Burn/EmergencyBurn → UnwrapEscrowedPortfolio). An NFT transfer therefore
+    // moves only the bearer token; `portfolio.owner` deliberately stays the
+    // escrow PDA, so the position cannot be drained out from under a recipient
+    // regardless of where the NFT is held (this is what closes the OTC
+    // pre-transfer drain window). The transfer hook's job is reduced to GATING:
+    // the validations above (source/dest ATA, Token-2022-caller, bound-leg /
+    // market_id anchor, transfer-gate, registry) still run so a wrapped NFT can
+    // only move while its bound position is live and clean.
     //
-    // The wrapper verifies `mint_auth.key == mint_authority_pda(registry.nft_program_id)`
-    // so a valid invoke_signed signature here proves this NFT program issued the CPI.
-    let cpi_data = {
-        let mut d = alloc::vec::Vec::with_capacity(35);
-        d.push(TAG_B3_TRANSFER_PORTFOLIO_OWNERSHIP);
-        d.extend_from_slice(new_owner.as_ref());
-        d.extend_from_slice(&asset_index_u16.to_le_bytes());
-        d
-    };
-
-    let cpi_accounts = alloc::vec![
-        AccountMeta::new_readonly(*mint_auth.key, true),     // signer
-        AccountMeta::new(*portfolio.key, false),             // writable
-        AccountMeta::new_readonly(*nft_registry.key, false), // read-only
-    ];
-
-    let cpi_ix = Instruction {
-        program_id: *percolator_prog.key,
-        accounts: cpi_accounts,
-        data: cpi_data,
-    };
-
-    let mint_auth_seeds: &[&[u8]] = &[MINT_AUTHORITY_SEED, &[mint_auth_bump]];
-
-    // All borrows (pda_data, portfolio_data) are dropped. CPI is safe.
-    // nft_program_self is forwarded so the runtime can locate the AccountInfo
-    // for the NFT program if the wrapper includes it as an account meta; it is
-    // not a CPI target but may be needed in the account_infos slice by the
-    // runtime to resolve the account.
-    invoke_signed(
-        &cpi_ix,
-        &[
-            mint_auth.clone(),
-            portfolio.clone(),
-            nft_registry.clone(),
-            nft_program_self.clone(),
-        ],
-        &[mint_auth_seeds],
-    )?;
-
-    // ── Refresh f_snap_at_mint on the PositionNft PDA ─────────────────
-    // Re-borrow nft_pda after the CPI completes. Mirrors v12's funding-index
-    // snapshot update: keeps the NFT's snapshot in sync with the live leg.
-    {
-        let mut pda_data = nft_pda.try_borrow_mut_data()?;
-        let nft_state =
-            bytemuck::from_bytes_mut::<PositionNftV16>(&mut pda_data[..POSITION_NFT_V16_LEN]);
-        nft_state.f_snap_at_mint = new_f_snap;
-    }
+    // The prior model's B-3 owner-sync CPI and f_snap refresh are intentionally
+    // removed. `mint_auth`, `nft_registry`, `percolator_prog` are still validated
+    // above (defense-in-depth) but no longer drive a CPI; `nft_program_self` is
+    // no longer forwarded into one.
+    let _ = nft_program_self;
 
     msg!(
-        "Position transferred: portfolio={}, asset_index={}, new_owner={}",
+        "Position NFT transferred (position remains escrowed): portfolio={}, asset_index={}, new_holder={}",
         portfolio.key,
         asset_index_u16,
         new_owner

@@ -3,6 +3,7 @@ extern crate alloc;
 use solana_program::{
     account_info::{next_account_info, AccountInfo},
     entrypoint::ProgramResult,
+    instruction::{AccountMeta, Instruction},
     msg,
     program::invoke,
     program::invoke_signed,
@@ -26,6 +27,107 @@ use crate::{
     token2022,
     transfer_hook::{extra_account_metas_pda, EXECUTE_DISCRIMINATOR, EXTRA_METAS_SEED},
 };
+
+/// Wrapper instruction tag: B-3 `TransferPortfolioOwnership` (escrow at mint).
+const TAG_B3_TRANSFER_PORTFOLIO_OWNERSHIP: u8 = 72;
+/// Wrapper instruction tag: `UnwrapEscrowedPortfolio` (release escrow on burn).
+const TAG_UNWRAP_ESCROWED_PORTFOLIO: u8 = 82;
+
+/// #105 escrow-at-mint: CPI the wrapper's B-3 `TransferPortfolioOwnership`
+/// (tag 72) to set `portfolio.owner = escrow_owner` (the NFT program's
+/// mint-authority PDA). Called at mint to take true custody of the position.
+///
+/// `percolator_prog` must be the wrapper that owns the portfolio (caller checks
+/// `percolator_prog.key == *portfolio.owner` after `verify_portfolio_program`).
+/// The wrapper re-derives the registry + mint-authority and fail-closed-validates
+/// the CPI signer, so a valid `invoke_signed` here proves this NFT program issued it.
+fn cpi_escrow_portfolio<'a>(
+    percolator_prog: &AccountInfo<'a>,
+    mint_auth: &AccountInfo<'a>,
+    portfolio: &AccountInfo<'a>,
+    nft_registry: &AccountInfo<'a>,
+    escrow_owner: &Pubkey,
+    asset_index: u16,
+    mint_auth_bump: u8,
+) -> ProgramResult {
+    let mut data = alloc::vec::Vec::with_capacity(35);
+    data.push(TAG_B3_TRANSFER_PORTFOLIO_OWNERSHIP);
+    data.extend_from_slice(escrow_owner.as_ref());
+    data.extend_from_slice(&asset_index.to_le_bytes());
+    let ix = Instruction {
+        program_id: *percolator_prog.key,
+        accounts: alloc::vec![
+            AccountMeta::new_readonly(*mint_auth.key, true),
+            AccountMeta::new(*portfolio.key, false),
+            AccountMeta::new_readonly(*nft_registry.key, false),
+        ],
+        data,
+    };
+    let seeds: &[&[u8]] = &[MINT_AUTHORITY_SEED, &[mint_auth_bump]];
+    invoke_signed(
+        &ix,
+        &[
+            mint_auth.clone(),
+            portfolio.clone(),
+            nft_registry.clone(),
+            percolator_prog.clone(),
+        ],
+        &[seeds],
+    )
+}
+
+/// #105 escrow-at-mint: CPI the wrapper's `UnwrapEscrowedPortfolio` (tag 82) to
+/// release escrow back to the burning holder — set `portfolio.owner = new_owner`.
+/// Called by Burn/EmergencyBurn. The wrapper releases regardless of the
+/// position's leg/resolved state (so the holder can always recover residual
+/// collateral or a resolved payout), gated only on the escrow invariant.
+fn cpi_unwrap_portfolio<'a>(
+    percolator_prog: &AccountInfo<'a>,
+    mint_auth: &AccountInfo<'a>,
+    portfolio: &AccountInfo<'a>,
+    nft_registry: &AccountInfo<'a>,
+    new_owner: &Pubkey,
+    mint_auth_bump: u8,
+) -> ProgramResult {
+    let mut data = alloc::vec::Vec::with_capacity(33);
+    data.push(TAG_UNWRAP_ESCROWED_PORTFOLIO);
+    data.extend_from_slice(new_owner.as_ref());
+    let ix = Instruction {
+        program_id: *percolator_prog.key,
+        accounts: alloc::vec![
+            AccountMeta::new_readonly(*mint_auth.key, true),
+            AccountMeta::new(*portfolio.key, false),
+            AccountMeta::new_readonly(*nft_registry.key, false),
+        ],
+        data,
+    };
+    let seeds: &[&[u8]] = &[MINT_AUTHORITY_SEED, &[mint_auth_bump]];
+    invoke_signed(
+        &ix,
+        &[
+            mint_auth.clone(),
+            portfolio.clone(),
+            nft_registry.clone(),
+            percolator_prog.clone(),
+        ],
+        &[seeds],
+    )
+}
+
+/// Verify a passed `percolator_prog` AccountInfo is the wrapper that owns the
+/// portfolio (so a CPI to it is genuinely the trusted wrapper). Caller must
+/// have already run `cpi_v16::verify_portfolio_program(portfolio)`, which
+/// allowlists `portfolio.owner`.
+fn verify_percolator_prog_account(
+    percolator_prog: &AccountInfo,
+    portfolio: &AccountInfo,
+) -> ProgramResult {
+    if percolator_prog.key != portfolio.owner {
+        msg!("percolator_prog account is not the wrapper that owns the portfolio");
+        return Err(NftError::InvalidPortfolioOwner.into());
+    }
+    Ok(())
+}
 
 /// Main instruction router.
 pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
@@ -156,6 +258,7 @@ fn process_mint_position_nft(
     let system_program = next_account_info(accounts_iter)?; // 8: System program
     let extra_metas = next_account_info(accounts_iter)?; // 9: ExtraAccountMetaList PDA (writable, created)
     let nft_registry = next_account_info(accounts_iter)?; // 10: per-market NftRegistry PDA (read-only) — #109
+    let percolator_prog = next_account_info(accounts_iter)?; // 11: percolator wrapper program (escrow CPI target) — #105
 
     // ── Verify well-known program account keys ──
     if *token_program.key != token2022::TOKEN_2022_PROGRAM_ID {
@@ -540,8 +643,28 @@ fn process_mint_position_nft(
         }
     }
 
+    // ── #105 escrow-at-mint: take TRUE custody of the position ───────────────
+    // Transfer portfolio ownership to this NFT program's mint-authority PDA so
+    // the minter can no longer operate the position directly while it is wrapped
+    // (trade / reduce / close / withdraw). The position is RELEASED back to the
+    // holder only when the NFT is burned (Burn/EmergencyBurn →
+    // UnwrapEscrowedPortfolio). This closes the pre-first-transfer drain window:
+    // a buyer of the NFT can no longer be handed a position the seller drained.
+    // verify_portfolio_program(portfolio) ran at the top (and again above); pin
+    // the passed wrapper program to portfolio.owner before CPIing into it.
+    verify_percolator_prog_account(percolator_prog, portfolio)?;
+    cpi_escrow_portfolio(
+        percolator_prog,
+        mint_auth,
+        portfolio,
+        nft_registry,
+        mint_auth.key, // escrow owner == this NFT program's mint-authority PDA
+        asset_index,
+        mint_auth_bump,
+    )?;
+
     msg!(
-        "PositionNft minted: portfolio={}, asset_index={}, mint={}",
+        "PositionNft minted + escrowed: portfolio={}, asset_index={}, mint={}",
         portfolio.key,
         asset_index,
         nft_mint.key
@@ -601,10 +724,12 @@ fn process_burn_position_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
     let nft_pda = next_account_info(accounts_iter)?; // 1: PositionNft PDA (writable)
     let nft_mint = next_account_info(accounts_iter)?; // 2: NFT mint (writable)
     let holder_ata = next_account_info(accounts_iter)?; // 3: Holder's ATA (writable)
-    let portfolio = next_account_info(accounts_iter)?; // 4: Portfolio account
+    let portfolio = next_account_info(accounts_iter)?; // 4: Portfolio account (writable — #105 unwrap CPI)
     let mint_auth = next_account_info(accounts_iter)?; // 5: Mint authority PDA
     let token_program = next_account_info(accounts_iter)?; // 6: Token-2022
     let extra_metas = next_account_info(accounts_iter)?; // 7: ExtraAccountMetaList PDA (writable, closed) — #102
+    let nft_registry = next_account_info(accounts_iter)?; // 8: per-market NftRegistry PDA (read-only) — #105
+    let percolator_prog = next_account_info(accounts_iter)?; // 9: percolator wrapper program (unwrap CPI target) — #105
 
     if !holder.is_signer {
         return Err(ProgramError::MissingRequiredSignature);
@@ -617,6 +742,9 @@ fn process_burn_position_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
         return Err(ProgramError::InvalidAccountData);
     }
     if !holder_ata.is_writable {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    if !portfolio.is_writable {
         return Err(ProgramError::InvalidAccountData);
     }
 
@@ -693,6 +821,21 @@ fn process_burn_position_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
         ],
     )?;
 
+    // ── #105 escrow-at-mint: release the escrow back to the holder ───────────
+    // The NFT is now destroyed; return portfolio ownership to the burning holder
+    // so they regain direct control of the position. UnwrapEscrowedPortfolio
+    // releases regardless of the position's leg/resolved state.
+    let (_, mint_auth_bump) = mint_authority_pda(program_id);
+    verify_percolator_prog_account(percolator_prog, portfolio)?;
+    cpi_unwrap_portfolio(
+        percolator_prog,
+        mint_auth,
+        portfolio,
+        nft_registry,
+        holder.key,
+        mint_auth_bump,
+    )?;
+
     // ── Close the ATA (return rent to holder) ──
     invoke(
         &token2022::close_account(holder_ata.key, holder.key, holder.key),
@@ -700,7 +843,6 @@ fn process_burn_position_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
     )?;
 
     // ── Close the mint account (return rent to holder) ──
-    let (_, mint_auth_bump) = mint_authority_pda(program_id);
     let mint_auth_seeds: &[&[u8]] = &[MINT_AUTHORITY_SEED, &[mint_auth_bump]];
     invoke_signed(
         &token2022::close_account(nft_mint.key, holder.key, mint_auth.key),
@@ -748,13 +890,19 @@ fn process_emergency_burn(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
     let nft_pda = next_account_info(accounts_iter)?; // 1: PositionNft PDA (writable)
     let nft_mint = next_account_info(accounts_iter)?; // 2: NFT mint (writable)
     let holder_ata = next_account_info(accounts_iter)?; // 3: Holder's ATA (writable)
-    let portfolio = next_account_info(accounts_iter)?; // 4: Portfolio account
+    let portfolio = next_account_info(accounts_iter)?; // 4: Portfolio account (writable — #105 unwrap CPI)
     let mint_auth = next_account_info(accounts_iter)?; // 5: Mint authority PDA
     let token_program = next_account_info(accounts_iter)?; // 6: Token-2022
     let extra_metas = next_account_info(accounts_iter)?; // 7: ExtraAccountMetaList PDA (writable, closed) — #102
+    let nft_registry = next_account_info(accounts_iter)?; // 8: per-market NftRegistry PDA (read-only) — #105
+    let percolator_prog = next_account_info(accounts_iter)?; // 9: percolator wrapper program (unwrap CPI target) — #105
 
     if !holder.is_signer {
         return Err(ProgramError::MissingRequiredSignature);
+    }
+
+    if !portfolio.is_writable {
+        return Err(ProgramError::InvalidAccountData);
     }
 
     if *token_program.key != token2022::TOKEN_2022_PROGRAM_ID {
@@ -837,6 +985,22 @@ fn process_emergency_burn(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
             holder.clone(),
             token_program.clone(),
         ],
+    )?;
+
+    // ── #105 escrow-at-mint: release the escrow back to the holder ───────────
+    // EmergencyBurn handles closed / flat / slot-reused positions; the portfolio
+    // is still escrowed to this NFT program's PDA from mint, so return ownership
+    // to the burning holder. UnwrapEscrowedPortfolio is deliberately not gated on
+    // leg/resolved state, so residual collateral / resolved payouts remain
+    // recoverable by the holder via their own owner-gated calls afterwards.
+    verify_percolator_prog_account(percolator_prog, portfolio)?;
+    cpi_unwrap_portfolio(
+        percolator_prog,
+        mint_auth,
+        portfolio,
+        nft_registry,
+        holder.key,
+        mint_auth_bump,
     )?;
 
     invoke(
@@ -1007,7 +1171,6 @@ fn process_repair_extra_metas(
         msg!("RepairExtraMetas: nft_pda not owned by this program");
         return Err(ProgramError::IllegalOwner);
     }
-    let asset_index_u16;
     let market_id_at_mint;
     {
         let nft_state_data = nft_pda.try_borrow_data()?;
@@ -1025,7 +1188,6 @@ fn process_repair_extra_metas(
             msg!("RepairExtraMetas: nft_pda.nft_mint does not match nft_mint account");
             return Err(NftError::InvalidNftPda.into());
         }
-        asset_index_u16 = nft_state.asset_index.get() as u16;
         market_id_at_mint = nft_state.market_id_at_mint.get();
         // Verify canonical PDA derivation (#108: market_id, not asset_index).
         let (expected_pda, _) = position_nft_pda(portfolio.key, market_id_at_mint, program_id);
