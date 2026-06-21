@@ -6,10 +6,10 @@ Position NFT wrapper for Percolator — mint transferable Token-2022 NFTs repres
 
 ```
 percolator-nft (this program)
-  ├── Reads position state from Percolator slab accounts (CPI-free, direct data read)
+  ├── Reads position state from Percolator portfolio accounts (CPI-free, direct data read)
   ├── SPL Token-2022 (mint/burn position NFTs, decimals=0, supply=1)
-  ├── PositionNft PDA (links NFT mint → slab + user_idx)
-  └── SettleFunding (permissionless crank to sync funding index before transfer)
+  ├── PositionNft PDA (links NFT mint → portfolio + market_id)
+  └── SettleFunding (holder-only crank to sync funding index before transfer)
 ```
 
 **Why a wrapper?**
@@ -20,46 +20,111 @@ percolator-nft (this program)
 
 ## Instructions
 
-| Tag | Name | Description |
-|-----|------|-------------|
-| 0 | `MintPositionNft` | Mint an NFT for an open position (caller must own the position) |
-| 1 | `BurnPositionNft` | Burn the NFT, release position back to direct ownership |
-| 2 | `SettleFunding` | Permissionless crank — update funding index before transfer |
-| 3 | `EmergencyBurn` | Admin-only emergency burn of a position NFT |
-| 4 | `GetPositionValue` | Read-only CPI: returns current position value at oracle price |
+| Tag | Name | Accounts | Description |
+|-----|------|----------|-------------|
+| 0 | `MintPositionNft` | 12 | Mint an NFT for an open position (caller must own the position) |
+| 1 | `BurnPositionNft` | 10 | Burn the NFT, release position back to direct ownership (requires active bound leg) |
+| 2 | `SettleFunding` | 4 | Holder-only crank — update funding index snapshot `f_snap_at_mint` |
+| 3 | `GetPositionValue` | 2 | Read-only valuation diagnostics (emits raw leg/valuation fields via transaction logs; does NOT return via CPI; clients use simulateTransaction; fail-CLOSED) |
+| 4 | `ExecuteTransferHook` | 12+ | SPL TransferHook interface execute (called by Token-2022 automatically on transfer; do NOT call directly) |
+| 5 | `EmergencyBurn` | 10 | Holder-only emergency burn for flat or liquidated positions (not admin-only) |
+| 6 | `RepairExtraMetas` | 7 | Permissionless rewrite of the `ExtraAccountMetaList` PDA to fix historical layout issues |
+
+### MintPositionNft: account layout (12 accounts)
+
+| # | Flags | Account |
+|---|-------|---------|
+| 0 | signer, writable | Position owner (pays rent) |
+| 1 | writable | PositionNft PDA (created) |
+| 2 | writable, signer | NFT mint (fresh keypair) |
+| 3 | writable | Owner's ATA (created) |
+| 4 | writable | Portfolio account |
+| 5 | — | Mint authority PDA |
+| 6 | — | Token-2022 program |
+| 7 | — | ATA program |
+| 8 | — | System program |
+| 9 | writable | ExtraAccountMetaList PDA (created) |
+| 10 | — | Per-market NftRegistry PDA |
+| 11 | — | Percolator wrapper program |
+
+### BurnPositionNft / EmergencyBurn: account layout (10 accounts)
+
+| # | Flags | Account |
+|---|-------|---------|
+| 0 | signer | NFT holder |
+| 1 | writable | PositionNft PDA (closed) |
+| 2 | writable | NFT mint |
+| 3 | writable | Holder's ATA (closed) |
+| 4 | writable | Portfolio account |
+| 5 | — | Mint authority PDA |
+| 6 | — | Token-2022 program |
+| 7 | writable | ExtraAccountMetaList PDA (closed) |
+| 8 | — | Per-market NftRegistry PDA |
+| 9 | — | Percolator wrapper program |
 
 ## PDA Seeds
 
-- **PositionNft**: `["position_nft", slab_pubkey, user_idx_le_bytes]`
+- **PositionNft**: `["position_nft", portfolio_pubkey, market_id_u64_le]`
+  - Keyed on `market_id` (the v16 position **instance** id), NOT `asset_index` — #108.
+  - `market_id` is strictly monotonic and never reused, so every distinct position
+    instance derives a distinct PDA. An `asset_index`-keyed PDA would be squattable
+    by a stale NFT when the same asset slot is re-opened after close.
+  - The `asset_index` field in `MintPositionNft` data is u16 (max 65535); it identifies
+    the leg (`legs[].asset_index`) and is stored in `PositionNftV16.asset_index`, but
+    it is NOT part of the PDA seed.
 - **MintAuthority**: `["mint_authority"]` (program-wide, signs all mint operations)
+- **ExtraAccountMetaList**: `["extra-account-metas", nft_mint]` (stores extra accounts required for TransferHook)
 
-## v12.17 Layout Support
+## Custody and Security
 
-The NFT program mirrors the v12.17 slab layout to read position state directly without CPI. The `small`, `medium`, and default (large) feature flags must match the feature used to build the deployed percolator-prog binary so that struct offsets align correctly.
+- **Custody Model**: Minting takes true custody of the position via B-3
+  `TransferPortfolioOwnership` CPI (escrow at mint). The portfolio owner becomes the
+  NFT program's mint-authority PDA. On burn (`BurnPositionNft`/`EmergencyBurn`), the
+  escrow is released via `UnwrapEscrowedPortfolio` CPI, returning ownership to the holder.
+- **Freeze Authority**: The freeze authority is set to the mint authority PDA as a latent
+  security control. It is currently INERT — no `FreezeAccount`/`ThawAccount` instruction
+  is exposed. Gated by program-upgrade governance.
+- **no-entrypoint Feature**: Program entrypoint is gated behind a `no-entrypoint` cargo
+  feature for library-style composition (e.g. embedding in test harnesses).
+- **GetPositionValue is fail-CLOSED**: stale/slot-reuse/no-active-leg conditions return
+  errors, not `Ok(())`. Clients using `simulateTransaction` must check the error.
+
+## v17 Layout Support
+
+The NFT program mirrors the converged v17 portfolio layout (`PortfolioAccountV16Account`,
+9227 bytes) to read position state directly without CPI. Struct offsets are validated at
+compile-time with size and offset assertions.
 
 ## Transfer Hook
 
-The transfer hook performs a health check at NFT transfer time using the last-cranked oracle price. See deferred finding C-12 for the known limitation on price staleness at transfer time.
+The transfer hook verifies the transfer at NFT transfer time. It CPIs into
+the percolator wrapper via `TransferPortfolioOwnership` (tag 72) to reassign the
+portfolio's owner to the buyer's wallet. The destination must be the canonical ATA.
 
 ## Build and Test
 
 ```bash
-# Build BPF binary
-cargo build-sbf
+# Build BPF binary (no warnings expected)
+cargo build-sbf --no-default-features
 
-# Run tests — 65 tests, 0 failures
-cargo test
+# Run tests
+RUST_MIN_STACK=8388608 cargo test
 ```
 
 ## Security Notes
 
 - `forbid(unsafe_code)` enforced
-- Slab owner verified against known Percolator program IDs (devnet + mainnet)
-- Position ownership verified before minting
-- Transfer hook enforces health check before position transfer
-- NFT burn closes PDA and returns rent to holder
+- Portfolio owner verified against known Percolator program IDs (devnet + mainnet)
+- Position ownership verified before minting; provenance header validated (#110C)
+- PDA re-derivation on every read operation uses `market_id_at_mint` (u64), not
+  `asset_index` (#108 / #118 — the #122 critical bug used asset_index here)
+- Transfer hook enforces ATA canonicality, CPI caller verification, and writable guards
+- NFT burn closes PDA, mint, ATA, and ExtraAccountMetaList, returning all rent to holder
+- SettleFunding requires nft_pda to be writable before attempting mutation (#120)
+- GetPositionValue: fail-CLOSED on stale state (#118/#119/#100)
+- EmergencyBurn is holder-only (not admin-only) (#122 README correction)
 
 ## Known Deferred Findings
 
-- **C-7:** The `account_id` guard is inoperative under the v12.17 layout. Impact is approximately 0.002 SOL PDA rent loss. No position or fund risk. Fix is scheduled for next upgrade.
-- **C-12:** The transfer hook uses the cached oracle price (last crank), not a fresh feed read. Bounded by keeper crank frequency. Fix requires an `ExtraAccountMeta` interface change.
+- **#110B (EmergencyBurn wedge when portfolio is gone/undecodable)**: needs a security-
+  sensitive relaxation of `verify_portfolio_program`; deferred to a follow-up PR.

@@ -9,12 +9,17 @@ use solana_program::program_error::ProgramError;
 /// Atomically creates and initializes the ExtraAccountMetaList PDA
 /// required by Token-2022 TransferHook, so the NFT is born transferable.
 ///
-/// Accounts:
+/// `asset_index` is a u16 (max 65535) — the leg identifier matched against
+/// `legs[].asset_index`, NOT an array slot. The PositionNft PDA is keyed on
+/// `market_id` (NOT asset_index); see #108.
+///
+/// Accounts (12 total):
 ///   0. `[signer, writable]`  Position owner (pays rent)
-///   1. `[writable]`          PositionNft PDA (created)
+///   1. `[writable]`          PositionNft PDA (created);
+///      seeds: `[b"position_nft", portfolio, market_id_u64_le]`
 ///   2. `[writable, signer]`  NFT mint (Token-2022, created — fresh keypair)
 ///   3. `[writable]`          Owner's NFT token account (ATA, created)
-///   4. `[]`                  Portfolio account (read position data)
+///   4. `[writable]`          Portfolio account (read position data; writable for B-3 escrow CPI)
 ///   5. `[]`                  Mint authority PDA
 ///   6. `[]`                  Token-2022 program
 ///   7. `[]`                  Associated token account program
@@ -26,22 +31,26 @@ use solana_program::program_error::ProgramError;
 ///      (portfolio.owner). Mint fails (`RegistryNotConfigured`) unless it exists,
 ///      is wrapper-owned, and registers THIS NFT program — otherwise the minted
 ///      NFT would be permanently non-transferable (core B-3 transfer gate).
+///  11. `[]`                  Percolator wrapper program (escrow CPI target — #105)
 ///
 /// Data: tag(1) + asset_index(2)
 pub const TAG_MINT_POSITION_NFT: u8 = 0;
 
 /// Tag 1: BurnPositionNft
 /// Burn the NFT, releasing the position back to direct ownership.
-/// Caller must hold the NFT.
+/// Caller must hold the NFT and the position must have an active bound leg.
 ///
-/// Accounts:
+/// Accounts (10 total):
 ///   0. `[signer]`    NFT holder
 ///   1. `[writable]`  PositionNft PDA (closed, rent returned)
 ///   2. `[writable]`  NFT mint (supply → 0)
 ///   3. `[writable]`  Holder's NFT token account (closed)
-///   4. `[]`          Slab account (verify position)
+///   4. `[writable]`  Portfolio account (verify position; writable for #105 unwrap CPI)
 ///   5. `[]`          Mint authority PDA
 ///   6. `[]`          Token-2022 program
+///   7. `[writable]`  ExtraAccountMetaList PDA (closed, rent returned) — #102
+///   8. `[]`          Per-market NftRegistry PDA (read-only) — #105
+///   9. `[]`          Percolator wrapper program (unwrap CPI target) — #105
 ///
 /// Data: tag(1)
 pub const TAG_BURN_POSITION_NFT: u8 = 1;
@@ -54,19 +63,21 @@ pub const TAG_BURN_POSITION_NFT: u8 = 1;
 /// Accounts:
 ///   0. `[signer]`    NFT holder (must own the NFT via ATA)
 ///   1. `[writable]`  PositionNft PDA
-///   2. `[]`          Slab account (read current funding index)
+///   2. `[]`          Portfolio account (read current funding index)
 ///   3. `[]`          Holder's ATA (proves NFT ownership; balance must be 1)
 ///
 /// Data: tag(1)
 pub const TAG_SETTLE_FUNDING: u8 = 2;
 
 /// Tag 3: GetPositionValue
-/// Read-only valuation for marketplaces and lending protocols.
-/// Returns position value data via transaction logs.
+/// Read-only valuation diagnostics for marketplaces and lending protocols.
+/// Emits raw leg/valuation fields via transaction logs; does NOT return a
+/// value via CPI (no set_return_data). Clients use `simulateTransaction`.
+/// Fail-CLOSED: stale/slot-reuse/no-active-leg conditions return an error.
 ///
 /// Accounts:
 ///   0. `[]`  PositionNft PDA
-///   1. `[]`  Slab account
+///   1. `[]`  Portfolio account
 ///
 /// Data: tag(1)
 pub const TAG_GET_POSITION_VALUE: u8 = 3;
@@ -79,17 +90,22 @@ pub const TAG_GET_POSITION_VALUE: u8 = 3;
 pub const TAG_EXECUTE_TRANSFER_HOOK: u8 = 4;
 
 /// Tag 5: EmergencyBurn
-/// Burn an NFT for a liquidated/closed position where position_basis_q == 0.
-/// Callable only by NFT holder. Used when a position is liquidated and collateral cannot be recovered.
+/// Burn an NFT for a flat/liquidated/closed position (position_basis_q == 0 or
+/// no active leg). Callable only by NFT holder. Used when a position is
+/// liquidated and collateral cannot be recovered through normal burn.
+/// NOT admin-only — the holder calls this directly.
 ///
-/// Accounts:
+/// Accounts (10 total):
 ///   0. `[signer]`    NFT holder
 ///   1. `[writable]`  PositionNft PDA (closed, rent returned)
 ///   2. `[writable]`  NFT mint (supply → 0)
 ///   3. `[writable]`  Holder's NFT token account (closed)
-///   4. `[]`          Slab account (verify liquidation)
+///   4. `[writable]`  Portfolio account (verify eligibility; writable for #105 unwrap CPI)
 ///   5. `[]`          Mint authority PDA
 ///   6. `[]`          Token-2022 program
+///   7. `[writable]`  ExtraAccountMetaList PDA (closed, rent returned) — #102
+///   8. `[]`          Per-market NftRegistry PDA (read-only) — #105
+///   9. `[]`          Percolator wrapper program (unwrap CPI target) — #105
 ///
 /// Data: tag(1)
 pub const TAG_EMERGENCY_BURN: u8 = 5;
@@ -98,33 +114,30 @@ pub const TAG_EMERGENCY_BURN: u8 = 5;
 ///
 /// Rewrite the ExtraAccountMetaList PDA data for an existing NFT mint so
 /// its flags match the current processor's `build_extra_account_metas`
-/// output — most importantly, marking the slab account writable.
+/// output — most importantly, marking the portfolio account writable.
 ///
-/// Historical mints produced an ExtraAccountMetaList where the slab was
+/// Historical mints produced an ExtraAccountMetaList where the portfolio was
 /// declared read-only. That was wrong — the transfer hook CPIs into
-/// percolator-prog with `TransferOwnershipCpi` (tag 69), which mutates
-/// `Account.owner` in the slab. Without slab writable, the CPI fails with
+/// percolator-prog with `TransferPortfolioOwnership` (tag 72), which mutates
+/// `owner` in the portfolio. Without portfolio writable, the CPI fails with
 /// `writable privilege escalated` and every transfer bounces. Burn + remint
 /// is not a workaround: burn requires the position already be closed.
 ///
 /// Permissionless by design. The only data written to the PDA is
 /// deterministic from the on-chain state of `nft_mint` + its `nft_pda`
-/// (slab, user_idx, percolator_prog_id). A caller cannot use this to forge
-/// anything — at worst they pay the tx fee to reset the PDA to its correct
-/// shape. No rent change (account is pre-sized by MintPositionNft).
+/// (portfolio, asset_index, percolator_prog_id). A caller cannot use this to
+/// forge anything — at worst they pay the tx fee to reset the PDA to its
+/// correct shape. No rent change (account is pre-sized by MintPositionNft).
 ///
 /// Accounts:
-///   0. `[signer, writable]`  Payer — tops up rent when the account grows
-///                            from a 5-entry (191-byte) layout to a 6-entry
-///                            (226-byte) layout. No-op on accounts already
-///                            sized for 6 entries.
+///   0. `[signer, writable]`  Payer — tops up rent when the account grows.
 ///   1. `[writable]`          ExtraAccountMetaList PDA;
 ///      seeds: `[b"extra-account-metas", nft_mint]`
 ///   2. `[]`                  NFT mint (PDA seed input, no reads)
 ///   3. `[]`                  PositionNft PDA;
-///      seeds: `[b"position_nft", slab, user_idx LE]`;
-///      read for user_idx + slab + nft_mint verification.
-///   4. `[]`                  Slab account (provides slab.key + percolator_prog_id)
+///      seeds: `[b"position_nft", portfolio, market_id_u64_le]` (#108);
+///      read for asset_index + portfolio + nft_mint verification.
+///   4. `[]`                  Portfolio account (provides portfolio.key + percolator_prog_id)
 ///   5. `[]`                  Mint authority PDA — entry #8 in the rewritten list
 ///   6. `[]`                  System program (rent top-up CPI)
 ///
@@ -133,8 +146,10 @@ pub const TAG_REPAIR_EXTRA_METAS: u8 = 6;
 
 /// Decoded instruction for the Position NFT program.
 pub enum NftInstruction {
-    /// Mint an NFT for a position. `asset_index` identifies the portfolio leg
-    /// (matched against `legs[].asset_index`), not an array slot.
+    /// Mint an NFT for a position. `asset_index` (u16, max 65535) identifies
+    /// the portfolio leg (matched against `legs[].asset_index`), not an array
+    /// slot. The PositionNft PDA is keyed on `market_id` (u64 LE), not
+    /// asset_index — see `position_nft_pda` (#108).
     MintPositionNft { asset_index: u16 },
     /// Burn an NFT, releasing the position.
     BurnPositionNft,

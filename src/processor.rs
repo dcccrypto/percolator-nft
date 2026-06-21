@@ -298,6 +298,13 @@ fn process_mint_position_nft(
     let p =
         slab_types_v16::decode_portfolio(&portfolio_data).map_err(cpi_v16::map_decode_err)?;
 
+    // #110C: assert provenance header matches the passed portfolio account
+    // to prevent a spoofed portfolio with a mismatched account_id.
+    if p.provenance_header.portfolio_account_id != portfolio.key.to_bytes() {
+        msg!("MintPositionNft: portfolio account ID does not match provenance header");
+        return Err(NftError::InvalidNftPda.into());
+    }
+
     let slot = cpi_v16::mint_leg_slot(p, &owner.key.to_bytes(), asset_index as u32)
         .map_err(ProgramError::from)?;
 
@@ -398,17 +405,31 @@ fn process_mint_position_nft(
         &[bump],
     ];
 
-    invoke_signed(
-        &system_instruction::create_account(
-            owner.key,
-            nft_pda.key,
-            lamports,
-            POSITION_NFT_V16_LEN as u64,
-            program_id,
-        ),
-        &[owner.clone(), nft_pda.clone(), system_program.clone()],
-        &[pda_seeds],
-    )?;
+    // #117: Replace create_account with transfer-allocate-assign so a
+    // griefing pre-fund (1 lamport to the PDA address) cannot cause
+    // create_account to fail with "already in use".
+    // Mirror the extra_metas pattern above: top up shortfall, then
+    // invoke_signed allocate, then invoke_signed assign.
+    {
+        let current_lamports = nft_pda.lamports();
+        if current_lamports < lamports {
+            let shortfall = lamports - current_lamports;
+            invoke(
+                &system_instruction::transfer(owner.key, nft_pda.key, shortfall),
+                &[owner.clone(), nft_pda.clone(), system_program.clone()],
+            )?;
+        }
+        invoke_signed(
+            &system_instruction::allocate(nft_pda.key, POSITION_NFT_V16_LEN as u64),
+            &[nft_pda.clone(), system_program.clone()],
+            &[pda_seeds],
+        )?;
+        invoke_signed(
+            &system_instruction::assign(nft_pda.key, program_id),
+            &[nft_pda.clone(), system_program.clone()],
+            &[pda_seeds],
+        )?;
+    }
 
     // ── Initialize PositionNftV16 state ──
     let clock = solana_program::clock::Clock::get()?;
@@ -450,12 +471,16 @@ fn process_mint_position_nft(
     };
     let final_size = mint_space as usize + metadata_tlv_size + 128;
     let mint_rent = rent.minimum_balance(final_size);
+    // #115: allocate `final_size` bytes (not just `mint_space`), because
+    // `mint_rent = rent.minimum_balance(final_size)` already pays for the
+    // full extent — allocating only `mint_space` here would cause the
+    // token-metadata TLV init to fail with AccountDataTooSmall.
     invoke(
         &system_instruction::create_account(
             owner.key,
             nft_mint.key,
             mint_rent,
-            mint_space,
+            final_size as u64,
             &token2022::TOKEN_2022_PROGRAM_ID,
         ),
         &[owner.clone(), nft_mint.clone(), system_program.clone()],
@@ -1067,6 +1092,11 @@ fn process_settle_funding(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
     if nft_pda.owner != program_id {
         msg!("SettleFunding rejected: PositionNft PDA not owned by this program");
         return Err(ProgramError::IllegalOwner);
+    }
+
+    // #120: reject non-writable nft_pda before attempting to borrow_mut_data.
+    if !nft_pda.is_writable {
+        return Err(ProgramError::InvalidAccountData);
     }
 
     cpi_v16::verify_portfolio_program(portfolio)?;

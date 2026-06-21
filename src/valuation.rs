@@ -1,10 +1,14 @@
 //! GetPositionValue — read-only v16 position data for marketplaces and lending
 //! protocols.
 //!
-//! Logs raw v16 leg fields via `POSITION_VALUE_V16:` prefixed `msg!` lines.
+//! Emits raw v16 leg fields via `POSITION_VALUE_V16:` prefixed `msg!` lines.
 //! Does NOT re-derive an equity or margin formula — v16's formula is
 //! engine-internal; a re-derivation here would be wrong and mislead consumers.
 //! Clients use `simulateTransaction` to read the log output.
+//!
+//! This instruction does NOT return a value via CPI (no `set_return_data`).
+//! It is fail-CLOSED: stale/slot-reuse/no-active-leg conditions return an
+//! error rather than `Ok(())` so callers cannot silently observe invalid state.
 
 use solana_program::{
     account_info::{next_account_info, AccountInfo},
@@ -16,19 +20,21 @@ use solana_program::{
 
 use crate::{
     cpi_v16,
+    error::NftError,
     slab_types_v16,
     state_v16::{verify_position_nft, PositionNftV16, POSITION_NFT_V16_LEN},
 };
 
 /// Process GetPositionValue instruction.
 ///
+/// Emits raw leg/valuation fields via transaction logs; does NOT return a
+/// value via CPI (no set_return_data). Clients use `simulateTransaction`.
+///
 /// Accounts:
 ///   0. `[]`  PositionNft PDA
 ///   1. `[]`  Portfolio account
 ///
 /// Data: tag(1) — no additional data needed.
-///
-/// Logs `POSITION_VALUE_V16:` lines (clients use simulateTransaction).
 pub fn process_get_position_value(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -58,6 +64,23 @@ pub fn process_get_position_value(
     }
 
     let asset_index = nft_state.asset_index.get();
+    // #118/#119: Re-derive the canonical PDA using market_id_at_mint (u64),
+    // NOT asset_index. market_id_at_mint is the correct second seed per #108.
+    // Using asset_index here (as PR #122 did) is the critical bug: asset_index
+    // is reused across positions, so it would produce the wrong PDA address.
+    let market_id_at_mint = nft_state.market_id_at_mint.get();
+    let (expected_pda, _) = crate::state_v16::position_nft_pda(
+        portfolio.key,
+        market_id_at_mint, // u64 — the correct seed per #108
+        program_id,
+    );
+    if *nft_pda.key != expected_pda {
+        msg!(
+            "GetPositionValue: PDA does not match canonical derivation (market_id_at_mint={})",
+            market_id_at_mint
+        );
+        return Err(NftError::InvalidNftPda.into());
+    }
     drop(pda_data);
 
     // ── Decode portfolio ──
@@ -68,18 +91,21 @@ pub fn process_get_position_value(
     // ── Find active leg for the bound asset_index ──
     match p.active_leg_slot_for_asset(asset_index) {
         None => {
-            // No active leg — position closed or never existed.
+            // #100/#118: fail-CLOSED — no active leg means the NFT is stale
+            // or the position is gone. Return an error so callers cannot
+            // silently observe this as valid state.
             msg!("POSITION_VALUE_V16:portfolio={}", portfolio.key);
             msg!("POSITION_VALUE_V16:asset_index={}", asset_index);
             msg!("POSITION_VALUE_V16:status=no_active_leg");
-            return Ok(());
+            return Err(NftError::LegNotActive.into());
         }
         Some(slot) => {
             let leg = &p.legs[slot];
 
-            // Check for market_id mismatch (slot reuse). Non-gating for
-            // read-only: log the mismatch so marketplaces can detect staleness,
-            // but still return Ok so callers can observe the stale state.
+            // #118: fail-CLOSED on slot-reuse (market_id mismatch). A different
+            // market_id means the leg slot was closed and re-opened for a new
+            // position — the NFT is stale. Return an error rather than Ok so
+            // this diagnostic path is fail-closed, not fail-open.
             let nft_market_id = {
                 let pda_data2 = nft_pda.try_borrow_data()?;
                 let ns = bytemuck::from_bytes::<PositionNftV16>(
@@ -99,9 +125,10 @@ pub fn process_get_position_value(
                     nft_market_id,
                     leg.market_id.get()
                 );
-                return Ok(());
+                return Err(NftError::MarketIdMismatch.into());
             }
 
+            // ── Legitimate active bound leg — emit log fields ──
             msg!("POSITION_VALUE_V16:portfolio={}", portfolio.key);
             msg!("POSITION_VALUE_V16:asset_index={}", asset_index);
             msg!("POSITION_VALUE_V16:market_id={}", leg.market_id.get());
