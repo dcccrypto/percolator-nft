@@ -403,11 +403,11 @@ pub fn process_execute(
         market_id_at_mint = nft_state.market_id_at_mint.get();
         nft_state_copy = *nft_state;
 
-        // Verify the PDA address against canonical derivation.
+        // Verify the PDA address against canonical derivation (#108: market_id).
         // Without this, any program-owned account with matching magic/mint/portfolio
         // fields could be substituted.
         let (expected_pda, _) =
-            position_nft_pda(portfolio.key, asset_index_u16, program_id);
+            position_nft_pda(portfolio.key, market_id_at_mint, program_id);
         if *nft_pda.key != expected_pda {
             msg!("Transfer rejected: PDA address does not match expected derivation");
             return Err(NftError::InvalidNftPda.into());

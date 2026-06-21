@@ -248,8 +248,8 @@ fn process_mint_position_nft(
         }
     }
 
-    // ── Verify PDA derivation ──
-    let (expected_pda, bump) = position_nft_pda(portfolio.key, asset_index, program_id);
+    // ── Verify PDA derivation (#108: keyed on market_id, not asset_index) ──
+    let (expected_pda, bump) = position_nft_pda(portfolio.key, snap_market_id, program_id);
     if *nft_pda.key != expected_pda {
         return Err(NftError::InvalidNftPda.into());
     }
@@ -287,10 +287,11 @@ fn process_mint_position_nft(
     // ── Create PositionNft PDA account ──
     let rent = Rent::get()?;
     let lamports = rent.minimum_balance(POSITION_NFT_V16_LEN);
+    let market_id_le = snap_market_id.to_le_bytes();
     let pda_seeds: &[&[u8]] = &[
         POSITION_NFT_SEED,
         portfolio.key.as_ref(),
-        &asset_index.to_le_bytes(),
+        &market_id_le,
         &[bump],
     ];
 
@@ -653,13 +654,14 @@ fn process_burn_position_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
         return Err(NftError::InvalidNftPda.into());
     }
     let asset_index_u16 = nft_state.asset_index.get() as u16;
+    let market_id_at_mint = nft_state.market_id_at_mint.get();
     // Take a copy for the slot-reuse check below.
     let nft_state_copy = *nft_state;
     drop(pda_data);
 
-    // ── Verify PDA address matches expected derivation ──
+    // ── Verify PDA address matches expected derivation (#108: market_id) ──
     let (expected_pda, _) =
-        position_nft_pda(portfolio.key, asset_index_u16, program_id);
+        position_nft_pda(portfolio.key, market_id_at_mint, program_id);
     if *nft_pda.key != expected_pda {
         msg!("Burn rejected: PDA address does not match expected derivation");
         return Err(NftError::InvalidNftPda.into());
@@ -783,7 +785,7 @@ fn process_emergency_burn(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
     }
 
     // ── Read and validate PositionNftV16 state ──
-    let (asset_index_u16, nft_state_copy) = {
+    let (asset_index_u16, market_id_at_mint, nft_state_copy) = {
         let pda_data = nft_pda.try_borrow_data()?;
         if pda_data.len() < POSITION_NFT_V16_LEN {
             return Err(ProgramError::InvalidAccountData);
@@ -800,13 +802,14 @@ fn process_emergency_burn(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
         }
         (
         nft_state.asset_index.get() as u16,
+        nft_state.market_id_at_mint.get(),
         *nft_state,
     )
     };
 
-    // ── Verify PDA address matches expected derivation ──
+    // ── Verify PDA address matches expected derivation (#108: market_id) ──
     let (expected_pda, _) =
-        position_nft_pda(portfolio.key, asset_index_u16, program_id);
+        position_nft_pda(portfolio.key, market_id_at_mint, program_id);
     if *nft_pda.key != expected_pda {
         msg!("EmergencyBurn rejected: PDA address does not match expected derivation");
         return Err(NftError::InvalidNftPda.into());
@@ -915,9 +918,10 @@ fn process_settle_funding(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
         return Err(ProgramError::InvalidAccountData);
     }
 
-    // ── Verify PDA address matches expected derivation ──
+    // ── Verify PDA address matches expected derivation (#108: market_id) ──
     let asset_index_u16 = nft_state.asset_index.get() as u16;
-    let (expected_pda, _) = position_nft_pda(portfolio.key, asset_index_u16, program_id);
+    let market_id_at_mint = nft_state.market_id_at_mint.get();
+    let (expected_pda, _) = position_nft_pda(portfolio.key, market_id_at_mint, program_id);
     if *nft_pda.key != expected_pda {
         msg!("SettleFunding rejected: PDA address does not match expected derivation");
         return Err(NftError::InvalidNftPda.into());
@@ -1004,6 +1008,7 @@ fn process_repair_extra_metas(
         return Err(ProgramError::IllegalOwner);
     }
     let asset_index_u16;
+    let market_id_at_mint;
     {
         let nft_state_data = nft_pda.try_borrow_data()?;
         if nft_state_data.len() < POSITION_NFT_V16_LEN {
@@ -1021,8 +1026,9 @@ fn process_repair_extra_metas(
             return Err(NftError::InvalidNftPda.into());
         }
         asset_index_u16 = nft_state.asset_index.get() as u16;
-        // Verify canonical PDA derivation.
-        let (expected_pda, _) = position_nft_pda(portfolio.key, asset_index_u16, program_id);
+        market_id_at_mint = nft_state.market_id_at_mint.get();
+        // Verify canonical PDA derivation (#108: market_id, not asset_index).
+        let (expected_pda, _) = position_nft_pda(portfolio.key, market_id_at_mint, program_id);
         if *nft_pda.key != expected_pda {
             msg!("RepairExtraMetas: nft_pda does not match canonical derivation");
             return Err(NftError::InvalidNftPda.into());

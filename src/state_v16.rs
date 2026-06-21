@@ -96,21 +96,34 @@ impl PositionNftV16 {
     }
 }
 
-/// Derive the PositionNft PDA for a `(portfolio_account, asset_index)` pair
-/// (design §4.1 Option B — per-leg NFT). `asset_index` is the asset identifier
-/// (matched against `legs[].asset_index`), encoded as u16 LE — the instruction
-/// decode constrains it to `u16`, which is the seed's only domain requirement
-/// (it is NOT bounded by `WRAPPER_MAX_PORTFOLIO_ASSETS`; see #94).
+/// Derive the PositionNft PDA for a `(portfolio_account, market_id)` pair
+/// (design §4.1 Option B — per-position NFT). `market_id` is the v16 position
+/// **instance** id (`legs[].market_id`), encoded as u64 LE.
+///
+/// #108: the seed is keyed on `market_id`, NOT `asset_index`. The engine
+/// **reuses** `asset_index` when a portfolio closes a position and opens a new
+/// one on the same asset, so an `asset_index`-keyed PDA would let a stale NFT
+/// squat the slot and permanently block (`NftAlreadyMinted`) wrapping the new
+/// position — a third-party liveness DoS, since only the stale NFT's holder can
+/// `EmergencyBurn` it. `market_id` is strictly monotonic and never reused
+/// (mirrors `market_id_at_mint`, the slot-reuse anchor), so every distinct
+/// position instance derives a distinct PDA and the alias/lock cannot occur.
+///
+/// At mint the caller has the active leg, so it derives with `leg.market_id`.
+/// On every later op (transfer/burn/settle/valuation) the handler reads the
+/// NFT's stored `market_id_at_mint` and re-derives with it, then asserts the
+/// result equals the passed `nft_pda` key — the address is self-authenticating
+/// (no extra instruction argument is required).
 pub fn position_nft_pda(
     portfolio_account: &Pubkey,
-    asset_index: u16,
+    market_id: u64,
     program_id: &Pubkey,
 ) -> (Pubkey, u8) {
     Pubkey::find_program_address(
         &[
             POSITION_NFT_SEED,
             portfolio_account.as_ref(),
-            &asset_index.to_le_bytes(),
+            &market_id.to_le_bytes(),
         ],
         program_id,
     )
@@ -190,13 +203,16 @@ mod tests {
     }
 
     #[test]
-    fn pda_is_per_leg_and_deterministic() {
+    fn pda_is_per_position_instance_and_deterministic() {
         let prog = Pubkey::new_unique();
         let portfolio = Pubkey::new_unique();
-        let (a0, _) = position_nft_pda(&portfolio, 0, &prog);
-        let (a0b, _) = position_nft_pda(&portfolio, 0, &prog);
-        let (a1, _) = position_nft_pda(&portfolio, 1, &prog);
+        // #108: keyed on market_id (position-instance id), not asset_index.
+        let (a0, _) = position_nft_pda(&portfolio, 100, &prog);
+        let (a0b, _) = position_nft_pda(&portfolio, 100, &prog);
+        let (a1, _) = position_nft_pda(&portfolio, 101, &prog);
         assert_eq!(a0, a0b); // deterministic
-        assert_ne!(a0, a1); // distinct per asset_index (per-leg NFT)
+        assert_ne!(a0, a1); // distinct per market_id (per-position-instance NFT)
+        // Re-opening the SAME asset_index yields a NEW market_id → a NEW PDA,
+        // so a stale NFT can never squat the new position's wrap slot.
     }
 }
