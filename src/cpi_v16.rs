@@ -409,5 +409,28 @@ mod tests {
         p_closing.close_progress.active = 1;
         p_closing.close_progress.asset_index = V16PodU32::new(9);
         assert_eq!(transfer_gate_check(&p_closing, 9), Err(NftError::TransferBlocked));
+
+        // blocked by terminal resolved payout receipt
+        let mut p_resolved = portfolio_with_leg(owner, 9, 100, 500);
+        p_resolved.resolved_payout_receipt.present = 1;
+        assert_eq!(transfer_gate_check(&p_resolved, 9), Err(NftError::TransferBlocked));
+
+        // blocked by portfolio-level stale flags
+        let mut p_stale = portfolio_with_leg(owner, 9, 100, 500);
+        p_stale.stale_state = 1;
+        assert_eq!(transfer_gate_check(&p_stale, 9), Err(NftError::TransferBlocked));
+
+        let mut p_b_stale = portfolio_with_leg(owner, 9, 100, 500);
+        p_b_stale.b_stale_state = 1;
+        assert_eq!(transfer_gate_check(&p_b_stale, 9), Err(NftError::TransferBlocked));
+
+        // blocked by leg-level stale flags
+        let mut p_leg_stale = portfolio_with_leg(owner, 9, 100, 500);
+        p_leg_stale.legs[4].stale = 1;
+        assert_eq!(transfer_gate_check(&p_leg_stale, 9), Err(NftError::TransferBlocked));
+
+        let mut p_leg_b_stale = portfolio_with_leg(owner, 9, 100, 500);
+        p_leg_b_stale.legs[4].b_stale = 1;
+        assert_eq!(transfer_gate_check(&p_leg_b_stale, 9), Err(NftError::TransferBlocked));
     }
 }
