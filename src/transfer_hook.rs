@@ -136,14 +136,15 @@ fn verify_cpi_caller_is_token2022(
     let ix_tag = current_ix.data[0];
     match ix_tag {
         TOKEN_IX_TRANSFER => {
-            // Transfer: tag(1) + amount(8)
-            // Accounts: [source, dest, authority]
-            // The mint is not directly in the instruction data for Transfer,
-            // but Token-2022 resolves it internally. We still validated that
-            // the outer program is Token-2022 and the instruction is a Transfer,
-            // which is sufficient — Token-2022 itself ensures the hook is only
-            // called for the correct mint via the TransferHook extension.
-            Ok(())
+            // #103: reject plain Transfer (tag 3). Its instruction layout carries NO mint
+            // account, so the in-program mint anchor cannot be verified (unlike the
+            // TransferChecked arm below). Rather than rely on Token-2022 runtime routing to
+            // guarantee the hook fires only for the correct mint, fail closed and require
+            // TransferChecked (tag 12) — which every legitimate NFT-transfer flow already
+            // uses (e.g. the launch useTransferPositionNft path). This makes the program's
+            // safety independent of runtime behaviour (defense-in-depth).
+            msg!("Transfer rejected: plain Transfer is unsupported for Position NFTs — use TransferChecked");
+            Err(NftError::UnauthorizedDirectInvocation.into())
         }
         TOKEN_IX_TRANSFER_CHECKED => {
             // TransferChecked: tag(1) + amount(8) + decimals(1)
