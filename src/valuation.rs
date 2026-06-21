@@ -58,12 +58,24 @@ pub fn process_get_position_value(
     }
 
     let asset_index = nft_state.asset_index.get();
+    let (expected_pda, _) = crate::state_v16::position_nft_pda(
+        portfolio.key,
+        asset_index as u16,
+        program_id,
+    );
+    if *nft_pda.key != expected_pda {
+        return Err(NftError::InvalidNftPda.into());
+    }
     drop(pda_data);
 
     // ── Decode portfolio ──
     let portfolio_data = portfolio.try_borrow_data()?;
     let p = slab_types_v16::decode_portfolio(&portfolio_data)
         .map_err(cpi_v16::map_decode_err)?;
+    if p.provenance_header.portfolio_account_id != portfolio.key.to_bytes() {
+        msg!("GetPositionValue: portfolio account ID does not match provenance header");
+        return Err(ProgramError::InvalidAccountData);
+    }
 
     // ── Find active leg for the bound asset_index ──
     match p.active_leg_slot_for_asset(asset_index) {
@@ -99,7 +111,7 @@ pub fn process_get_position_value(
                     nft_market_id,
                     leg.market_id.get()
                 );
-                return Ok(());
+                return Err(NftError::InvalidNftPda.into());
             }
 
             msg!("POSITION_VALUE_V16:portfolio={}", portfolio.key);

@@ -194,6 +194,10 @@ fn process_mint_position_nft(
     let portfolio_data = portfolio.try_borrow_data()?;
     let p =
         slab_types_v16::decode_portfolio(&portfolio_data).map_err(cpi_v16::map_decode_err)?;
+    if p.provenance_header.portfolio_account_id != portfolio.key.to_bytes() {
+        msg!("MintPositionNft: portfolio account ID does not match provenance header");
+        return Err(ProgramError::InvalidAccountData);
+    }
 
     let slot = cpi_v16::mint_leg_slot(p, &owner.key.to_bytes(), asset_index as u32)
         .map_err(ProgramError::from)?;
@@ -294,15 +298,22 @@ fn process_mint_position_nft(
         &[bump],
     ];
 
+    let current_lamports = nft_pda.lamports();
+    if current_lamports < lamports {
+        let shortfall = lamports - current_lamports;
+        invoke(
+            &system_instruction::transfer(owner.key, nft_pda.key, shortfall),
+            &[owner.clone(), nft_pda.clone(), system_program.clone()],
+        )?;
+    }
     invoke_signed(
-        &system_instruction::create_account(
-            owner.key,
-            nft_pda.key,
-            lamports,
-            POSITION_NFT_V16_LEN as u64,
-            program_id,
-        ),
-        &[owner.clone(), nft_pda.clone(), system_program.clone()],
+        &system_instruction::allocate(nft_pda.key, POSITION_NFT_V16_LEN as u64),
+        &[nft_pda.clone(), system_program.clone()],
+        &[pda_seeds],
+    )?;
+    invoke_signed(
+        &system_instruction::assign(nft_pda.key, program_id),
+        &[nft_pda.clone(), system_program.clone()],
         &[pda_seeds],
     )?;
 
@@ -351,7 +362,7 @@ fn process_mint_position_nft(
             owner.key,
             nft_mint.key,
             mint_rent,
-            mint_space,
+            final_size as u64,
             &token2022::TOKEN_2022_PROGRAM_ID,
         ),
         &[owner.clone(), nft_mint.clone(), system_program.clone()],
@@ -673,6 +684,10 @@ fn process_burn_position_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
         let portfolio_data = portfolio.try_borrow_data()?;
         let p = slab_types_v16::decode_portfolio(&portfolio_data)
             .map_err(cpi_v16::map_decode_err)?;
+        if p.provenance_header.portfolio_account_id != portfolio.key.to_bytes() {
+            msg!("BurnPositionNft: portfolio account ID does not match provenance header");
+            return Err(ProgramError::InvalidAccountData);
+        }
         let _slot = cpi_v16::verify_bound_leg(p, &nft_state_copy)
             .map_err(ProgramError::from)?;
     }
@@ -813,13 +828,25 @@ fn process_emergency_burn(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
     }
 
     // ── Check emergency burn eligibility (position flat / no active leg) ──
-    cpi_v16::verify_portfolio_program(portfolio)?;
-    {
-        let portfolio_data = portfolio.try_borrow_data()?;
-        let p = slab_types_v16::decode_portfolio(&portfolio_data)
-            .map_err(cpi_v16::map_decode_err)?;
-        cpi_v16::emergency_burn_ok(p, &nft_state_copy)
-            .map_err(ProgramError::from)?;
+    let mut eligible = false;
+    if cpi_v16::verify_portfolio_program(portfolio).is_err() {
+        eligible = true;
+    } else if let Ok(portfolio_data) = portfolio.try_borrow_data() {
+        if let Ok(p) = slab_types_v16::decode_portfolio(&portfolio_data) {
+            if p.provenance_header.portfolio_account_id != portfolio.key.to_bytes() {
+                eligible = true;
+            } else if cpi_v16::emergency_burn_ok(p, &nft_state_copy).is_ok() {
+                eligible = true;
+            }
+        } else {
+            eligible = true;
+        }
+    } else {
+        eligible = true;
+    }
+
+    if !eligible {
+        return Err(NftError::PositionNotClosed.into());
     }
 
     // ── Verify holder owns the NFT via the canonical Token-2022 ATA ──
@@ -902,6 +929,10 @@ fn process_settle_funding(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
         return Err(ProgramError::IllegalOwner);
     }
 
+    if !nft_pda.is_writable {
+        return Err(ProgramError::InvalidAccountData);
+    }
+
     cpi_v16::verify_portfolio_program(portfolio)?;
 
     let mut pda_data = nft_pda.try_borrow_mut_data()?;
@@ -935,6 +966,10 @@ fn process_settle_funding(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
     let portfolio_data = portfolio.try_borrow_data()?;
     let p = slab_types_v16::decode_portfolio(&portfolio_data)
         .map_err(cpi_v16::map_decode_err)?;
+    if p.provenance_header.portfolio_account_id != portfolio.key.to_bytes() {
+        msg!("SettleFunding: portfolio account ID does not match provenance header");
+        return Err(ProgramError::InvalidAccountData);
+    }
     let slot = cpi_v16::verify_bound_leg(p, &nft_state_copy)
         .map_err(ProgramError::from)?;
 

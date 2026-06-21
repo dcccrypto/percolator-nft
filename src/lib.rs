@@ -5,6 +5,7 @@
 #![allow(unexpected_cfgs)]
 
 pub mod cpi_v16;
+#[cfg(not(feature = "no-entrypoint"))]
 pub mod entrypoint;
 pub mod error;
 pub mod instruction;

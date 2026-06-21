@@ -39,9 +39,10 @@ pub const TAG_MINT_POSITION_NFT: u8 = 0;
 ///   1. `[writable]`  PositionNft PDA (closed, rent returned)
 ///   2. `[writable]`  NFT mint (supply → 0)
 ///   3. `[writable]`  Holder's NFT token account (closed)
-///   4. `[]`          Slab account (verify position)
+///   4. `[]`          Portfolio account (verify position)
 ///   5. `[]`          Mint authority PDA
 ///   6. `[]`          Token-2022 program
+///   7. `[writable]`  ExtraAccountMetaList PDA (closed, rent returned)
 ///
 /// Data: tag(1)
 pub const TAG_BURN_POSITION_NFT: u8 = 1;
@@ -54,19 +55,19 @@ pub const TAG_BURN_POSITION_NFT: u8 = 1;
 /// Accounts:
 ///   0. `[signer]`    NFT holder (must own the NFT via ATA)
 ///   1. `[writable]`  PositionNft PDA
-///   2. `[]`          Slab account (read current funding index)
+///   2. `[]`          Portfolio account (read current funding index)
 ///   3. `[]`          Holder's ATA (proves NFT ownership; balance must be 1)
 ///
 /// Data: tag(1)
 pub const TAG_SETTLE_FUNDING: u8 = 2;
 
 /// Tag 3: GetPositionValue
-/// Read-only valuation for marketplaces and lending protocols.
-/// Returns position value data via transaction logs.
+/// Read-only valuation diagnostics for marketplaces and lending protocols.
+/// Emits raw leg/valuation fields via transaction logs; does not return a value via CPI.
 ///
 /// Accounts:
 ///   0. `[]`  PositionNft PDA
-///   1. `[]`  Slab account
+///   1. `[]`  Portfolio account
 ///
 /// Data: tag(1)
 pub const TAG_GET_POSITION_VALUE: u8 = 3;
@@ -87,9 +88,10 @@ pub const TAG_EXECUTE_TRANSFER_HOOK: u8 = 4;
 ///   1. `[writable]`  PositionNft PDA (closed, rent returned)
 ///   2. `[writable]`  NFT mint (supply → 0)
 ///   3. `[writable]`  Holder's NFT token account (closed)
-///   4. `[]`          Slab account (verify liquidation)
+///   4. `[]`          Portfolio account (verify liquidation)
 ///   5. `[]`          Mint authority PDA
 ///   6. `[]`          Token-2022 program
+///   7. `[writable]`  ExtraAccountMetaList PDA (closed, rent returned)
 ///
 /// Data: tag(1)
 pub const TAG_EMERGENCY_BURN: u8 = 5;
@@ -98,18 +100,18 @@ pub const TAG_EMERGENCY_BURN: u8 = 5;
 ///
 /// Rewrite the ExtraAccountMetaList PDA data for an existing NFT mint so
 /// its flags match the current processor's `build_extra_account_metas`
-/// output — most importantly, marking the slab account writable.
+/// output — most importantly, marking the portfolio account writable.
 ///
-/// Historical mints produced an ExtraAccountMetaList where the slab was
+/// Historical mints produced an ExtraAccountMetaList where the portfolio was
 /// declared read-only. That was wrong — the transfer hook CPIs into
-/// percolator-prog with `TransferOwnershipCpi` (tag 69), which mutates
-/// `Account.owner` in the slab. Without slab writable, the CPI fails with
+/// percolator-prog with `TransferPortfolioOwnership` (tag 72), which mutates
+/// `owner` in the portfolio. Without portfolio writable, the CPI fails with
 /// `writable privilege escalated` and every transfer bounces. Burn + remint
 /// is not a workaround: burn requires the position already be closed.
 ///
 /// Permissionless by design. The only data written to the PDA is
 /// deterministic from the on-chain state of `nft_mint` + its `nft_pda`
-/// (slab, user_idx, percolator_prog_id). A caller cannot use this to forge
+/// (portfolio, asset_index, percolator_prog_id). A caller cannot use this to forge
 /// anything — at worst they pay the tx fee to reset the PDA to its correct
 /// shape. No rent change (account is pre-sized by MintPositionNft).
 ///
@@ -122,9 +124,9 @@ pub const TAG_EMERGENCY_BURN: u8 = 5;
 ///      seeds: `[b"extra-account-metas", nft_mint]`
 ///   2. `[]`                  NFT mint (PDA seed input, no reads)
 ///   3. `[]`                  PositionNft PDA;
-///      seeds: `[b"position_nft", slab, user_idx LE]`;
-///      read for user_idx + slab + nft_mint verification.
-///   4. `[]`                  Slab account (provides slab.key + percolator_prog_id)
+///      seeds: `[b"position_nft", portfolio, asset_index LE]`;
+///      read for asset_index + portfolio + nft_mint verification.
+///   4. `[]`                  Portfolio account (provides portfolio.key + percolator_prog_id)
 ///   5. `[]`                  Mint authority PDA — entry #8 in the rewritten list
 ///   6. `[]`                  System program (rent top-up CPI)
 ///
@@ -135,6 +137,7 @@ pub const TAG_REPAIR_EXTRA_METAS: u8 = 6;
 pub enum NftInstruction {
     /// Mint an NFT for a position. `asset_index` identifies the portfolio leg
     /// (matched against `legs[].asset_index`), not an array slot.
+    /// Note: asset_index is u16 (max 65535) due to tag-specific layout constraints.
     MintPositionNft { asset_index: u16 },
     /// Burn an NFT, releasing the position.
     BurnPositionNft,

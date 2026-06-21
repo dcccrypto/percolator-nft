@@ -23,19 +23,29 @@ percolator-nft (this program)
 | Tag | Name | Description |
 |-----|------|-------------|
 | 0 | `MintPositionNft` | Mint an NFT for an open position (caller must own the position) |
-| 1 | `BurnPositionNft` | Burn the NFT, release position back to direct ownership |
-| 2 | `SettleFunding` | Permissionless crank — update funding index before transfer |
-| 3 | `EmergencyBurn` | Admin-only emergency burn of a position NFT |
-| 4 | `GetPositionValue` | Read-only CPI: returns current position value at oracle price |
+| 1 | `BurnPositionNft` | Burn the NFT, release position back to direct ownership (requires portfolio verification) |
+| 2 | `SettleFunding` | Holder-only crank — update funding index snapshot `f_snap_at_mint` |
+| 3 | `GetPositionValue` | Read-only valuation diagnostics (emits raw leg/valuation fields via transaction logs; for use with simulateTransaction) |
+| 4 | `ExecuteTransferHook` | SPL TransferHook interface execute (called by Token-2022 automatically on transfer) |
+| 5 | `EmergencyBurn` | Holder-only emergency burn for flat or liquidated positions (allows cleanup if portfolio is missing or corrupt) |
+| 6 | `RepairExtraMetas` | Permissionless rewrite of the `ExtraAccountMetaList` PDA to fix historical layout issues |
 
 ## PDA Seeds
 
-- **PositionNft**: `["position_nft", slab_pubkey, user_idx_le_bytes]`
+- **PositionNft**: `["position_nft", portfolio_pubkey, asset_index_le_bytes]` (where `asset_index` is `u16` little-endian, max 65535)
 - **MintAuthority**: `["mint_authority"]` (program-wide, signs all mint operations)
+- **ExtraAccountMetaList**: `["extra-account-metas", nft_mint]` (stores extra accounts required for TransferHook)
 
-## v12.17 Layout Support
+## Custody and Security
 
-The NFT program mirrors the v12.17 slab layout to read position state directly without CPI. The `small`, `medium`, and default (large) feature flags must match the feature used to build the deployed percolator-prog binary so that struct offsets align correctly.
+- **Custody Model**: Minting binds the NFT to the portfolio position, but ownership reassignment to the buyer's wallet occurs dynamically during the TransferHook execution (at NFT transfer time).
+- **Freeze Authority**: The freeze authority is set to the program's mint authority PDA as a latent security control. It enables emergency freezes in future program upgrades if a vulnerability is discovered.
+- **no-entrypoint Feature**: Program entrypoint is gated behind a `no-entrypoint` feature for library-style composition.
+
+
+## v17 Layout Support
+
+The NFT program mirrors the converged v17 portfolio layout (`PortfolioAccountV16Account`, 9227 bytes) to read position state directly without CPI. Struct offsets are validated at compile-time with size and offset assertions.
 
 ## Transfer Hook
 

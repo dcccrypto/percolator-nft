@@ -246,6 +246,13 @@ pub fn process_execute(
     let nft_program_self = next_account_info(accounts_iter)?; // 10: NFT program (self)
     let nft_registry = next_account_info(accounts_iter)?;     // 11: Per-market NFT registry PDA
 
+    if !nft_pda.is_writable {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    if !portfolio.is_writable {
+        return Err(ProgramError::InvalidAccountData);
+    }
+
     // ────────────────────────────────────────────────────────────────────
     // SECURITY: Instructions sysvar key check.
     // Any attacker that can spoof this can bypass verify_cpi_caller_is_token2022.
@@ -340,6 +347,12 @@ pub fn process_execute(
         new_owner = Pubkey::new_from_array(dst_data[32..64].try_into().unwrap());
     }
 
+    let expected_dest_ata = token2022::get_associated_token_address(&new_owner, mint.key);
+    if *dest_ata.key != expected_dest_ata {
+        msg!("Transfer rejected: destination token account must be the canonical ATA");
+        return Err(NftError::InvalidTokenAccount.into());
+    }
+
     // ────────────────────────────────────────────────────────────────────
     // MANDATORY GUARD: verify CPI caller is Token-2022.
     //
@@ -425,6 +438,10 @@ pub fn process_execute(
     {
         let portfolio_data = portfolio.try_borrow_data()?;
         let p = slab_types_v16::decode_portfolio(&portfolio_data).map_err(map_decode_err)?;
+        if p.provenance_header.portfolio_account_id != portfolio.key.to_bytes() {
+            msg!("TransferHook: portfolio account ID does not match provenance header");
+            return Err(ProgramError::InvalidAccountData);
+        }
 
         market_group = Pubkey::new_from_array(p.provenance_header.market_group_id);
 
