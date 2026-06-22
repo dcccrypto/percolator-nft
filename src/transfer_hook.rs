@@ -225,24 +225,27 @@ pub fn process_execute(
     // amount != 1 to prevent unexpected behavior if Token-2022 ever changes
     // semantics or if the hook is called directly (outside Token-2022 CPI).
     if amount != 1 {
-        msg!("Transfer rejected: expected amount=1 for NFT, got {}", amount);
+        msg!(
+            "Transfer rejected: expected amount=1 for NFT, got {}",
+            amount
+        );
         return Err(ProgramError::InvalidInstructionData);
     }
 
     let accounts_iter = &mut accounts.iter();
 
-    let source_ata = next_account_info(accounts_iter)?;       // 0: source ATA
-    let mint = next_account_info(accounts_iter)?;             // 1: NFT mint
-    let dest_ata = next_account_info(accounts_iter)?;         // 2: destination ATA
+    let source_ata = next_account_info(accounts_iter)?; // 0: source ATA
+    let mint = next_account_info(accounts_iter)?; // 1: NFT mint
+    let dest_ata = next_account_info(accounts_iter)?; // 2: destination ATA
     let _source_authority = next_account_info(accounts_iter)?; // 3: source authority (unused per spec)
-    let extra_metas = next_account_info(accounts_iter)?;      // 4: ExtraAccountMetaList PDA
-    let nft_pda = next_account_info(accounts_iter)?;          // 5: PositionNft PDA (writable)
-    let portfolio = next_account_info(accounts_iter)?;        // 6: Portfolio account (writable)
-    let percolator_prog = next_account_info(accounts_iter)?;  // 7: Percolator program
-    let mint_auth = next_account_info(accounts_iter)?;        // 8: Mint authority PDA
-    let sysvar_ix = next_account_info(accounts_iter)?;        // 9: Instructions sysvar
+    let extra_metas = next_account_info(accounts_iter)?; // 4: ExtraAccountMetaList PDA
+    let nft_pda = next_account_info(accounts_iter)?; // 5: PositionNft PDA (writable)
+    let portfolio = next_account_info(accounts_iter)?; // 6: Portfolio account (writable)
+    let percolator_prog = next_account_info(accounts_iter)?; // 7: Percolator program
+    let mint_auth = next_account_info(accounts_iter)?; // 8: Mint authority PDA
+    let sysvar_ix = next_account_info(accounts_iter)?; // 9: Instructions sysvar
     let nft_program_self = next_account_info(accounts_iter)?; // 10: NFT program (self)
-    let nft_registry = next_account_info(accounts_iter)?;     // 11: Per-market NFT registry PDA
+    let nft_registry = next_account_info(accounts_iter)?; // 11: Per-market NFT registry PDA
 
     // ────────────────────────────────────────────────────────────────────
     // SECURITY: Instructions sysvar key check.
@@ -338,6 +341,12 @@ pub fn process_execute(
         new_owner = Pubkey::new_from_array(dst_data[32..64].try_into().unwrap());
     }
 
+    let expected_dest_ata = token2022::get_associated_token_address(&new_owner, mint.key);
+    if *dest_ata.key != expected_dest_ata {
+        msg!("Transfer rejected: destination token account is not the recipient canonical ATA");
+        return Err(NftError::InvalidTokenAccount.into());
+    }
+
     // ────────────────────────────────────────────────────────────────────
     // MANDATORY GUARD: verify CPI caller is Token-2022.
     //
@@ -381,8 +390,7 @@ pub fn process_execute(
         if pda_data.len() < POSITION_NFT_V16_LEN {
             return Err(ProgramError::InvalidAccountData);
         }
-        let nft_state =
-            bytemuck::from_bytes::<PositionNftV16>(&pda_data[..POSITION_NFT_V16_LEN]);
+        let nft_state = bytemuck::from_bytes::<PositionNftV16>(&pda_data[..POSITION_NFT_V16_LEN]);
         verify_position_nft(nft_state)?;
 
         // Verify the PDA's recorded mint matches the mint account.
@@ -404,8 +412,7 @@ pub fn process_execute(
         // Verify the PDA address against canonical derivation (#108: market_id).
         // Without this, any program-owned account with matching magic/mint/portfolio
         // fields could be substituted.
-        let (expected_pda, _) =
-            position_nft_pda(portfolio.key, market_id_at_mint, program_id);
+        let (expected_pda, _) = position_nft_pda(portfolio.key, market_id_at_mint, program_id);
         if *nft_pda.key != expected_pda {
             msg!("Transfer rejected: PDA address does not match expected derivation");
             return Err(NftError::InvalidNftPda.into());
