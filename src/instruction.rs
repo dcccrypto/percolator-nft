@@ -169,9 +169,12 @@ impl NftInstruction {
     /// Decode instruction data.
     pub fn unpack(data: &[u8]) -> Result<Self, ProgramError> {
         // Check for TransferHook Execute discriminator first (8 bytes).
-        if data.len() >= 16 {
+        if data.len() >= 8 {
             let disc = &data[..8];
             if disc == crate::transfer_hook::EXECUTE_DISCRIMINATOR {
+                if data.len() != 16 {
+                    return Err(ProgramError::InvalidInstructionData);
+                }
                 let amount = u64::from_le_bytes(data[8..16].try_into().unwrap());
                 return Ok(NftInstruction::ExecuteTransferHook { amount });
             }
@@ -261,6 +264,49 @@ mod tests {
                 tag
             );
         }
+    }
+
+    #[test]
+    fn transfer_hook_execute_accepts_exact_payload() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&crate::transfer_hook::EXECUTE_DISCRIMINATOR);
+        data.extend_from_slice(&1u64.to_le_bytes());
+
+        let result = NftInstruction::unpack(&data);
+
+        assert!(
+            matches!(result, Ok(NftInstruction::ExecuteTransferHook { amount: 1 })),
+            "TransferHook Execute should accept exactly 16 bytes"
+        );
+    }
+
+    #[test]
+    fn transfer_hook_execute_rejects_trailing_bytes() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&crate::transfer_hook::EXECUTE_DISCRIMINATOR);
+        data.extend_from_slice(&1u64.to_le_bytes());
+        data.extend_from_slice(&[99, 100]);
+
+        let result = NftInstruction::unpack(&data);
+
+        assert!(
+            matches!(result, Err(ProgramError::InvalidInstructionData)),
+            "TransferHook Execute should reject trailing bytes"
+        );
+    }
+
+    #[test]
+    fn transfer_hook_execute_rejects_short_payload() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&crate::transfer_hook::EXECUTE_DISCRIMINATOR);
+        data.extend_from_slice(&[1, 0, 0, 0]);
+
+        let result = NftInstruction::unpack(&data);
+
+        assert!(
+            matches!(result, Err(ProgramError::InvalidInstructionData)),
+            "TransferHook Execute should reject payloads shorter than 16 bytes"
+        );
     }
 
     #[test]
