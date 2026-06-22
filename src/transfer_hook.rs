@@ -600,12 +600,19 @@ pub fn process_execute(
         &[mint_auth_seeds],
     )?;
 
-    // ── 4. Write updated funding index to PDA (after CPI completes) ──
+    // ── 4. Write updated funding index + new owner to PDA (after CPI completes) ──
+    // PERC-N1 fix: BurnPositionNft and SettleFunding both compare
+    // `position.owner` (slab, updated by TransferOwnershipCpi above) against
+    // `nft_state.position_owner` (PDA, set at mint time) to detect slot reuse.
+    // Without updating position_owner here, that comparison always mismatches
+    // after a legitimate transfer, permanently locking the NFT out of both
+    // BurnPositionNft (rent stuck) and SettleFunding (funding unclaimable).
     {
         let mut pda_data = nft_pda.try_borrow_mut_data()?;
         let nft_state =
             bytemuck::from_bytes_mut::<PositionNft>(&mut pda_data[..POSITION_NFT_LEN]);
         nft_state.last_funding_index_e18 = new_funding;
+        nft_state.position_owner = dest_wallet_pk.to_bytes();
     }
 
     msg!(
