@@ -23,9 +23,11 @@
 //!    then `transfer_gate_check` (flags). Both must pass; either Err → reject.
 //!    Replaces v12's `is_position_healthy` margin check — v16 uses flag-based
 //!    gating, not live margin math at transfer time.
-//! 8. CPIs to the wrapper's B-3 `TransferPortfolioOwnership` (tag 72) with
-//!    `mint_auth` as the PDA signer, passing `new_owner` and `asset_index`.
-//! 9. Optionally refreshes `nft_state.f_snap_at_mint` to the current leg value.
+//! 8. Does NOT reassign portfolio ownership (#105 escrow-at-mint): the position
+//!    is owned by this NFT program's mint-authority PDA for its entire wrapped
+//!    life — set once at mint (MintPositionNft → B-3) and released only at burn
+//!    (Burn/EmergencyBurn → UnwrapEscrowedPortfolio tag 82). A transfer moves
+//!    only the bearer token; the hook is validation/gating only.
 
 extern crate alloc;
 

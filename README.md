@@ -97,9 +97,13 @@ compile-time with size and offset assertions.
 
 ## Transfer Hook
 
-The transfer hook verifies the transfer at NFT transfer time. It CPIs into
-the percolator wrapper via `TransferPortfolioOwnership` (tag 72) to reassign the
-portfolio's owner to the buyer's wallet. The destination must be the canonical ATA.
+The transfer hook validates the transfer at NFT transfer time (Token-2022-caller
+check, bound-leg / market_id slot-reuse guard, transfer gate, registry check). It
+does **not** reassign portfolio ownership: under the escrow-at-mint model (#105)
+the position is owned by this NFT program's mint-authority PDA for its entire
+wrapped life — escrow is set once at mint (via the wrapper's `TransferPortfolioOwnership`
+tag 72) and released only at burn (via `UnwrapEscrowedPortfolio` tag 82). An NFT
+transfer moves only the bearer token; the underlying position stays escrowed.
 
 ## Build and Test
 
