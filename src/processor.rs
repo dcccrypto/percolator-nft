@@ -719,6 +719,7 @@ fn process_mint_position_nft(
 // it is drained directly (same lamport-transfer pattern as the PositionNft PDA
 // close); no signer/CPI is needed. Idempotent: if the account was never created
 // or is already closed, it is skipped so the burn never fails on it.
+/// Ensures the burn rent recipient can receive returned lamports.
 fn require_writable_rent_recipient(holder: &AccountInfo) -> ProgramResult {
     if !holder.is_writable {
          return Err(ProgramError::InvalidAccountData);
@@ -1430,8 +1431,13 @@ mod registry_validation_tests {
 
 #[cfg(test)]
 mod burn_rent_recipient_writable_tests {
-    use super::*;
-    use solana_program::account_info::AccountInfo;
+    use super::close_extra_metas;
+    use crate::transfer_hook::extra_account_metas_pda;
+    use solana_program::{
+        account_info::AccountInfo,
+        program_error::ProgramError,
+        pubkey::Pubkey
+    };    
 
     #[test]
     fn close_extra_metas_rejects_non_writable_holder_before_lamport_mutation() {
@@ -1472,10 +1478,10 @@ mod burn_rent_recipient_writable_tests {
 
         let result = close_extra_metas(&program_id, &extra_metas, &nft_mint, &holder);
 
-        assert!(
-            result.is_err(),
-            "close_extra_metas should reject a non-writable holder before returning rent"
-        );
+        assert_eq!(result, Err(ProgramError::InvalidAccountData));
+        assert_eq!(holder.lamports(), 10);
+        assert_eq!(extra_metas.lamports(), 5);
+        assert!(extra_metas.data.borrow().iter().all(|byte| *byte == 1));
     }
 
     #[test]
@@ -1545,10 +1551,8 @@ fn rent_recipient_guard_rejects_non_writable_holder() {
 
     let result = require_writable_rent_recipient(&holder);
 
-    assert!(
-        result.is_err(),
-        "rent recipient guard should reject non-writable holder"
-    );
+    assert_eq!(result, Err(ProgramError::InvalidAccountData));
+    assert_eq!(holder.lamports(), 10);
 }
 
 #[test]
@@ -1562,7 +1566,7 @@ fn rent_recipient_guard_accepts_writable_holder() {
     let holder = AccountInfo::new(
         &holder_key,
         true,
-        true, // writable
+        true, // writable rent recipient
         &mut holder_lamports,
         &mut holder_data,
         &system_program_id,
