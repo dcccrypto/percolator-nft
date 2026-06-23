@@ -736,6 +736,14 @@ fn process_mint_position_nft(
 // it is drained directly (same lamport-transfer pattern as the PositionNft PDA
 // close); no signer/CPI is needed. Idempotent: if the account was never created
 // or is already closed, it is skipped so the burn never fails on it.
+/// Ensures the burn rent recipient can receive returned lamports.
+fn require_writable_rent_recipient(holder: &AccountInfo) -> ProgramResult {
+    if !holder.is_writable {
+         return Err(ProgramError::InvalidAccountData);
+    }
+    Ok(())
+}
+
 fn close_extra_metas(
     program_id: &Pubkey,
     extra_metas: &AccountInfo,
@@ -754,6 +762,9 @@ fn close_extra_metas(
     if !extra_metas.is_writable {
         return Err(ProgramError::InvalidAccountData);
     }
+
+    require_writable_rent_recipient(holder)?;
+    
     let dest = holder.lamports();
     let amt = extra_metas.lamports();
     **holder.try_borrow_mut_lamports()? = dest
@@ -785,6 +796,8 @@ fn process_burn_position_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
     if !holder.is_signer {
         return Err(ProgramError::MissingRequiredSignature);
     }
+
+    require_writable_rent_recipient(holder)?;
 
     if !nft_pda.is_writable {
         return Err(ProgramError::InvalidAccountData);
@@ -951,6 +964,8 @@ fn process_emergency_burn(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
     if !holder.is_signer {
         return Err(ProgramError::MissingRequiredSignature);
     }
+
+    require_writable_rent_recipient(holder)?;
 
     if !portfolio.is_writable {
         return Err(ProgramError::InvalidAccountData);
@@ -1558,5 +1573,157 @@ mod registry_validation_tests {
         let me = Pubkey::new_from_array([5u8; 32]);
         assert!(!registry_registers_program(&[0u8; NFT_REGISTRY_ACCOUNT_LEN], &me));
     }
+}
+
+#[cfg(test)]
+mod burn_rent_recipient_writable_tests {
+    use super::close_extra_metas;
+    use crate::transfer_hook::extra_account_metas_pda;
+    use solana_program::{
+        account_info::AccountInfo,
+        program_error::ProgramError,
+        pubkey::Pubkey
+    };    
+
+    #[test]
+    fn close_extra_metas_rejects_non_writable_holder_before_lamport_mutation() {
+        let program_id = Pubkey::new_from_array([9u8; 32]);
+        let holder_key = Pubkey::new_from_array([1u8; 32]);
+        let nft_mint = Pubkey::new_from_array([2u8; 32]);
+        let system_program_id = solana_program::system_program::id();
+
+        let (extra_metas_key, _) = extra_account_metas_pda(&nft_mint, &program_id);
+
+        let mut holder_lamports = 10u64;
+        let mut extra_metas_lamports = 5u64;
+
+        let mut holder_data = vec![];
+        let mut extra_metas_data = vec![1u8; 16];
+
+        let holder = AccountInfo::new(
+            &holder_key,
+            true,
+            false, // intentionally NOT writable
+            &mut holder_lamports,
+            &mut holder_data,
+            &system_program_id,
+            false,
+            0,
+        );
+
+        let extra_metas = AccountInfo::new(
+            &extra_metas_key,
+            false,
+            true,
+            &mut extra_metas_lamports,
+            &mut extra_metas_data,
+            &program_id,
+            false,
+            0,
+        );
+
+        let result = close_extra_metas(&program_id, &extra_metas, &nft_mint, &holder);
+
+        assert_eq!(result, Err(ProgramError::InvalidAccountData));
+        assert_eq!(holder.lamports(), 10);
+        assert_eq!(extra_metas.lamports(), 5);
+        assert!(extra_metas.data.borrow().iter().all(|byte| *byte == 1));
+    }
+
+    #[test]
+    fn close_extra_metas_allows_writable_holder_rent_return() {
+        let program_id = Pubkey::new_from_array([9u8; 32]);
+        let holder_key = Pubkey::new_from_array([1u8; 32]);
+        let nft_mint = Pubkey::new_from_array([2u8; 32]);
+        let system_program_id = solana_program::system_program::id();
+
+        let (extra_metas_key, _) = extra_account_metas_pda(&nft_mint, &program_id);
+
+        let mut holder_lamports = 10u64;
+        let mut extra_metas_lamports = 5u64;
+
+        let mut holder_data = vec![];
+        let mut extra_metas_data = vec![1u8; 16];
+
+        let holder = AccountInfo::new(
+            &holder_key,
+            true,
+            true, // writable rent recipient
+            &mut holder_lamports,
+            &mut holder_data,
+            &system_program_id,
+            false,
+            0,
+        );
+
+        let extra_metas = AccountInfo::new(
+            &extra_metas_key,
+            false,
+            true,
+            &mut extra_metas_lamports,
+            &mut extra_metas_data,
+            &program_id,
+            false,
+            0,
+        );
+
+        let result = close_extra_metas(&program_id, &extra_metas, &nft_mint, &holder);
+
+        assert!(result.is_ok());
+        assert_eq!(holder.lamports(), 15);
+        assert_eq!(extra_metas.lamports(), 0);
+        assert!(extra_metas.data.borrow().iter().all(|byte| *byte == 0));
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn rent_recipient_guard_rejects_non_writable_holder() {
+    let holder_key = Pubkey::new_from_array([1u8; 32]);
+    let system_program_id = solana_program::system_program::id();
+
+    let mut holder_lamports = 10u64;
+    let mut holder_data = vec![];
+
+    let holder = AccountInfo::new(
+        &holder_key,
+        true,
+        false, // intentionally NOT writable
+        &mut holder_lamports,
+        &mut holder_data,
+        &system_program_id,
+        false,
+        0,
+    );
+
+    let result = require_writable_rent_recipient(&holder);
+
+    assert_eq!(result, Err(ProgramError::InvalidAccountData));
+    assert_eq!(holder.lamports(), 10);
+}
+
+#[cfg(test)]
+#[test]
+fn rent_recipient_guard_accepts_writable_holder() {
+    let holder_key = Pubkey::new_from_array([1u8; 32]);
+    let system_program_id = solana_program::system_program::id();
+
+    let mut holder_lamports = 10u64;
+    let mut holder_data = vec![];
+
+    let holder = AccountInfo::new(
+        &holder_key,
+        true,
+        true, // writable rent recipient
+        &mut holder_lamports,
+        &mut holder_data,
+        &system_program_id,
+        false,
+        0,
+    );
+
+    let result = require_writable_rent_recipient(&holder);
+
+    assert!(result.is_ok());
 }
 
