@@ -474,6 +474,18 @@ pub fn process_execute(
     // no longer forwarded into one.
     let _ = nft_program_self;
 
+    // #138: record the new holder so an out-of-band Token-2022 Burn (which skips
+    // BurnPositionNft and leaves the escrow unreleased) can be reconciled — the
+    // stranded position is released back to this last holder by ReconcileBurnedNft.
+    // Local program-owned-account write (nft_pda is writable per the
+    // ExtraAccountMetaList); no CPI.
+    {
+        let mut pda_data = nft_pda.try_borrow_mut_data()?;
+        let nft_state =
+            bytemuck::from_bytes_mut::<PositionNftV16>(&mut pda_data[..POSITION_NFT_V16_LEN]);
+        nft_state.last_holder = new_owner.to_bytes();
+    }
+
     msg!(
         "Position NFT transferred (position remains escrowed): portfolio={}, asset_index={}, new_holder={}",
         portfolio.key,
