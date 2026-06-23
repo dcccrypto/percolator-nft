@@ -117,14 +117,20 @@ fn verify_cpi_caller_is_token2022(
     let current_ix =
         sysvar_instructions::load_instruction_at_checked(current_ix_idx as usize, sysvar_ix)?;
 
-    // The outer instruction must be from Token-2022.
+    // #145 (composability): when the top-level instruction is NOT Token-2022, the
+    // transfer was initiated by another program via CPI — e.g. an NFT marketplace
+    // or the position orderbook moving the NFT on a match. Allow it. This is safe
+    // because (a) post-#105 the transfer hook is VALIDATION-ONLY (it reassigns no
+    // ownership — there is no state to forge by invoking Execute), and (b) the main
+    // hook flow independently verifies the transfer is for the bound mint via the
+    // Execute `mint` account (`nft_state.nft_mint == mint.key`). Requiring the
+    // top-level instruction to be Token-2022 would block every program-escrow
+    // marketplace/orderbook transfer — the core of the composability goal.
     if current_ix.program_id != token2022::TOKEN_2022_PROGRAM_ID {
-        msg!(
-            "Transfer rejected: outer instruction program {} is not Token-2022",
-            current_ix.program_id
-        );
-        return Err(NftError::UnauthorizedDirectInvocation.into());
+        return Ok(());
     }
+    // Top-level IS Token-2022 (a direct wallet→wallet transfer): keep the strict
+    // instruction-type + mint-match validation below (incl. #103 plain-Transfer reject).
 
     // Verify the outer instruction is Transfer (tag 3) or TransferChecked (tag 12).
     // Both are valid Token-2022 instructions that trigger the transfer hook.
@@ -467,6 +473,18 @@ pub fn process_execute(
     // above (defense-in-depth) but no longer drive a CPI; `nft_program_self` is
     // no longer forwarded into one.
     let _ = nft_program_self;
+
+    // #138: record the new holder so an out-of-band Token-2022 Burn (which skips
+    // BurnPositionNft and leaves the escrow unreleased) can be reconciled — the
+    // stranded position is released back to this last holder by ReconcileBurnedNft.
+    // Local program-owned-account write (nft_pda is writable per the
+    // ExtraAccountMetaList); no CPI.
+    {
+        let mut pda_data = nft_pda.try_borrow_mut_data()?;
+        let nft_state =
+            bytemuck::from_bytes_mut::<PositionNftV16>(&mut pda_data[..POSITION_NFT_V16_LEN]);
+        nft_state.last_holder = new_owner.to_bytes();
+    }
 
     msg!(
         "Position NFT transferred (position remains escrowed): portfolio={}, asset_index={}, new_holder={}",

@@ -146,6 +146,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         }
         NftInstruction::EmergencyBurn => process_emergency_burn(program_id, accounts),
         NftInstruction::RepairExtraMetas => process_repair_extra_metas(program_id, accounts),
+        NftInstruction::ReconcileBurnedNft => process_reconcile_burned_nft(program_id, accounts),
     }
 }
 
@@ -317,6 +318,21 @@ fn process_mint_position_nft(
     // is blocked); the escrow CPI remains the authoritative final check.
     cpi_v16::transfer_gate_check(p, asset_index as u32).map_err(ProgramError::from)?;
 
+    // #137: only single-position portfolios are wrappable. Escrow-at-mint binds the
+    // ENTIRE portfolio to this one NFT, so minting one leg of a multi-leg
+    // (cross-margin) portfolio would convey the other, un-tokenized legs on sale —
+    // the NFT would represent more than its named position. Require exactly one
+    // active leg so "1 NFT = 1 position" holds. (Cross-margin baskets are simply
+    // not NFT-wrappable; wrap individual positions instead.)
+    let active_legs = p.legs.iter().filter(|l| l.active != 0).count();
+    if active_legs != 1 {
+        msg!(
+            "MintPositionNft rejected: portfolio has {} active legs — only single-position portfolios are wrappable (#137)",
+            active_legs
+        );
+        return Err(NftError::MultiLegNotWrappable.into());
+    }
+
     let leg = &p.legs[slot];
     // Snapshot all leg fields needed before dropping the borrow.
     let snap_side = leg.side;
@@ -457,6 +473,7 @@ fn process_mint_position_nft(
     nft_state.market_id_at_mint = slab_types_v16::V16PodU64::new(snap_market_id);
     nft_state.epoch_snap_at_mint = slab_types_v16::V16PodU64::new(snap_epoch_snap);
     nft_state.position_owner_at_mint = snap_owner;
+    nft_state.last_holder = owner.key.to_bytes(); // #138: minter is the first holder
     nft_state.minted_at = slab_types_v16::V16PodI64::new(clock.unix_timestamp);
     drop(pda_data);
 
@@ -1101,6 +1118,135 @@ fn process_emergency_burn(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
         "PositionNft emergency burned: portfolio={}, asset_index={}",
         portfolio.key,
         asset_index_u16
+    );
+    Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Tag 7: ReconcileBurnedNft (#138)
+// ═══════════════════════════════════════════════════════════════
+//
+// Self-healing recovery for an out-of-band burn: a holder can call Token-2022
+// `Burn` directly (bypassing BurnPositionNft), which sets supply→0 WITHOUT
+// releasing the escrow — the position would otherwise be stranded (owner stuck at
+// the mint-authority PDA, no NFT left to authorize anyone). ReconcileBurnedNft is
+// permissionless: when the NFT mint supply is 0 and the PositionNft PDA still
+// exists, it releases the stranded position to the RECORDED last holder (set at
+// mint and on every transfer, #138) and closes the PDA, returning rent to them.
+// Funds always go to the recorded last holder regardless of who cranks it.
+//
+// Accounts:
+//   0. [writable] PositionNft PDA (closed)
+//   1. []         NFT mint (Token-2022 — supply must be 0)
+//   2. [writable] Portfolio account (escrow released by the unwrap CPI)
+//   3. []         Mint authority PDA (unwrap CPI signer)
+//   4. []         Per-market NftRegistry PDA
+//   5. []         Percolator wrapper program (unwrap CPI target)
+//   6. [writable] Recorded last-holder wallet (escrow + PDA-rent recipient)
+fn process_reconcile_burned_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
+    let accounts_iter = &mut accounts.iter();
+    let nft_pda = next_account_info(accounts_iter)?; // 0
+    let nft_mint = next_account_info(accounts_iter)?; // 1
+    let portfolio = next_account_info(accounts_iter)?; // 2 (writable)
+    let mint_auth = next_account_info(accounts_iter)?; // 3
+    let nft_registry = next_account_info(accounts_iter)?; // 4
+    let percolator_prog = next_account_info(accounts_iter)?; // 5
+    let last_holder_ai = next_account_info(accounts_iter)?; // 6 (writable)
+
+    if nft_pda.owner != program_id {
+        msg!("ReconcileBurnedNft: nft_pda not owned by this program");
+        return Err(ProgramError::IllegalOwner);
+    }
+    if !nft_pda.is_writable || !portfolio.is_writable || !last_holder_ai.is_writable {
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    // ── Read the bound PositionNft state ──
+    let (recorded_portfolio, recorded_mint, market_id_at_mint, last_holder) = {
+        let data = nft_pda.try_borrow_data()?;
+        if data.len() < POSITION_NFT_V16_LEN {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        let nft_state = bytemuck::from_bytes::<PositionNftV16>(&data[..POSITION_NFT_V16_LEN]);
+        verify_position_nft(nft_state)?;
+        (
+            nft_state.portfolio_account,
+            nft_state.nft_mint,
+            nft_state.market_id_at_mint.get(),
+            nft_state.last_holder,
+        )
+    };
+
+    // ── Bindings: mint, portfolio, canonical PDA (#108 market_id), recipient ──
+    if nft_mint.key.to_bytes() != recorded_mint {
+        return Err(NftError::InvalidNftPda.into());
+    }
+    if portfolio.key.to_bytes() != recorded_portfolio {
+        return Err(NftError::InvalidNftPda.into());
+    }
+    let (expected_pda, _) = position_nft_pda(portfolio.key, market_id_at_mint, program_id);
+    if *nft_pda.key != expected_pda {
+        return Err(NftError::InvalidNftPda.into());
+    }
+    // The escrow + PDA rent are released to the RECORDED last holder, whoever cranks.
+    if last_holder_ai.key.to_bytes() != last_holder {
+        msg!("ReconcileBurnedNft: recipient is not the recorded last holder");
+        return Err(NftError::NotNftHolder.into());
+    }
+
+    // ── Verify mint authority PDA (unwrap CPI signer) ──
+    let (expected_mint_auth, mint_auth_bump) = mint_authority_pda(program_id);
+    if *mint_auth.key != expected_mint_auth {
+        return Err(NftError::InvalidMintAuthority.into());
+    }
+
+    // ── The NFT must be genuinely burned: Token-2022 mint with supply == 0 ──
+    if *nft_mint.owner != token2022::TOKEN_2022_PROGRAM_ID {
+        return Err(NftError::InvalidNftPda.into());
+    }
+    {
+        let mint_data = nft_mint.try_borrow_data()?;
+        // SPL/Token-2022 base Mint layout: supply is a u64 at offset 36.
+        if mint_data.len() < 44 {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        let supply = u64::from_le_bytes(mint_data[36..44].try_into().unwrap());
+        if supply != 0 {
+            msg!("ReconcileBurnedNft: NFT supply != 0 — not burned; use BurnPositionNft");
+            return Err(NftError::PositionNotClosed.into());
+        }
+    }
+
+    // ── Release the stranded escrow to the last holder (wrapper tag 82). This
+    //    succeeds ONLY if the portfolio is still escrowed (owner == mint-auth PDA);
+    //    if it was already unwrapped (a normal burn ran first), the wrapper rejects
+    //    on the escrow invariant — i.e. there was nothing stranded to reconcile. ──
+    verify_percolator_prog_account(percolator_prog, portfolio)?;
+    cpi_unwrap_portfolio(
+        percolator_prog,
+        mint_auth,
+        portfolio,
+        nft_registry,
+        last_holder_ai.key,
+        mint_auth_bump,
+    )?;
+
+    // ── Close the PositionNft PDA — rent to the last holder (the rightful party) ──
+    let dest_lamports = last_holder_ai.lamports();
+    let pda_lamports = nft_pda.lamports();
+    **last_holder_ai.try_borrow_mut_lamports()? = dest_lamports
+        .checked_add(pda_lamports)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
+    **nft_pda.try_borrow_mut_lamports()? = 0;
+    {
+        let mut pda_data = nft_pda.try_borrow_mut_data()?;
+        pda_data.fill(0);
+    }
+
+    msg!(
+        "ReconcileBurnedNft: released stranded position {} to last holder {}",
+        portfolio.key,
+        last_holder_ai.key
     );
     Ok(())
 }

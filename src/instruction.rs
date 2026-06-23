@@ -143,6 +143,9 @@ pub const TAG_EMERGENCY_BURN: u8 = 5;
 ///
 /// Data: tag(1)
 pub const TAG_REPAIR_EXTRA_METAS: u8 = 6;
+/// Tag 7: ReconcileBurnedNft (#138) — release a stranded out-of-band-burned
+/// position to its recorded last holder. Permissionless.
+pub const TAG_RECONCILE_BURNED_NFT: u8 = 7;
 
 /// Decoded instruction for the Position NFT program.
 pub enum NftInstruction {
@@ -163,6 +166,9 @@ pub enum NftInstruction {
     EmergencyBurn,
     /// Rewrite ExtraAccountMetaList for an existing mint (permissionless).
     RepairExtraMetas,
+    /// #138: reconcile an out-of-band-burned NFT (supply==0) by releasing the
+    /// stranded escrowed position to the recorded last holder. Permissionless.
+    ReconcileBurnedNft,
 }
 
 impl NftInstruction {
@@ -215,6 +221,12 @@ impl NftInstruction {
                     return Err(ProgramError::InvalidInstructionData);
                 }
                 Ok(NftInstruction::EmergencyBurn)
+            }
+            TAG_RECONCILE_BURNED_NFT => {
+                if !rest.is_empty() {
+                    return Err(ProgramError::InvalidInstructionData);
+                }
+                Ok(NftInstruction::ReconcileBurnedNft)
             }
             TAG_REPAIR_EXTRA_METAS => {
                 if !rest.is_empty() {

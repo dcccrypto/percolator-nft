@@ -77,10 +77,20 @@ pub struct PositionNftV16 {
     /// Unix-seconds timestamp at mint.
     pub minted_at: V16PodI64,
 
-    /// Forward-compat headroom; zeroed. Size enforced by the compile-time
-    /// assert below, not hand-trusted (32 = a bytemuck-supported array size;
-    /// further fields can extend the account via realloc if ever needed).
-    pub _reserved: [u8; 32],
+    /// #138: the NFT's current/most-recent holder wallet — set to the minter at
+    /// mint and rewritten to the recipient on every transfer (in the hook). If the
+    /// token is burned OUT-OF-BAND (a direct Token-2022 Burn that skips
+    /// BurnPositionNft, leaving the escrow unreleased), `ReconcileBurnedNft` reads
+    /// this to release the stranded position back to the last holder. Occupies the
+    /// former `_reserved` headroom — no layout change (still 199 bytes).
+    pub last_holder: [u8; 32],
+}
+
+impl PositionNftV16 {
+    /// The most-recent holder wallet recorded for #138 reconcile.
+    pub fn last_holder_pubkey(&self) -> Pubkey {
+        Pubkey::new_from_array(self.last_holder)
+    }
 }
 
 const _: () = assert!(POSITION_NFT_V16_LEN == 199);
