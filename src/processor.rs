@@ -1530,6 +1530,7 @@ mod burn_rent_recipient_writable_tests {
     }
 }
 
+#[cfg(test)]
 #[test]
 fn rent_recipient_guard_rejects_non_writable_holder() {
     let holder_key = Pubkey::new_from_array([1u8; 32]);
@@ -1555,6 +1556,7 @@ fn rent_recipient_guard_rejects_non_writable_holder() {
     assert_eq!(holder.lamports(), 10);
 }
 
+#[cfg(test)]
 #[test]
 fn rent_recipient_guard_accepts_writable_holder() {
     let holder_key = Pubkey::new_from_array([1u8; 32]);
