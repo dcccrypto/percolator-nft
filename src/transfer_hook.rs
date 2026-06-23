@@ -117,14 +117,20 @@ fn verify_cpi_caller_is_token2022(
     let current_ix =
         sysvar_instructions::load_instruction_at_checked(current_ix_idx as usize, sysvar_ix)?;
 
-    // The outer instruction must be from Token-2022.
+    // #145 (composability): when the top-level instruction is NOT Token-2022, the
+    // transfer was initiated by another program via CPI — e.g. an NFT marketplace
+    // or the position orderbook moving the NFT on a match. Allow it. This is safe
+    // because (a) post-#105 the transfer hook is VALIDATION-ONLY (it reassigns no
+    // ownership — there is no state to forge by invoking Execute), and (b) the main
+    // hook flow independently verifies the transfer is for the bound mint via the
+    // Execute `mint` account (`nft_state.nft_mint == mint.key`). Requiring the
+    // top-level instruction to be Token-2022 would block every program-escrow
+    // marketplace/orderbook transfer — the core of the composability goal.
     if current_ix.program_id != token2022::TOKEN_2022_PROGRAM_ID {
-        msg!(
-            "Transfer rejected: outer instruction program {} is not Token-2022",
-            current_ix.program_id
-        );
-        return Err(NftError::UnauthorizedDirectInvocation.into());
+        return Ok(());
     }
+    // Top-level IS Token-2022 (a direct wallet→wallet transfer): keep the strict
+    // instruction-type + mint-match validation below (incl. #103 plain-Transfer reject).
 
     // Verify the outer instruction is Transfer (tag 3) or TransferChecked (tag 12).
     // Both are valid Token-2022 instructions that trigger the transfer hook.

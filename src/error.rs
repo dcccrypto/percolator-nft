@@ -71,6 +71,12 @@ pub enum NftError {
     /// and `SetNftProgramId` is set-once/immutable, so minting against such a
     /// registry would yield a permanently non-transferable NFT. Reject at mint. (#109)
     RegistryNotConfigured = 26,
+
+    /// #137: minting is restricted to single-position portfolios. The escrow binds
+    /// the WHOLE portfolio to the NFT, so minting one leg of a multi-leg
+    /// (cross-margin) portfolio would convey the un-tokenized legs too. Reject when
+    /// the portfolio has more than one active leg.
+    MultiLegNotWrappable = 27,
 }
 
 impl From<NftError> for ProgramError {

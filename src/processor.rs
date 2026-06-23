@@ -317,6 +317,21 @@ fn process_mint_position_nft(
     // is blocked); the escrow CPI remains the authoritative final check.
     cpi_v16::transfer_gate_check(p, asset_index as u32).map_err(ProgramError::from)?;
 
+    // #137: only single-position portfolios are wrappable. Escrow-at-mint binds the
+    // ENTIRE portfolio to this one NFT, so minting one leg of a multi-leg
+    // (cross-margin) portfolio would convey the other, un-tokenized legs on sale —
+    // the NFT would represent more than its named position. Require exactly one
+    // active leg so "1 NFT = 1 position" holds. (Cross-margin baskets are simply
+    // not NFT-wrappable; wrap individual positions instead.)
+    let active_legs = p.legs.iter().filter(|l| l.active != 0).count();
+    if active_legs != 1 {
+        msg!(
+            "MintPositionNft rejected: portfolio has {} active legs — only single-position portfolios are wrappable (#137)",
+            active_legs
+        );
+        return Err(NftError::MultiLegNotWrappable.into());
+    }
+
     let leg = &p.legs[slot];
     // Snapshot all leg fields needed before dropping the borrow.
     let snap_side = leg.side;
