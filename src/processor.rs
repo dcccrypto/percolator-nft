@@ -719,6 +719,13 @@ fn process_mint_position_nft(
 // it is drained directly (same lamport-transfer pattern as the PositionNft PDA
 // close); no signer/CPI is needed. Idempotent: if the account was never created
 // or is already closed, it is skipped so the burn never fails on it.
+fn require_writable_rent_recipient(holder: &AccountInfo) -> ProgramResult {
+    if !holder.is_writable {
+         return Err(ProgramError::InvalidAccountData);
+    }
+    Ok(())
+}
+
 fn close_extra_metas(
     program_id: &Pubkey,
     extra_metas: &AccountInfo,
@@ -737,9 +744,9 @@ fn close_extra_metas(
     if !extra_metas.is_writable {
         return Err(ProgramError::InvalidAccountData);
     }
-    if !holder.is_writable {
-        return Err(ProgramError::InvalidAccountData);
-    }
+
+    require_writable_rent_recipient(holder)?;
+    
     let dest = holder.lamports();
     let amt = extra_metas.lamports();
     **holder.try_borrow_mut_lamports()? = dest
@@ -771,6 +778,8 @@ fn process_burn_position_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
     if !holder.is_signer {
         return Err(ProgramError::MissingRequiredSignature);
     }
+
+    require_writable_rent_recipient(holder)?;
 
     if !nft_pda.is_writable {
         return Err(ProgramError::InvalidAccountData);
@@ -937,6 +946,8 @@ fn process_emergency_burn(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
     if !holder.is_signer {
         return Err(ProgramError::MissingRequiredSignature);
     }
+
+    require_writable_rent_recipient(holder)?;
 
     if !portfolio.is_writable {
         return Err(ProgramError::InvalidAccountData);
@@ -1511,5 +1522,56 @@ mod burn_rent_recipient_writable_tests {
         assert_eq!(extra_metas.lamports(), 0);
         assert!(extra_metas.data.borrow().iter().all(|byte| *byte == 0));
     }
+}
+
+#[test]
+fn rent_recipient_guard_rejects_non_writable_holder() {
+    let holder_key = Pubkey::new_from_array([1u8; 32]);
+    let system_program_id = solana_program::system_program::id();
+
+    let mut holder_lamports = 10u64;
+    let mut holder_data = vec![];
+
+    let holder = AccountInfo::new(
+        &holder_key,
+        true,
+        false, // intentionally NOT writable
+        &mut holder_lamports,
+        &mut holder_data,
+        &system_program_id,
+        false,
+        0,
+    );
+
+    let result = require_writable_rent_recipient(&holder);
+
+    assert!(
+        result.is_err(),
+        "rent recipient guard should reject non-writable holder"
+    );
+}
+
+#[test]
+fn rent_recipient_guard_accepts_writable_holder() {
+    let holder_key = Pubkey::new_from_array([1u8; 32]);
+    let system_program_id = solana_program::system_program::id();
+
+    let mut holder_lamports = 10u64;
+    let mut holder_data = vec![];
+
+    let holder = AccountInfo::new(
+        &holder_key,
+        true,
+        true, // writable
+        &mut holder_lamports,
+        &mut holder_data,
+        &system_program_id,
+        false,
+        0,
+    );
+
+    let result = require_writable_rent_recipient(&holder);
+
+    assert!(result.is_ok());
 }
 
