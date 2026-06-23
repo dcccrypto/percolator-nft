@@ -737,6 +737,9 @@ fn close_extra_metas(
     if !extra_metas.is_writable {
         return Err(ProgramError::InvalidAccountData);
     }
+    if !holder.is_writable {
+        return Err(ProgramError::InvalidAccountData);
+    }
     let dest = holder.lamports();
     let amt = extra_metas.lamports();
     **holder.try_borrow_mut_lamports()? = dest
@@ -1411,6 +1414,102 @@ mod registry_validation_tests {
         // registers the zero program id, which is never this program.
         let me = Pubkey::new_from_array([5u8; 32]);
         assert!(!registry_registers_program(&[0u8; NFT_REGISTRY_ACCOUNT_LEN], &me));
+    }
+}
+
+#[cfg(test)]
+mod burn_rent_recipient_writable_tests {
+    use super::*;
+    use solana_program::account_info::AccountInfo;
+
+    #[test]
+    fn close_extra_metas_rejects_non_writable_holder_before_lamport_mutation() {
+        let program_id = Pubkey::new_from_array([9u8; 32]);
+        let holder_key = Pubkey::new_from_array([1u8; 32]);
+        let nft_mint = Pubkey::new_from_array([2u8; 32]);
+        let system_program_id = solana_program::system_program::id();
+
+        let (extra_metas_key, _) = extra_account_metas_pda(&nft_mint, &program_id);
+
+        let mut holder_lamports = 10u64;
+        let mut extra_metas_lamports = 5u64;
+
+        let mut holder_data = vec![];
+        let mut extra_metas_data = vec![1u8; 16];
+
+        let holder = AccountInfo::new(
+            &holder_key,
+            true,
+            false, // intentionally NOT writable
+            &mut holder_lamports,
+            &mut holder_data,
+            &system_program_id,
+            false,
+            0,
+        );
+
+        let extra_metas = AccountInfo::new(
+            &extra_metas_key,
+            false,
+            true,
+            &mut extra_metas_lamports,
+            &mut extra_metas_data,
+            &program_id,
+            false,
+            0,
+        );
+
+        let result = close_extra_metas(&program_id, &extra_metas, &nft_mint, &holder);
+
+        assert!(
+            result.is_err(),
+            "close_extra_metas should reject a non-writable holder before returning rent"
+        );
+    }
+
+    #[test]
+    fn close_extra_metas_allows_writable_holder_rent_return() {
+        let program_id = Pubkey::new_from_array([9u8; 32]);
+        let holder_key = Pubkey::new_from_array([1u8; 32]);
+        let nft_mint = Pubkey::new_from_array([2u8; 32]);
+        let system_program_id = solana_program::system_program::id();
+
+        let (extra_metas_key, _) = extra_account_metas_pda(&nft_mint, &program_id);
+
+        let mut holder_lamports = 10u64;
+        let mut extra_metas_lamports = 5u64;
+
+        let mut holder_data = vec![];
+        let mut extra_metas_data = vec![1u8; 16];
+
+        let holder = AccountInfo::new(
+            &holder_key,
+            true,
+            true, // writable rent recipient
+            &mut holder_lamports,
+            &mut holder_data,
+            &system_program_id,
+            false,
+            0,
+        );
+
+        let extra_metas = AccountInfo::new(
+            &extra_metas_key,
+            false,
+            true,
+            &mut extra_metas_lamports,
+            &mut extra_metas_data,
+            &program_id,
+            false,
+            0,
+        );
+
+        let result = close_extra_metas(&program_id, &extra_metas, &nft_mint, &holder);
+
+        assert!(result.is_ok());
+        assert_eq!(holder.lamports(), 15);
+        assert_eq!(extra_metas.lamports(), 0);
+        assert!(extra_metas.data.borrow().iter().all(|byte| *byte == 0));
     }
 }
 

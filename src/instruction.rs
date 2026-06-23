@@ -41,7 +41,7 @@ pub const TAG_MINT_POSITION_NFT: u8 = 0;
 /// Caller must hold the NFT and the position must have an active bound leg.
 ///
 /// Accounts (10 total):
-///   0. `[signer]`    NFT holder
+///   0. `[signer, writable]`  NFT holder (rent recipient)
 ///   1. `[writable]`  PositionNft PDA (closed, rent returned)
 ///   2. `[writable]`  NFT mint (supply → 0)
 ///   3. `[writable]`  Holder's NFT token account (closed)
@@ -96,7 +96,7 @@ pub const TAG_EXECUTE_TRANSFER_HOOK: u8 = 4;
 /// NOT admin-only — the holder calls this directly.
 ///
 /// Accounts (10 total):
-///   0. `[signer]`    NFT holder
+///   0. `[signer, writable]`  NFT holder (rent recipient)
 ///   1. `[writable]`  PositionNft PDA (closed, rent returned)
 ///   2. `[writable]`  NFT mint (supply → 0)
 ///   3. `[writable]`  Holder's NFT token account (closed)
