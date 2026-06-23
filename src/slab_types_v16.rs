@@ -379,8 +379,10 @@ const _: () = assert!(offset_of!(ResolvedPayoutReceiptV16Account, finalized) == 
 // PortfolioAccountV16Account — percolator/src/v16.rs:14898 (v17 layout)
 //
 // v17 changes vs v16:
-//   * `capital/pnl/reserved_pnl` replaced by `residual_crystallized_loss_atoms_total`,
-//     `residual_spent_principal_atoms_total`, `residual_received_atoms_total` (same 48 B).
+//   * `capital/pnl/reserved_pnl` are RETAINED (48 B, offsets 132/148/164); the
+//     `residual_crystallized_loss_atoms_total`, `residual_spent_principal_atoms_total`,
+//     `residual_received_atoms_total` counters are ADDED after them (offset 180+),
+//     NOT replacements. (The revision-4 vendor wrongly dropped the 48 B, shifting legs.)
 //   * `source_domains: [PortfolioSourceDomainV16Account; 32]` INSERTED between
 //     `legs` and `health_cert` (+6272 B). This is the dominant layout change.
 //   * The NFT reads: provenance_header, owner, legs, liquidation_lock,

@@ -146,8 +146,19 @@ pub fn process_get_position_value(
                 "POSITION_VALUE_V16:loss_weight={}",
                 leg.loss_weight.get()
             );
-            // v17: capital/pnl are now per-asset domain fields (not per-portfolio scalars).
-            // Log the portfolio-level residual counters that replaced them.
+            // #147: capital/pnl/reserved_pnl are RETAINED per-portfolio scalars in
+            // v17 (NOT moved per-asset and NOT replaced — the residual_* counters
+            // are additive and sit after them). Emit the retained scalars so a
+            // consumer can read the actual position economics; logged RAW (no equity
+            // re-derivation — see the module header). Units are atoms; `capital`/
+            // `reserved_pnl` are unsigned, `pnl` is SIGNED (a loss prints with a
+            // leading '-'). They are portfolio-level, which IS this position's P&L
+            // since one NFT escrows the whole portfolio.
+            msg!("POSITION_VALUE_V16:capital={}", p.capital.get());
+            msg!("POSITION_VALUE_V16:pnl={}", p.pnl.get());
+            msg!("POSITION_VALUE_V16:reserved_pnl={}", p.reserved_pnl.get());
+            // Additive residual-loss accounting counters (portfolio-wide totals),
+            // NOT the position's value.
             msg!(
                 "POSITION_VALUE_V16:residual_crystallized={}",
                 p.residual_crystallized_loss_atoms_total.get()
