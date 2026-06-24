@@ -318,7 +318,7 @@ mod tests {
         );
         // The constant itself remains the per-portfolio active-leg cap, not an
         // asset-id domain bound (referenced to keep this invariant explicit).
-        assert!(WRAPPER_MAX_PORTFOLIO_ASSETS == 14);
+        const { assert!(WRAPPER_MAX_PORTFOLIO_ASSETS == 14) };
     }
 
     #[test]

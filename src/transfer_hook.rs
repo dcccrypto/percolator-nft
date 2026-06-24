@@ -90,12 +90,33 @@ const TOKEN_IX_TRANSFER_CHECKED: u8 = 12;
 /// fail with UnauthorizedDirectInvocation on every transfer.
 const TOKEN_IX_TRANSFER_CHECKED_WITH_FEE: u8 = 26;
 
-/// Verify that the current instruction was invoked via CPI from the Token-2022
-/// program, and that the outer instruction is a Transfer or TransferChecked
-/// targeting the expected mint.
+/// Verify that the current instruction is consistent with a genuine Token-2022
+/// transfer, and return whether the outer instruction was directly Token-2022
+/// (direct wallet→wallet path) vs. a CPI-initiated path (marketplace/orderbook).
 ///
-/// This is the standard defense used by SPL TransferHook reference
-/// implementations. It prevents direct invocation of the Execute handler.
+/// Returns:
+///   `Ok(true)`  — outer instruction IS Token-2022 TransferChecked/WithFee;
+///                 this is a direct wallet→wallet transfer. The `last_holder`
+///                 state write is authorised.
+///   `Ok(false)` — outer instruction is NOT Token-2022 (CPI-initiated path, e.g.
+///                 marketplace/orderbook); validation gates pass, but the caller
+///                 MUST NOT write `last_holder` (the new_owner value is
+///                 attacker-controllable in this path — #152/#153 fix).
+///   `Err(_)`    — outer instruction is Token-2022 but is invalid (wrong tag,
+///                 wrong mint, empty data); reject the transfer entirely.
+///
+/// This is the canonical anti-spoofing signal for the SPL TransferHook interface.
+/// Token-2022 sets source/dest `TransferHookAccount.transferring = true` only for
+/// the duration of a real transfer, but reading that extension requires the
+/// `spl-token-2022` crate which conflicts with our `solana-program = 2.2.1` pin
+/// (see Cargo.toml). The top-level-instruction check is the next-best equivalent:
+/// it correctly distinguishes genuine direct transfers (Token-2022 top-level) from
+/// CPI-initiated transfers (marketplace top-level) AND from spoofed direct Execute
+/// calls (both of the latter return `Ok(false)`, skipping the `last_holder` write).
+///
+/// #145 composability: Requiring top-level = Token-2022 for the ENTIRE Execute
+/// would block marketplace/orderbook CPI transfers. We only require it for the
+/// `last_holder` WRITE — the validation gates run for both paths.
 ///
 /// How it works:
 /// - On Solana, when program A CPI-calls program B, program B's instruction
@@ -103,13 +124,16 @@ const TOKEN_IX_TRANSFER_CHECKED_WITH_FEE: u8 = 26;
 /// - We use `load_current_index_checked` to find which top-level instruction
 ///   is currently executing, then `load_instruction_at_checked` to read it.
 /// - If we were invoked via CPI from Token-2022, the top-level instruction
-///   will be Token-2022's Transfer/TransferChecked.
+///   will be Token-2022's TransferChecked (direct wallet transfer).
+/// - If we were invoked via CPI from a marketplace, the top-level instruction
+///   will be the marketplace's instruction — we return Ok(false).
 /// - If we were invoked directly (not via CPI), the top-level instruction
-///   will be our own program — which we reject.
+///   will also be our own / attacker's program — we return Ok(false), which
+///   is safe because the caller skips the `last_holder` write.
 fn verify_cpi_caller_is_token2022(
     sysvar_ix: &AccountInfo,
     expected_mint: &Pubkey,
-) -> Result<(), ProgramError> {
+) -> Result<bool, ProgramError> {
     // Load the index of the currently executing top-level instruction.
     let current_ix_idx = sysvar_instructions::load_current_index_checked(sysvar_ix)?;
 
@@ -117,17 +141,29 @@ fn verify_cpi_caller_is_token2022(
     let current_ix =
         sysvar_instructions::load_instruction_at_checked(current_ix_idx as usize, sysvar_ix)?;
 
-    // #145 (composability): when the top-level instruction is NOT Token-2022, the
-    // transfer was initiated by another program via CPI — e.g. an NFT marketplace
-    // or the position orderbook moving the NFT on a match. Allow it. This is safe
-    // because (a) post-#105 the transfer hook is VALIDATION-ONLY (it reassigns no
-    // ownership — there is no state to forge by invoking Execute), and (b) the main
-    // hook flow independently verifies the transfer is for the bound mint via the
-    // Execute `mint` account (`nft_state.nft_mint == mint.key`). Requiring the
-    // top-level instruction to be Token-2022 would block every program-escrow
-    // marketplace/orderbook transfer — the core of the composability goal.
+    // #145 (composability) + #152/#153 (last_holder anti-spoof):
+    //
+    // When the top-level instruction is NOT Token-2022 the transfer was initiated
+    // by another program via CPI — e.g. an NFT marketplace or the position
+    // orderbook moving the NFT on a match. The validation gates (ATA checks,
+    // bound-leg / market_id anchor, transfer-gate, registry) still run and must
+    // pass. The `last_holder` write is controlled by the return value: `false`
+    // tells the caller to skip it. This is safe because:
+    //   (a) In a legitimate marketplace CPI, Token-2022 is invoked by the
+    //       marketplace, which is invoked as the top-level instruction. The
+    //       actual NFT token moves; the last genuine holder update happened at
+    //       the previous genuine Token-2022 top-level transfer (or mint). Skipping
+    //       the update here means `last_holder` stays at the PREVIOUS genuine
+    //       holder — still correct for ReconcileBurnedNft.
+    //   (b) In a spoofed direct Execute call (attacker invokes Execute directly,
+    //       top-level = attacker's program), we also return `false`, so
+    //       `last_holder` is never updated. Theft closed.
+    //
+    // Requiring the top-level instruction to be Token-2022 would block every
+    // program-escrow marketplace/orderbook transfer — the core of the
+    // composability goal (#145). We only gate the last_holder WRITE on it.
     if current_ix.program_id != token2022::TOKEN_2022_PROGRAM_ID {
-        return Ok(());
+        return Ok(false); // CPI-initiated or spoofed direct call: gates pass, no last_holder write
     }
     // Top-level IS Token-2022 (a direct wallet→wallet transfer): keep the strict
     // instruction-type + mint-match validation below (incl. #103 plain-Transfer reject).
@@ -169,7 +205,7 @@ fn verify_cpi_caller_is_token2022(
                 );
                 return Err(NftError::UnauthorizedDirectInvocation.into());
             }
-            Ok(())
+            Ok(true) // genuine direct Token-2022 transfer: last_holder write authorised
         }
         TOKEN_IX_TRANSFER_CHECKED_WITH_FEE => {
             // TransferCheckedWithFee — same account layout as TransferChecked.
@@ -188,7 +224,7 @@ fn verify_cpi_caller_is_token2022(
                 );
                 return Err(NftError::UnauthorizedDirectInvocation.into());
             }
-            Ok(())
+            Ok(true) // genuine direct Token-2022 transfer: last_holder write authorised
         }
         _ => {
             msg!(
@@ -349,10 +385,14 @@ pub fn process_execute(
     // ────────────────────────────────────────────────────────────────────
     // MANDATORY GUARD: verify CPI caller is Token-2022.
     //
-    // Without this, anyone can call Execute directly with a dest_ata they
-    // own and steal the portfolio by forging `new_owner`. PORT VERBATIM.
+    // Returns Ok(true)  — genuine direct Token-2022 transfer (direct wallet).
+    // Returns Ok(false) — CPI-initiated (marketplace/orderbook) OR spoofed
+    //                     direct Execute call. Both pass the validation gates;
+    //                     only genuine direct transfers authorise the
+    //                     last_holder write (#152/#153 anti-spoof fix).
+    // Returns Err(_)    — Token-2022 top-level but invalid tag/mint; reject.
     // ────────────────────────────────────────────────────────────────────
-    verify_cpi_caller_is_token2022(sysvar_ix, mint.key)?;
+    let is_genuine_token2022_transfer = verify_cpi_caller_is_token2022(sysvar_ix, mint.key)?;
 
     // ── Validate percolator_prog key against known constants ──────────
     // Prevents an attacker from supplying a malicious program as account[7].
@@ -474,12 +514,31 @@ pub fn process_execute(
     // no longer forwarded into one.
     let _ = nft_program_self;
 
-    // #138: record the new holder so an out-of-band Token-2022 Burn (which skips
-    // BurnPositionNft and leaves the escrow unreleased) can be reconciled — the
-    // stranded position is released back to this last holder by ReconcileBurnedNft.
-    // Local program-owned-account write (nft_pda is writable per the
-    // ExtraAccountMetaList); no CPI.
-    {
+    // #138 + #152/#153 anti-spoof: record the new holder ONLY when the outer
+    // instruction is provably a genuine Token-2022 TransferChecked/WithFee
+    // (is_genuine_token2022_transfer == true). This is the canonical signal that
+    // a real NFT token movement occurred — not a spoofed direct Execute call or a
+    // marketplace CPI whose new_owner (dest_ata.data[32..64]) is attacker-controlled.
+    //
+    // Why skipping the write for CPI-initiated marketplace transfers is safe:
+    //   - `last_holder` is consumed ONLY by ReconcileBurnedNft — which fires when
+    //     the NFT was burned out-of-band. In that scenario the most recent genuine
+    //     transfer's last_holder is the correct recovery target. If the last genuine
+    //     transfer was marketplace-CPI-initiated the last_holder from the previous
+    //     direct transfer (or mint) remains recorded — still the rightful party.
+    //   - The marketplace path successfully validates all gates (ATA, bound-leg,
+    //     transfer-gate, registry) and the token moves; it just does not update
+    //     last_holder. A recipient who receives an NFT only via marketplace CPI and
+    //     never via direct TransferChecked can still use BurnPositionNft normally
+    //     (which does not consult last_holder at all); only ReconcileBurnedNft falls
+    //     back to last_holder, and in that case the previous genuine-transfer holder
+    //     is a safe default (both parties are real holders; neither is an attacker).
+    //
+    // Attack closed: a spoofed direct Execute (top-level = attacker's program) or a
+    // thin CPI-wrapper attacking Execute receives is_genuine_token2022_transfer==false
+    // and cannot forge last_holder. ReconcileBurnedNft therefore cannot be used to
+    // divert the escrowed position to an attacker-controlled address.
+    if is_genuine_token2022_transfer {
         let mut pda_data = nft_pda.try_borrow_mut_data()?;
         let nft_state =
             bytemuck::from_bytes_mut::<PositionNftV16>(&mut pda_data[..POSITION_NFT_V16_LEN]);
@@ -487,11 +546,311 @@ pub fn process_execute(
     }
 
     msg!(
-        "Position NFT transferred (position remains escrowed): portfolio={}, asset_index={}, new_holder={}",
+        "Position NFT transferred (position remains escrowed): portfolio={}, asset_index={}, new_holder_recorded={}",
         portfolio.key,
         asset_index_u16,
-        new_owner
+        is_genuine_token2022_transfer
     );
 
     Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Unit tests: #152/#153 last_holder anti-spoof
+// ═══════════════════════════════════════════════════════════════
+//
+// These tests exercise verify_cpi_caller_is_token2022 directly via a
+// constructed Instructions sysvar image (the same encoding Solana uses
+// on-chain).  We test three paths:
+//
+//  (A) Direct wallet→wallet TransferChecked:  top-level = Token-2022,
+//      tag = 12, correct mint → Ok(true) → last_holder write authorised.
+//
+//  (B) Marketplace/orderbook CPI:  top-level = marketplace program (not
+//      Token-2022) → Ok(false) → last_holder write skipped; transfer gate
+//      still passes (composability preserved).
+//
+//  (C) Spoofed direct Execute call:  attacker invokes Execute directly with
+//      top-level = attacker's program (also not Token-2022) → Ok(false) →
+//      last_holder write skipped.  Theft closed.
+//
+//  (D) Spoofed fake Token-2022 top-level with wrong mint:  top-level IS
+//      Token-2022 but TransferChecked mint != expected → Err(Unauthorized).
+//
+//  (E) Token-2022 top-level with plain Transfer tag (tag 3):  rejected per
+//      #103 → Err(Unauthorized).
+
+#[cfg(test)]
+mod last_holder_antispoof_152_153 {
+    use super::{verify_cpi_caller_is_token2022, TOKEN_IX_TRANSFER, TOKEN_IX_TRANSFER_CHECKED};
+    use crate::{error::NftError, token2022::TOKEN_2022_PROGRAM_ID};
+    use solana_program::{
+        account_info::AccountInfo,
+        pubkey::Pubkey,
+        sysvar::instructions as sysvar_instructions,
+    };
+
+    // ── sysvar helpers ─────────────────────────────────────────────────────
+    //
+    // Solana's sysvar::instructions serialisation (from
+    // sdk/program/src/sysvar/instructions.rs):
+    //
+    //   u16 LE  : num_instructions
+    //   for each instruction (in order):
+    //     u16 LE  : byte offset of the serialized instruction FROM the start
+    //               of the sysvar data (written as an index-table entry before
+    //               the instruction data)
+    //   then the serialized instructions:
+    //     for each instruction:
+    //       u16 LE  : num_accounts
+    //       for each account:
+    //         u8   : flags (bit 0 = is_signer, bit 1 = is_writable)
+    //         [32] : pubkey
+    //       u16 LE  : data len
+    //       [data]
+    //       [32]    : program_id pubkey
+    //
+    // `load_current_index_checked` reads the LAST two bytes of the sysvar data
+    // as a u16 LE (the "current_index" written by the runtime).
+    // `load_instruction_at_checked(idx)` reads the offset from the index table
+    // at position `2 + idx * 2`, then deserialises the instruction there.
+    //
+    // We build a minimal valid sysvar image with ONE instruction and set the
+    // current_index to 0.
+
+    /// Build an Instructions sysvar image for one instruction.
+    ///
+    /// Matches `serialize_instructions` in solana-instructions-sysvar-2.2.2:
+    ///   [0..2]  u16 LE: num_instructions (=1)
+    ///   [2..4]  u16 LE: offset of instruction 0 from start of sysvar data
+    ///   [offset..] instruction body:
+    ///     u16 LE  num_accounts
+    ///     for each account: u8 flags, [32] pubkey
+    ///     [32] program_id          ← BEFORE data (matches Solana source)
+    ///     u16 LE  data_len
+    ///     [data]
+    ///   Last 2 bytes: current_index (u16 LE) = 0
+    fn build_sysvar(program_id: &Pubkey, data: &[u8], accounts: &[Pubkey]) -> Vec<u8> {
+        // Instruction body starts at byte 4 (2 count + 2 for one offset entry).
+        let instr_offset: u16 = 4;
+
+        let mut instr_bytes: Vec<u8> = Vec::new();
+        // num_accounts
+        instr_bytes.extend_from_slice(&(accounts.len() as u16).to_le_bytes());
+        // accounts: flags(1) + pubkey(32) each
+        for acct in accounts {
+            instr_bytes.push(0u8); // flags (not signer, not writable)
+            instr_bytes.extend_from_slice(acct.as_ref());
+        }
+        // program_id comes BEFORE data in Solana's format
+        instr_bytes.extend_from_slice(program_id.as_ref());
+        // data_len + data
+        instr_bytes.extend_from_slice(&(data.len() as u16).to_le_bytes());
+        instr_bytes.extend_from_slice(data);
+
+        // Sysvar: count(2) + offset_table(2) + instr_bytes + current_index(2)
+        let total_len = 2 + 2 + instr_bytes.len() + 2;
+        let mut sysvar = vec![0u8; total_len];
+        sysvar[0..2].copy_from_slice(&1u16.to_le_bytes()); // num_instructions = 1
+        sysvar[2..4].copy_from_slice(&instr_offset.to_le_bytes()); // offset[0]
+        sysvar[4..4 + instr_bytes.len()].copy_from_slice(&instr_bytes);
+        // current_index = 0 (last two bytes; runtime writes this at execute time)
+        let ci_offset = total_len - 2;
+        sysvar[ci_offset..].copy_from_slice(&0u16.to_le_bytes());
+
+        sysvar
+    }
+
+    fn make_sysvar_account<'a>(
+        key: &'a Pubkey,
+        data: &'a mut [u8],
+        lamports: &'a mut u64,
+    ) -> AccountInfo<'a> {
+        let sysvar_prog = sysvar_instructions::id();
+        // We need the owner to be a static reference in the AccountInfo; we use a
+        // locally allocated Box and leak it (test-only — process exits after tests).
+        let owner: &'static Pubkey = Box::leak(Box::new(sysvar_prog));
+        AccountInfo::new(
+            key,
+            false,
+            false,
+            lamports,
+            data,
+            owner,
+            false,
+            0,
+        )
+    }
+
+    // ── (A) Direct wallet→wallet TransferChecked ────────────────────────────
+    #[test]
+    fn path_a_direct_transfer_checked_returns_true() {
+        let nft_mint = Pubkey::new_from_array([0xABu8; 32]);
+
+        // TransferChecked: tag(1) + amount(8) + decimals(1)
+        // Accounts: [source, mint, dest, authority]
+        let mut ix_data = vec![TOKEN_IX_TRANSFER_CHECKED]; // tag 12
+        ix_data.extend_from_slice(&1u64.to_le_bytes()); // amount
+        ix_data.push(0u8); // decimals
+
+        let ix_accounts = vec![
+            Pubkey::new_unique(), // source
+            nft_mint,             // mint (account[1] must match expected_mint)
+            Pubkey::new_unique(), // dest
+            Pubkey::new_unique(), // authority
+        ];
+
+        let mut sysvar_data = build_sysvar(&TOKEN_2022_PROGRAM_ID, &ix_data, &ix_accounts);
+        let sysvar_key = sysvar_instructions::id();
+        let mut lamports = 0u64;
+        let sysvar_ai = make_sysvar_account(&sysvar_key, &mut sysvar_data, &mut lamports);
+
+        let result = verify_cpi_caller_is_token2022(&sysvar_ai, &nft_mint);
+        assert_eq!(
+            result,
+            Ok(true),
+            "direct wallet TransferChecked must return Ok(true) — last_holder write authorised"
+        );
+    }
+
+    // ── (B) Marketplace/orderbook CPI (top-level NOT Token-2022) ───────────
+    #[test]
+    fn path_b_marketplace_cpi_returns_false_not_error() {
+        let nft_mint = Pubkey::new_from_array([0xCDu8; 32]);
+        let marketplace_program = Pubkey::new_unique(); // some marketplace, NOT Token-2022
+
+        // The outer instruction can be any marketplace instruction data.
+        let ix_data = vec![0xAAu8, 0xBBu8, 0xCCu8];
+        let ix_accounts = vec![Pubkey::new_unique()];
+
+        let mut sysvar_data = build_sysvar(&marketplace_program, &ix_data, &ix_accounts);
+        let sysvar_key = sysvar_instructions::id();
+        let mut lamports = 0u64;
+        let sysvar_ai = make_sysvar_account(&sysvar_key, &mut sysvar_data, &mut lamports);
+
+        let result = verify_cpi_caller_is_token2022(&sysvar_ai, &nft_mint);
+        assert_eq!(
+            result,
+            Ok(false),
+            "marketplace/orderbook CPI (non-Token-2022 top-level) must return Ok(false) — gates pass, no last_holder write (#145 composability preserved)"
+        );
+    }
+
+    // ── (C) Spoofed direct Execute call (attacker program as top-level) ─────
+    // Identical to (B) mechanically; the distinction is intent. The attacker
+    // invokes Execute directly with their own program as the transaction's
+    // top-level instruction. This also returns Ok(false) — no last_holder write.
+    #[test]
+    fn path_c_spoofed_direct_execute_returns_false() {
+        let nft_mint = Pubkey::new_from_array([0xEFu8; 32]);
+        let attacker_program = Pubkey::new_unique(); // attacker's program, NOT Token-2022
+
+        // Attacker builds a fake Execute payload (8-byte discriminator + u64 amount).
+        let ix_data = vec![0x01u8; 16]; // fake Execute discriminator + amount
+        let ix_accounts = vec![];
+
+        let mut sysvar_data = build_sysvar(&attacker_program, &ix_data, &ix_accounts);
+        let sysvar_key = sysvar_instructions::id();
+        let mut lamports = 0u64;
+        let sysvar_ai = make_sysvar_account(&sysvar_key, &mut sysvar_data, &mut lamports);
+
+        let result = verify_cpi_caller_is_token2022(&sysvar_ai, &nft_mint);
+        assert_eq!(
+            result,
+            Ok(false),
+            "spoofed direct Execute (attacker top-level, not Token-2022) must return Ok(false) — last_holder NOT written; theft closed (#152/#153)"
+        );
+    }
+
+    // ── (D) Token-2022 top-level but wrong mint in TransferChecked ───────────
+    // Attacker wraps a real Token-2022 TransferChecked but uses a different mint.
+    #[test]
+    fn path_d_token2022_top_level_wrong_mint_returns_error() {
+        let nft_mint = Pubkey::new_from_array([0x11u8; 32]);
+        let attacker_mint = Pubkey::new_from_array([0x22u8; 32]); // different
+
+        let mut ix_data = vec![TOKEN_IX_TRANSFER_CHECKED];
+        ix_data.extend_from_slice(&1u64.to_le_bytes());
+        ix_data.push(0u8);
+
+        let ix_accounts = vec![
+            Pubkey::new_unique(), // source
+            attacker_mint,        // WRONG mint at account[1]
+            Pubkey::new_unique(), // dest
+            Pubkey::new_unique(), // authority
+        ];
+
+        let mut sysvar_data = build_sysvar(&TOKEN_2022_PROGRAM_ID, &ix_data, &ix_accounts);
+        let sysvar_key = sysvar_instructions::id();
+        let mut lamports = 0u64;
+        let sysvar_ai = make_sysvar_account(&sysvar_key, &mut sysvar_data, &mut lamports);
+
+        let result = verify_cpi_caller_is_token2022(&sysvar_ai, &nft_mint);
+        assert_eq!(
+            result,
+            Err(NftError::UnauthorizedDirectInvocation.into()),
+            "Token-2022 top-level with wrong mint must be rejected entirely (#cross-mint hook)"
+        );
+    }
+
+    // ── (E) Token-2022 top-level with plain Transfer tag (tag 3) ─────────────
+    // Rejected per #103 — no mint in the instruction layout to verify.
+    #[test]
+    fn path_e_token2022_plain_transfer_tag_rejected() {
+        let nft_mint = Pubkey::new_unique();
+
+        // Plain Transfer: tag(1) + amount(8)
+        let mut ix_data = vec![TOKEN_IX_TRANSFER]; // tag 3
+        ix_data.extend_from_slice(&1u64.to_le_bytes());
+        let ix_accounts = vec![
+            Pubkey::new_unique(), // source
+            Pubkey::new_unique(), // dest
+            Pubkey::new_unique(), // authority
+        ];
+
+        let mut sysvar_data = build_sysvar(&TOKEN_2022_PROGRAM_ID, &ix_data, &ix_accounts);
+        let sysvar_key = sysvar_instructions::id();
+        let mut lamports = 0u64;
+        let sysvar_ai = make_sysvar_account(&sysvar_key, &mut sysvar_data, &mut lamports);
+
+        let result = verify_cpi_caller_is_token2022(&sysvar_ai, &nft_mint);
+        assert_eq!(
+            result,
+            Err(NftError::UnauthorizedDirectInvocation.into()),
+            "plain Transfer (tag 3) with Token-2022 top-level must be rejected (#103)"
+        );
+    }
+
+    // ── Composability invariant: Ok(false) never returns an error ────────────
+    // Any non-Token-2022 program as top-level (marketplace, orderbook, or direct
+    // attacker) must ALWAYS return Ok(false) — never Err. An Err would break the
+    // marketplace CPI path since composability requires gating only the
+    // last_holder write, not the transfer itself.
+    #[test]
+    fn non_token2022_top_level_never_errors_composability_invariant() {
+        let nft_mint = Pubkey::new_unique();
+
+        // Test several edge cases: empty data, zero program, random program.
+        let edge_cases: &[(&[u8], Pubkey)] = &[
+            (&[], Pubkey::new_unique()),                          // empty data, random prog
+            (&[0u8; 100], Pubkey::new_from_array([0u8; 32])),   // all-zeros data/prog
+            (&[TOKEN_IX_TRANSFER_CHECKED], Pubkey::new_unique()), // valid-looking data, non-T22 prog
+        ];
+
+        for (data, prog) in edge_cases {
+            let ix_accounts: Vec<Pubkey> = vec![];
+            let mut sysvar_data = build_sysvar(prog, data, &ix_accounts);
+            let sysvar_key = sysvar_instructions::id();
+            let mut lamports = 0u64;
+            let sysvar_ai = make_sysvar_account(&sysvar_key, &mut sysvar_data, &mut lamports);
+
+            let result = verify_cpi_caller_is_token2022(&sysvar_ai, &nft_mint);
+            assert_eq!(
+                result,
+                Ok(false),
+                "non-Token-2022 top-level (prog={}) must return Ok(false), never Err — composability invariant",
+                prog
+            );
+        }
+    }
 }
