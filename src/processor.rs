@@ -867,6 +867,13 @@ fn process_burn_position_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
         let portfolio_data = portfolio.try_borrow_data()?;
         let p = slab_types_v16::decode_portfolio(&portfolio_data)
             .map_err(cpi_v16::map_decode_err)?;
+        // #110C: apply the same provenance check that MintPositionNft (line 304)
+        // enforces. Without this, a portfolio with a mismatched portfolio_account_id
+        // passes decode_portfolio at burn even though it would be rejected at mint.
+        if p.provenance_header.portfolio_account_id != portfolio.key.to_bytes() {
+            msg!("BurnPositionNft: portfolio_account_id mismatch (#110C)");
+            return Err(NftError::InvalidNftPda.into());
+        }
         let _slot = cpi_v16::verify_bound_leg(p, &nft_state_copy)
             .map_err(ProgramError::from)?;
     }
@@ -1054,6 +1061,13 @@ fn process_emergency_burn(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
         let portfolio_data = portfolio.try_borrow_data()?;
         let p = slab_types_v16::decode_portfolio(&portfolio_data)
             .map_err(cpi_v16::map_decode_err)?;
+        // #110C: apply the same provenance check that MintPositionNft (line 304)
+        // enforces. Without this, a portfolio with a mismatched portfolio_account_id
+        // passes decode_portfolio at emergency-burn even though it would be rejected at mint.
+        if p.provenance_header.portfolio_account_id != portfolio.key.to_bytes() {
+            msg!("EmergencyBurn: portfolio_account_id mismatch (#110C)");
+            return Err(NftError::InvalidNftPda.into());
+        }
         cpi_v16::emergency_burn_ok(p, &nft_state_copy)
             .map_err(ProgramError::from)?;
     } else {
