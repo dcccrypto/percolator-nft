@@ -10,8 +10,7 @@
 //! The decision functions take an already-decoded `&PortfolioAccountV16Account`
 //! (+ `&PositionNftV16` where relevant) so they are pure and exhaustively
 //! unit-testable WITHOUT a Solana runtime. The on-chain handlers do account
-//! plumbing + the (unchanged) Token-2022 CPIs around these functions; the
-//! end-to-end path is verified by the A.5 LiteSVM suite.
+//! plumbing + the (unchanged) Token-2022 CPIs around these functions.
 //!
 //! ## v16 slot-reuse anchor = `market_id` (per-asset-slot incarnation id)
 //!

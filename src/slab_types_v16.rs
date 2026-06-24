@@ -39,9 +39,9 @@
 //!
 //! ## Compile-time guards
 //!
-//! `const_assert!` on every sub-struct size + key field offsets fail to compile
-//! if the vendored layout drifts from the engine. The LiteSVM integration test
-//! (cross-cut phase) is the runtime ground truth.
+//! `const_assert!` on every sub-struct size + key field offsets verify internal
+//! consistency of the mirror struct. They do NOT verify alignment with the live
+//! engine's layout — that requires runtime validation against real on-chain data.
 
 #![allow(dead_code)] // wired into cpi.rs / processor.rs
 
