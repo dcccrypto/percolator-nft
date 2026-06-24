@@ -568,8 +568,8 @@ fn process_mint_position_nft(
     // Atomic ExtraAccountMetaList PDA initialization
     //
     // TLV layout (7 entries):
-    //   [5] PositionNft PDA        — writable  (hook updates f_snap_at_mint)
-    //   [6] Portfolio account      — WRITABLE  (B-3 CPI mutates portfolio.owner)
+    //   [5] PositionNft PDA        — read-only (#105: hook is validation-only)
+    //   [6] Portfolio account      — read-only (#105: B-3 CPI moved to mint/burn, not hook)
     //   [7] Percolator program     — read-only (from portfolio.owner, allowlist-verified)
     //   [8] Mint authority PDA     — read-only
     //   [9] Instructions sysvar    — read-only
@@ -652,10 +652,10 @@ fn process_mint_position_nft(
         data[12..16].copy_from_slice(&(EXTRA_META_COUNT as u32).to_le_bytes());
 
         let entries: [(Pubkey, bool, bool); EXTRA_META_COUNT] = [
-            // 5: PositionNft PDA — writable (hook updates f_snap_at_mint on transfer)
-            (*nft_pda.key, false, true),
-            // 6: Portfolio account — WRITABLE (B-3 CPI mutates portfolio.owner)
-            (*portfolio.key, false, true),
+            // 5: PositionNft PDA   — read-only (#105: hook is validation-only, no longer writes f_snap_at_mint)
+            (*nft_pda.key, false, false),
+            // 6: Portfolio account — read-only (#105: B-3 ownership CPI moved to mint/burn; hook only reads)
+            (*portfolio.key, false, false),
             // 7: Percolator program — read-only, from verified portfolio.owner
             (percolator_prog_id, false, false),
             // 8: Mint authority PDA — read-only
@@ -1017,15 +1017,25 @@ fn process_emergency_burn(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
     let portfolio_gone = portfolio.data_is_empty() || portfolio.lamports() == 0;
 
     // ── Check emergency burn eligibility (position flat / no active leg) ──
-    if !portfolio_gone {
+    if portfolio_gone {
+        msg!("EmergencyBurn: bound portfolio already closed/reclaimed by the core — skipping eligibility + unwrap (#131)");
+    } else {
         cpi_v16::verify_portfolio_program(portfolio)?;
         let portfolio_data = portfolio.try_borrow_data()?;
-        let p = slab_types_v16::decode_portfolio(&portfolio_data)
-            .map_err(cpi_v16::map_decode_err)?;
-        cpi_v16::emergency_burn_ok(p, &nft_state_copy)
-            .map_err(ProgramError::from)?;
-    } else {
-        msg!("EmergencyBurn: bound portfolio already closed/reclaimed by the core — skipping eligibility + unwrap (#131)");
+        match slab_types_v16::decode_portfolio(&portfolio_data) {
+            Ok(p) => {
+                cpi_v16::emergency_burn_ok(p, &nft_state_copy)
+                    .map_err(ProgramError::from)?;
+            }
+            Err(e) => {
+                // #110B: portfolio present and wrapper-owned but undecodable (e.g. a
+                // future layout migration changed magic/version). We cannot verify
+                // eligibility, but the position cannot be operated while escrowed, so
+                // skip the check and fall through to the unwrap CPI which the wrapper
+                // handles on its own terms.
+                msg!("EmergencyBurn: portfolio present but undecodable ({:?}) — skipping eligibility, proceeding to unwrap (#110B)", e);
+            }
+        }
     }
 
     // ── Verify holder owns the NFT via the canonical Token-2022 ATA ──
@@ -1314,8 +1324,8 @@ fn process_repair_extra_metas(
     data[12..16].copy_from_slice(&(EXTRA_META_COUNT as u32).to_le_bytes());
 
     let entries: [(Pubkey, bool, bool); EXTRA_META_COUNT] = [
-        (*nft_pda.key, false, true),                     // 5: PositionNft PDA — writable
-        (*portfolio.key, false, true),                   // 6: Portfolio account — WRITABLE (B-3 CPI)
+        (*nft_pda.key, false, false),                    // 5: PositionNft PDA   — read-only (#105)
+        (*portfolio.key, false, false),                  // 6: Portfolio account — read-only (#105)
         (percolator_prog_id, false, false),              // 7: Percolator program — read-only
         (*mint_auth.key, false, false),                  // 8: Mint authority PDA — read-only
         (sysvar_instructions::id(), false, false),       // 9: Instructions sysvar — read-only

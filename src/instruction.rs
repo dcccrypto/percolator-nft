@@ -116,12 +116,11 @@ pub const TAG_EMERGENCY_BURN: u8 = 5;
 /// its flags match the current processor's `build_extra_account_metas`
 /// output — most importantly, marking the portfolio account writable.
 ///
-/// Historical mints produced an ExtraAccountMetaList where the portfolio was
-/// declared read-only. That was wrong — the transfer hook CPIs into
-/// percolator-prog with `TransferPortfolioOwnership` (tag 72), which mutates
-/// `owner` in the portfolio. Without portfolio writable, the CPI fails with
-/// `writable privilege escalated` and every transfer bounces. Burn + remint
-/// is not a workaround: burn requires the position already be closed.
+/// Historical mints (pre-#105) produced an ExtraAccountMetaList where the
+/// portfolio was declared writable for the transfer-hook's B-3 ownership CPI.
+/// Post-#105 (escrow-at-mint), the hook is validation-only and no longer CPIs;
+/// both PositionNft PDA and Portfolio are now read-only in newly minted lists.
+/// `RepairExtraMetas` rewrites old lists to the correct (read-only) flags.
 ///
 /// Permissionless by design. The only data written to the PDA is
 /// deterministic from the on-chain state of `nft_mint` + its `nft_pda`
