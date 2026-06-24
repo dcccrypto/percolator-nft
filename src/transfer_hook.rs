@@ -109,6 +109,7 @@ const TOKEN_IX_TRANSFER_CHECKED_WITH_FEE: u8 = 26;
 fn verify_cpi_caller_is_token2022(
     sysvar_ix: &AccountInfo,
     expected_mint: &Pubkey,
+    nft_program_id: &Pubkey,
 ) -> Result<(), ProgramError> {
     // Load the index of the currently executing top-level instruction.
     let current_ix_idx = sysvar_instructions::load_current_index_checked(sysvar_ix)?;
@@ -119,14 +120,22 @@ fn verify_cpi_caller_is_token2022(
 
     // #145 (composability): when the top-level instruction is NOT Token-2022, the
     // transfer was initiated by another program via CPI — e.g. an NFT marketplace
-    // or the position orderbook moving the NFT on a match. Allow it. This is safe
-    // because (a) post-#105 the transfer hook is VALIDATION-ONLY (it reassigns no
-    // ownership — there is no state to forge by invoking Execute), and (b) the main
-    // hook flow independently verifies the transfer is for the bound mint via the
-    // Execute `mint` account (`nft_state.nft_mint == mint.key`). Requiring the
-    // top-level instruction to be Token-2022 would block every program-escrow
-    // marketplace/orderbook transfer — the core of the composability goal.
+    // or the position orderbook moving the NFT on a match. Allow it.
+    //
+    // HOWEVER: if the top-level instruction IS this program itself, the caller
+    // invoked ExecuteTransferHook directly rather than through a CPI chain. That
+    // must be rejected. #138 added a last_holder write on every hook invocation;
+    // without this self-invocation guard an attacker can submit Execute as a
+    // top-level instruction, supply an ATA they own as dest_ata, and overwrite
+    // last_holder on any live PositionNft PDA. ReconcileBurnedNft is permissionless
+    // and releases the escrowed position to last_holder once supply is zero —
+    // so poisoning last_holder before the real holder does an out-of-band burn
+    // enables position theft.
     if current_ix.program_id != token2022::TOKEN_2022_PROGRAM_ID {
+        if &current_ix.program_id == nft_program_id {
+            msg!("Transfer rejected: ExecuteTransferHook may not be the top-level instruction");
+            return Err(NftError::UnauthorizedDirectInvocation.into());
+        }
         return Ok(());
     }
     // Top-level IS Token-2022 (a direct wallet→wallet transfer): keep the strict
@@ -352,7 +361,7 @@ pub fn process_execute(
     // Without this, anyone can call Execute directly with a dest_ata they
     // own and steal the portfolio by forging `new_owner`. PORT VERBATIM.
     // ────────────────────────────────────────────────────────────────────
-    verify_cpi_caller_is_token2022(sysvar_ix, mint.key)?;
+    verify_cpi_caller_is_token2022(sysvar_ix, mint.key, program_id)?;
 
     // ── Validate percolator_prog key against known constants ──────────
     // Prevents an attacker from supplying a malicious program as account[7].
