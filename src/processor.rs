@@ -1250,6 +1250,12 @@ fn process_reconcile_burned_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -
     //    succeeds ONLY if the portfolio is still escrowed (owner == mint-auth PDA);
     //    if it was already unwrapped (a normal burn ran first), the wrapper rejects
     //    on the escrow invariant — i.e. there was nothing stranded to reconcile. ──
+    //
+    // verify_portfolio_program checks portfolio.owner is on the {DEVNET, MAINNET}
+    // allowlist. verify_percolator_prog_account then checks percolator_prog.key ==
+    // portfolio.owner. Both checks are required: verify_percolator_prog_account alone
+    // is satisfied by any (percolator_prog, portfolio) pair the attacker controls.
+    cpi_v16::verify_portfolio_program(portfolio)?;
     verify_percolator_prog_account(percolator_prog, portfolio)?;
     cpi_unwrap_portfolio(
         percolator_prog,
