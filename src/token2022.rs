@@ -177,6 +177,7 @@ pub fn initialize_token_metadata(
     mint: &Pubkey,
     update_authority: &Pubkey,
     mint_authority: &Pubkey,
+    payer: &Pubkey,
     name: &str,
     symbol: &str,
     uri: &str,
@@ -194,6 +195,8 @@ pub fn initialize_token_metadata(
             AccountMeta::new_readonly(*update_authority, false),  // update authority
             AccountMeta::new_readonly(*mint, false),              // mint (same pubkey, read-only)
             AccountMeta::new_readonly(*mint_authority, true),     // mint authority (signer)
+            AccountMeta::new(*payer, true),                       // payer (funds realloc lamports)
+            AccountMeta::new_readonly(solana_program::system_program::id(), false), // system program (realloc CPI)
         ],
         data,
     }

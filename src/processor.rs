@@ -495,18 +495,23 @@ fn process_mint_position_nft(
         let uri_len = 4 + nft_uri.len();
         4 + 32 + 32 + name_len + symbol_len + uri_len + 4
     };
-    let final_size = mint_space as usize + metadata_tlv_size + 128;
-    let mint_rent = rent.minimum_balance(final_size);
-    // #115: allocate `final_size` bytes (not just `mint_space`), because
-    // `mint_rent = rent.minimum_balance(final_size)` already pays for the
-    // full extent — allocating only `mint_space` here would cause the
-    // token-metadata TLV init to fail with AccountDataTooSmall.
+    // Correct Token-2022 embedded-metadata-on-mint pattern (fixes #115):
+    //   Step 1 — create the mint account at EXACTLY mint_space so that
+    //            InitializeMint2 passes its account-size check.
+    //   Step 2 — pre-fund the mint account with the lamports it will need
+    //            AFTER the metadata TLV is appended by token_metadata::Initialize,
+    //            which reallocs the account in-place.  We transfer the difference
+    //            (final_size_rent - mint_space_rent) via a system transfer before
+    //            calling the metadata init CPI; Token-2022 then reallocs to fit.
+    let mint_space_rent = rent.minimum_balance(mint_space as usize);
+    let final_size = mint_space as usize + metadata_tlv_size;
+    let final_size_rent = rent.minimum_balance(final_size);
     invoke(
         &system_instruction::create_account(
             owner.key,
             nft_mint.key,
-            mint_rent,
-            final_size as u64,
+            mint_space_rent,
+            mint_space,
             &token2022::TOKEN_2022_PROGRAM_ID,
         ),
         &[owner.clone(), nft_mint.clone(), system_program.clone()],
@@ -532,17 +537,30 @@ fn process_mint_position_nft(
         std::slice::from_ref(nft_mint),
     )?;
 
+    // Pre-fund the mint account with the extra lamports needed for the metadata
+    // TLV realloc that token_metadata::Initialize will perform in-place.  The
+    // payer (owner) transfers the difference between the rent-exempt minimum
+    // for the full final size and what was deposited at create_account time.
+    let lamport_top_up = final_size_rent
+        .checked_sub(mint_space_rent)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
+    invoke(
+        &system_instruction::transfer(owner.key, nft_mint.key, lamport_top_up),
+        &[owner.clone(), nft_mint.clone(), system_program.clone()],
+    )?;
+
     let mint_auth_seeds: &[&[u8]] = &[MINT_AUTHORITY_SEED, &[mint_auth_bump]];
     invoke_signed(
         &token2022::initialize_token_metadata(
             nft_mint.key,
             mint_auth.key,
             mint_auth.key,
+            owner.key,
             &nft_name,
             NFT_SYMBOL,
             nft_uri,
         ),
-        &[nft_mint.clone(), mint_auth.clone()],
+        &[nft_mint.clone(), mint_auth.clone(), owner.clone(), system_program.clone()],
         &[mint_auth_seeds],
     )?;
 
