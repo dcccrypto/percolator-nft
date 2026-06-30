@@ -1350,6 +1350,8 @@ fn process_settle_funding(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
     let portfolio_data = portfolio.try_borrow_data()?;
     let p = slab_types_v16::decode_portfolio(&portfolio_data)
         .map_err(cpi_v16::map_decode_err)?;
+
+    cpi_v16::verify_portfolio_account_id(p, portfolio.key, "SettleFunding")?;
     let slot = cpi_v16::verify_bound_leg(p, &nft_state_copy)
         .map_err(ProgramError::from)?;
 
@@ -1403,15 +1405,23 @@ fn process_repair_extra_metas(
         return Err(ProgramError::IncorrectProgramId);
     }
 
-    let (expected_extra_metas, _bump) = extra_account_metas_pda(nft_mint.key, program_id);
+    let (expected_extra_metas, extra_metas_bump) = extra_account_metas_pda(nft_mint.key, program_id);
     if *extra_metas.key != expected_extra_metas {
         msg!("RepairExtraMetas: extra_metas PDA does not match derivation");
         return Err(NftError::InvalidExtraAccountMetas.into());
     }
-    if extra_metas.owner != program_id {
-        msg!("RepairExtraMetas: extra_metas PDA not owned by this program");
-        return Err(NftError::InvalidExtraAccountMetas.into());
-    }
+    let extra_metas_system_owned =
+    *extra_metas.owner == solana_program::system_program::id();
+
+if extra_metas.owner != program_id && !extra_metas_system_owned {
+    msg!("RepairExtraMetas: extra_metas PDA not owned by this program or System Program");
+    return Err(NftError::InvalidExtraAccountMetas.into());
+}
+
+if extra_metas_system_owned && !extra_metas.data_is_empty() {
+    msg!("RepairExtraMetas: System-owned extra_metas PDA must be empty before recovery");
+    return Err(NftError::InvalidExtraAccountMetas.into());
+}
 
     // Verify nft_pda is this program's PositionNftV16 state account.
     if nft_pda.owner != program_id {
@@ -1473,11 +1483,15 @@ fn process_repair_extra_metas(
         HEADER_LEN + EXTRA_META_ENTRY_LEN * EXTRA_META_COUNT;
 
     let mut data = extra_metas.try_borrow_mut_data()?;
-    if data.len() < EXTRA_METAS_ACCOUNT_LEN {
-        drop(data);
+    if data.len() != EXTRA_METAS_ACCOUNT_LEN {
+    let needs_grow = data.len() < EXTRA_METAS_ACCOUNT_LEN;
+    drop(data);
+
+    if needs_grow {
         let rent = Rent::get()?;
         let needed = rent.minimum_balance(EXTRA_METAS_ACCOUNT_LEN);
         let current = extra_metas.lamports();
+
         if needed > current {
             let top_up = needed - current;
             invoke(
@@ -1485,9 +1499,31 @@ fn process_repair_extra_metas(
                 &[payer.clone(), extra_metas.clone(), system_program.clone()],
             )?;
         }
-        extra_metas.resize(EXTRA_METAS_ACCOUNT_LEN)?;
-        data = extra_metas.try_borrow_mut_data()?;
+
+        if extra_metas_system_owned {
+            let extra_metas_seeds: &[&[u8]] = &[
+                b"extra-account-metas",
+                nft_mint.key.as_ref(),
+                &[extra_metas_bump],
+            ];
+
+            invoke_signed(
+                &system_instruction::allocate(extra_metas.key, EXTRA_METAS_ACCOUNT_LEN as u64),
+                &[extra_metas.clone(), system_program.clone()],
+                &[extra_metas_seeds],
+            )?;
+
+            invoke_signed(
+                &system_instruction::assign(extra_metas.key, program_id),
+                &[extra_metas.clone(), system_program.clone()],
+                &[extra_metas_seeds],
+            )?;
+        }
     }
+
+    extra_metas.resize(EXTRA_METAS_ACCOUNT_LEN)?;
+    data = extra_metas.try_borrow_mut_data()?;
+}
 
     data[0..8].copy_from_slice(&EXECUTE_DISCRIMINATOR);
     let tlv_value_len: u32 = (4 + EXTRA_META_ENTRY_LEN * EXTRA_META_COUNT) as u32;
