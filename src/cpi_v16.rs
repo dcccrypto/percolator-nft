@@ -46,7 +46,7 @@
 //! So the reuse check is `market_id`-only (design-correction (b), §16.2). The
 //! mint-time `epoch_snap`/`position_owner` snapshots are kept informational.
 
-use solana_program::{account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey};
+use solana_program::{account_info::AccountInfo, msg, program_error::ProgramError, pubkey::Pubkey};
 
 // ═══════════════════════════════════════════════════════════════
 // NFT registry PDA (SHARED SEED CONTRACT with percolator-prog)
@@ -107,6 +107,27 @@ pub fn verify_portfolio_program(portfolio_ai: &AccountInfo) -> Result<(), Progra
 pub fn map_decode_err(e: PortfolioDecodeError) -> ProgramError {
     solana_program::msg!("portfolio decode failed: {:?}", e);
     NftError::PortfolioDecodeFailed.into()
+}
+
+
+/// Verify that the decoded portfolio provenance binds to the actual portfolio
+/// account passed to the handler.
+///
+/// This is intentionally separated from `decode_portfolio`: decoding validates
+/// the internal v16 layout and provenance-owner consistency, while each handler
+/// must also prove that the decoded `portfolio_account_id` is the same account
+/// it is about to value, settle, transfer-gate, or otherwise trust.
+pub fn verify_portfolio_account_id(
+    portfolio: &PortfolioAccountV16Account,
+    portfolio_key: &Pubkey,
+    context: &str,
+) -> Result<(), ProgramError> {
+    if portfolio.provenance_header.portfolio_account_id != portfolio_key.to_bytes() {
+        msg!("{}: portfolio_account_id does not match passed portfolio account", context);
+        return Err(NftError::InvalidNftPda.into());
+    }
+
+    Ok(())
 }
 
 // ═══════════════════════════════════════════════════════════════

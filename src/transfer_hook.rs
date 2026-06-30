@@ -471,6 +471,8 @@ pub fn process_execute(
         let portfolio_data = portfolio.try_borrow_data()?;
         let p = slab_types_v16::decode_portfolio(&portfolio_data).map_err(map_decode_err)?;
 
+    crate::cpi_v16::verify_portfolio_account_id(p, portfolio.key, "TransferHook")?;
+
         market_group = Pubkey::new_from_array(p.provenance_header.market_group_id);
 
         // Slot-reuse guard (market_id anchor — monotonic, never reused).
