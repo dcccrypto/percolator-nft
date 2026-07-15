@@ -69,7 +69,18 @@ pub const LAYOUT_REVISION: u32 = 5;
 /// `"PERCV16\0"` little-endian. Byte 0..8 of every wrapper account.
 pub const MAGIC: u64 = 0x5045_5243_5631_3600;
 /// Wrapper account-format version. Byte 8..10.
-pub const VERSION: u16 = 16;
+///
+/// Bumped 16 -> 17 to accept the protocol-fee/taker-only wrapper layout
+/// change (~/v17/PROTOCOL-FEE-DESIGN.md): `WrapperConfigV16` grows 432 -> 496
+/// bytes and `percolator-prog::v16_program::state::VERSION` bumps in lockstep
+/// (`v16_program.rs`, `state` mod). This is the WRAPPER account's header
+/// version (bytes 8..10 of every wrapper-owned account, portfolio included)
+/// -- distinct from the NFT's OWN account version (`POSITION_NFT_V16_VERSION`
+/// in `state_v16.rs`, currently 2, unaffected by this change) and from the
+/// engine's `ProvenanceHeaderV16` guards (`V16_LAYOUT_DISCRIMINATOR` = 16,
+/// `V16_ACCOUNT_VERSION` = 1, both unchanged in the v17 engine -- confirmed
+/// via `~/v17/percolator/src/v16.rs`, not bumped by this change).
+pub const VERSION: u16 = 17;
 /// Account-kind discriminant for a portfolio. Byte 10.
 pub const KIND_PORTFOLIO: u8 = 2;
 /// Bytes consumed by the wrapper header before the engine POD begins.
