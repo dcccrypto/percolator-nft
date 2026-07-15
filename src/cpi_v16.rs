@@ -87,7 +87,7 @@ use crate::state_v16::PositionNftV16;
 /// Known Percolator wrapper program IDs. The mainnet ID is the live wrapper
 /// (`ESa89R5…`, unchanged at v16 cutover per hard constraint #5).
 pub const PERCOLATOR_DEVNET: Pubkey =
-    solana_program::pubkey!("FxfD37s1AZTeWfFQps9Zpebi2dNQ9QSSDtfMKdbsfKrD");
+    solana_program::pubkey!("DhSkE7uTb8HBUYYWF1xkxMYBGtLYJEoDq1tfBD7SnHcj");
 pub const PERCOLATOR_MAINNET: Pubkey =
     solana_program::pubkey!("ESa89R5Es3rJ5mnwGybVRG1GrNt9etP11Z5V2QWD4edv");
 
