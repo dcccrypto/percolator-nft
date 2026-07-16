@@ -495,18 +495,25 @@ fn process_mint_position_nft(
         let uri_len = 4 + nft_uri.len();
         4 + 32 + 32 + name_len + symbol_len + uri_len + 4
     };
-    let final_size = mint_space as usize + metadata_tlv_size + 128;
-    let mint_rent = rent.minimum_balance(final_size);
-    // #115: allocate `final_size` bytes (not just `mint_space`), because
-    // `mint_rent = rent.minimum_balance(final_size)` already pays for the
-    // full extent — allocating only `mint_space` here would cause the
-    // token-metadata TLV init to fail with AccountDataTooSmall.
+    // Correct Token-2022 embedded-metadata-on-mint pattern (re-fixes #115, which
+    // was accidentally re-broken by a stale revert): `InitializeMint2` rejects the
+    // mint with `InvalidAccountData` if any uninitialized/zeroed bytes follow the
+    // three already-initialized pre-mint extensions (metadata pointer, transfer
+    // hook, mint-close-authority) — it tries to parse the trailing padding as a
+    // TLV entry. So the account MUST be created at EXACTLY `mint_space` (no
+    // metadata region, no slack) so `InitializeMint2` passes its scan. The
+    // metadata TLV is added AFTER `InitializeMint2` via `initialize_token_metadata`,
+    // which reallocs the account in-place; we pre-fund the extra rent-exempt
+    // lamports it needs for that larger `final_size` via a system transfer first.
+    let mint_space_rent = rent.minimum_balance(mint_space as usize);
+    let final_size = mint_space as usize + metadata_tlv_size;
+    let final_size_rent = rent.minimum_balance(final_size);
     invoke(
         &system_instruction::create_account(
             owner.key,
             nft_mint.key,
-            mint_rent,
-            final_size as u64,
+            mint_space_rent,
+            mint_space,
             &token2022::TOKEN_2022_PROGRAM_ID,
         ),
         &[owner.clone(), nft_mint.clone(), system_program.clone()],
@@ -532,17 +539,34 @@ fn process_mint_position_nft(
         std::slice::from_ref(nft_mint),
     )?;
 
+    // Pre-fund the mint account with the extra lamports needed for the metadata
+    // TLV realloc that token_metadata::Initialize performs in-place. This transfer
+    // is the SOLE funding path: Token-2022's Initialize handler reallocs but does
+    // NOT top up lamports itself (it assumes rent-exemption already holds), so this
+    // must run BEFORE the CPI below. The owner (payer) transfers the difference
+    // between the rent-exempt minimum for the full final size and what was
+    // deposited at create_account time above. Fail-closed: an under-fund reverts
+    // the tx on the end-of-tx rent invariant rather than losing funds silently.
+    let lamport_top_up = final_size_rent
+        .checked_sub(mint_space_rent)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
+    invoke(
+        &system_instruction::transfer(owner.key, nft_mint.key, lamport_top_up),
+        &[owner.clone(), nft_mint.clone(), system_program.clone()],
+    )?;
+
     let mint_auth_seeds: &[&[u8]] = &[MINT_AUTHORITY_SEED, &[mint_auth_bump]];
     invoke_signed(
         &token2022::initialize_token_metadata(
             nft_mint.key,
             mint_auth.key,
             mint_auth.key,
+            owner.key,
             &nft_name,
             NFT_SYMBOL,
             nft_uri,
         ),
-        &[nft_mint.clone(), mint_auth.clone()],
+        &[nft_mint.clone(), mint_auth.clone(), owner.clone(), system_program.clone()],
         &[mint_auth_seeds],
     )?;
 

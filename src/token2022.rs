@@ -172,11 +172,25 @@ fn borsh_string(s: &str) -> Vec<u8> {
 /// For embedded metadata (MetadataPointer points to mint itself), the mint
 /// serves as both the metadata account and the mint account.
 ///
-/// Accounts: [metadata/mint(w), update_authority, mint(readonly), mint_authority(s)]
+/// Accounts: [metadata/mint(w), update_authority, mint(readonly), mint_authority(s), payer(s,w), system_program]
+///
+/// IMPORTANT: Token-2022's embedded-metadata `Initialize` handler consumes ONLY
+/// the first 4 accounts (metadata, update_authority, mint, mint_authority) and
+/// reads NO payer/system_program — verified against upstream
+/// `token-2022/program/src/extension/token_metadata/processor.rs::process_initialize`.
+/// It reallocs the mint's data in-place for the metadata TLV but performs NO
+/// internal lamport top-up: it assumes the account is ALREADY rent-exempt for
+/// the larger size. So the caller's `process_mint_position_nft` `lamport_top_up`
+/// system-transfer BEFORE this CPI is the SOLE funding mechanism (fail-closed:
+/// if it ever under-funds, the tx hard-reverts on the end-of-tx rent invariant,
+/// never silent loss). The trailing `payer` + `system_program` metas are passed
+/// but are INERT (never read by the callee); they are kept only because the
+/// surfpool mint→transfer→burn e2e was proven with this exact account list.
 pub fn initialize_token_metadata(
     mint: &Pubkey,
     update_authority: &Pubkey,
     mint_authority: &Pubkey,
+    payer: &Pubkey,
     name: &str,
     symbol: &str,
     uri: &str,
@@ -194,6 +208,8 @@ pub fn initialize_token_metadata(
             AccountMeta::new_readonly(*update_authority, false),  // update authority
             AccountMeta::new_readonly(*mint, false),              // mint (same pubkey, read-only)
             AccountMeta::new_readonly(*mint_authority, true),     // mint authority (signer)
+            AccountMeta::new(*payer, true),                       // payer (funds realloc lamports)
+            AccountMeta::new_readonly(solana_program::system_program::id(), false), // system program (realloc CPI)
         ],
         data,
     }
