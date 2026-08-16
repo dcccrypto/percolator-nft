@@ -1427,9 +1427,14 @@ fn process_repair_extra_metas(
     //    PositionNftV16 bound to this mint and portfolio (checked below), so metas
     //    cannot be conjured for an NFT that does not exist.
     //
-    // Note this is NOT the post-burn state: close_extra_metas (:747) zeroes lamports
-    // and data but never assigns the account back to the System Program, and a burn
-    // drains nft_pda too — so a burned NFT cannot reach the checks below.
+    // On the post-burn state: a burned NFT's extra_metas DOES eventually present this
+    // way. close_extra_metas (:747) zeroes its lamports and data without reassigning
+    // the owner, but the runtime reaps zero-lamport accounts at end of transaction, so
+    // on any LATER transaction it loads as System-owned and empty and reaches this
+    // branch. (An earlier revision of this comment claimed the opposite; that was
+    // wrong.) What actually keeps a burned NFT out is the NEXT gate: the same burn
+    // drains nft_pda, so `nft_pda.owner != program_id` below rejects before anything
+    // is written. The safety rests on that check, not on the owner byte here.
     let extra_metas_system_owned =
         *extra_metas.owner == solana_program::system_program::id();
 
@@ -1503,41 +1508,43 @@ fn process_repair_extra_metas(
         HEADER_LEN + EXTRA_META_ENTRY_LEN * EXTRA_META_COUNT;
 
     let mut data = extra_metas.try_borrow_mut_data()?;
-    if data.len() != EXTRA_METAS_ACCOUNT_LEN {
-        let needs_grow = data.len() < EXTRA_METAS_ACCOUNT_LEN;
+    // GROW ONLY, as on main. An earlier revision used `!=` here, which also SHRANK an
+    // oversized program-owned account back to EXTRA_METAS_ACCOUNT_LEN — a brand-new
+    // destructive capability on a PERMISSIONLESS instruction, and one nothing asked
+    // for. `<` still covers the recovery case: a never-created (System-owned) account
+    // has len 0, which is < the target.
+    if data.len() < EXTRA_METAS_ACCOUNT_LEN {
         drop(data);
 
-        if needs_grow {
-            let rent = Rent::get()?;
-            let needed = rent.minimum_balance(EXTRA_METAS_ACCOUNT_LEN);
-            let current = extra_metas.lamports();
+        let rent = Rent::get()?;
+        let needed = rent.minimum_balance(EXTRA_METAS_ACCOUNT_LEN);
+        let current = extra_metas.lamports();
 
-            if needed > current {
-                let top_up = needed - current;
-                invoke(
-                    &system_instruction::transfer(payer.key, extra_metas.key, top_up),
-                    &[payer.clone(), extra_metas.clone(), system_program.clone()],
-                )?;
-            }
+        if needed > current {
+            let top_up = needed - current;
+            invoke(
+                &system_instruction::transfer(payer.key, extra_metas.key, top_up),
+                &[payer.clone(), extra_metas.clone(), system_program.clone()],
+            )?;
+        }
 
-            if extra_metas_system_owned {
-                // Same seeds as the mint path (processor.rs:631) — use the shared
-                // constant so a seed change cannot desynchronise the two derivations.
-                let extra_metas_seeds: &[&[u8]] =
-                    &[EXTRA_METAS_SEED, nft_mint.key.as_ref(), &[extra_metas_bump]];
+        if extra_metas_system_owned {
+            // Same seeds as the mint path (processor.rs:631) — use the shared
+            // constant so a seed change cannot desynchronise the two derivations.
+            let extra_metas_seeds: &[&[u8]] =
+                &[EXTRA_METAS_SEED, nft_mint.key.as_ref(), &[extra_metas_bump]];
 
-                invoke_signed(
-                    &system_instruction::allocate(extra_metas.key, EXTRA_METAS_ACCOUNT_LEN as u64),
-                    &[extra_metas.clone(), system_program.clone()],
-                    &[extra_metas_seeds],
-                )?;
+            invoke_signed(
+                &system_instruction::allocate(extra_metas.key, EXTRA_METAS_ACCOUNT_LEN as u64),
+                &[extra_metas.clone(), system_program.clone()],
+                &[extra_metas_seeds],
+            )?;
 
-                invoke_signed(
-                    &system_instruction::assign(extra_metas.key, program_id),
-                    &[extra_metas.clone(), system_program.clone()],
-                    &[extra_metas_seeds],
-                )?;
-            }
+            invoke_signed(
+                &system_instruction::assign(extra_metas.key, program_id),
+                &[extra_metas.clone(), system_program.clone()],
+                &[extra_metas_seeds],
+            )?;
         }
 
         extra_metas.resize(EXTRA_METAS_ACCOUNT_LEN)?;
