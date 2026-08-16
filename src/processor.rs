@@ -646,7 +646,10 @@ fn process_mint_position_nft(
         }
 
         const EXTRA_META_ENTRY_LEN: usize = 35;
-        const EXTRA_META_COUNT: usize = 7;
+        // Derived from the shared flags table, never re-typed: EXTRA_META_ENTRY_FLAGS
+        // is what actually decides the entries, so a count declared independently
+        // could silently disagree with it.
+        const EXTRA_META_COUNT: usize = EXTRA_META_ENTRY_FLAGS.len();
         const EXTRA_METAS_ACCOUNT_LEN: usize =
             8 /* TLV type */ + 4 /* TLV length */ + 4 /* entry count */
             + EXTRA_META_ENTRY_LEN * EXTRA_META_COUNT;
@@ -1518,7 +1521,8 @@ fn process_repair_extra_metas(
     }
 
     const EXTRA_META_ENTRY_LEN: usize = 35;
-    const EXTRA_META_COUNT: usize = 7;
+    // Derived from the shared flags table — see the note at the mint path.
+    const EXTRA_META_COUNT: usize = EXTRA_META_ENTRY_FLAGS.len();
     const HEADER_LEN: usize = 16;
     const EXTRA_METAS_ACCOUNT_LEN: usize =
         HEADER_LEN + EXTRA_META_ENTRY_LEN * EXTRA_META_COUNT;
@@ -1568,7 +1572,7 @@ fn process_repair_extra_metas(
     }
 
     msg!(
-        "RepairExtraMetas: rewrote ExtraAccountMetaList for mint {} (portfolio now writable)",
+        "RepairExtraMetas: rewrote ExtraAccountMetaList for mint {} (nft_pda writable, portfolio read-only)",
         nft_mint.key
     );
     Ok(())
