@@ -1410,18 +1410,38 @@ fn process_repair_extra_metas(
         msg!("RepairExtraMetas: extra_metas PDA does not match derivation");
         return Err(NftError::InvalidExtraAccountMetas.into());
     }
+    // The PDA is normally owned by this program. A System-owned PDA is admitted as the
+    // recovery case this instruction exists for: an NFT whose extra_metas account was
+    // never created at all. A nonexistent account is presented to a program as
+    // System-owned with zero lamports and no data, so the previous
+    // `owner != program_id -> reject` gate meant RepairExtraMetas could only fix a
+    // WRONG-SIZED metas account, never a MISSING one — the case that actually bricks
+    // transfers, because the Token-2022 hook cannot resolve its account list without it.
+    //
+    // Why this is safe to admit:
+    //  * the address is already pinned to our own derivation immediately above, so a
+    //    System-owned account here can never be someone else's state;
+    //  * it must be EMPTY, so an account carrying data is rejected rather than
+    //    silently overwritten;
+    //  * nft_pda is separately required to be program-owned and to carry a valid
+    //    PositionNftV16 bound to this mint and portfolio (checked below), so metas
+    //    cannot be conjured for an NFT that does not exist.
+    //
+    // Note this is NOT the post-burn state: close_extra_metas (:747) zeroes lamports
+    // and data but never assigns the account back to the System Program, and a burn
+    // drains nft_pda too — so a burned NFT cannot reach the checks below.
     let extra_metas_system_owned =
-    *extra_metas.owner == solana_program::system_program::id();
+        *extra_metas.owner == solana_program::system_program::id();
 
-if extra_metas.owner != program_id && !extra_metas_system_owned {
-    msg!("RepairExtraMetas: extra_metas PDA not owned by this program or System Program");
-    return Err(NftError::InvalidExtraAccountMetas.into());
-}
+    if extra_metas.owner != program_id && !extra_metas_system_owned {
+        msg!("RepairExtraMetas: extra_metas PDA not owned by this program or System Program");
+        return Err(NftError::InvalidExtraAccountMetas.into());
+    }
 
-if extra_metas_system_owned && !extra_metas.data_is_empty() {
-    msg!("RepairExtraMetas: System-owned extra_metas PDA must be empty before recovery");
-    return Err(NftError::InvalidExtraAccountMetas.into());
-}
+    if extra_metas_system_owned && !extra_metas.data_is_empty() {
+        msg!("RepairExtraMetas: System-owned extra_metas PDA must be empty before recovery");
+        return Err(NftError::InvalidExtraAccountMetas.into());
+    }
 
     // Verify nft_pda is this program's PositionNftV16 state account.
     if nft_pda.owner != program_id {
@@ -1484,46 +1504,45 @@ if extra_metas_system_owned && !extra_metas.data_is_empty() {
 
     let mut data = extra_metas.try_borrow_mut_data()?;
     if data.len() != EXTRA_METAS_ACCOUNT_LEN {
-    let needs_grow = data.len() < EXTRA_METAS_ACCOUNT_LEN;
-    drop(data);
+        let needs_grow = data.len() < EXTRA_METAS_ACCOUNT_LEN;
+        drop(data);
 
-    if needs_grow {
-        let rent = Rent::get()?;
-        let needed = rent.minimum_balance(EXTRA_METAS_ACCOUNT_LEN);
-        let current = extra_metas.lamports();
+        if needs_grow {
+            let rent = Rent::get()?;
+            let needed = rent.minimum_balance(EXTRA_METAS_ACCOUNT_LEN);
+            let current = extra_metas.lamports();
 
-        if needed > current {
-            let top_up = needed - current;
-            invoke(
-                &system_instruction::transfer(payer.key, extra_metas.key, top_up),
-                &[payer.clone(), extra_metas.clone(), system_program.clone()],
-            )?;
+            if needed > current {
+                let top_up = needed - current;
+                invoke(
+                    &system_instruction::transfer(payer.key, extra_metas.key, top_up),
+                    &[payer.clone(), extra_metas.clone(), system_program.clone()],
+                )?;
+            }
+
+            if extra_metas_system_owned {
+                // Same seeds as the mint path (processor.rs:631) — use the shared
+                // constant so a seed change cannot desynchronise the two derivations.
+                let extra_metas_seeds: &[&[u8]] =
+                    &[EXTRA_METAS_SEED, nft_mint.key.as_ref(), &[extra_metas_bump]];
+
+                invoke_signed(
+                    &system_instruction::allocate(extra_metas.key, EXTRA_METAS_ACCOUNT_LEN as u64),
+                    &[extra_metas.clone(), system_program.clone()],
+                    &[extra_metas_seeds],
+                )?;
+
+                invoke_signed(
+                    &system_instruction::assign(extra_metas.key, program_id),
+                    &[extra_metas.clone(), system_program.clone()],
+                    &[extra_metas_seeds],
+                )?;
+            }
         }
 
-        if extra_metas_system_owned {
-            let extra_metas_seeds: &[&[u8]] = &[
-                b"extra-account-metas",
-                nft_mint.key.as_ref(),
-                &[extra_metas_bump],
-            ];
-
-            invoke_signed(
-                &system_instruction::allocate(extra_metas.key, EXTRA_METAS_ACCOUNT_LEN as u64),
-                &[extra_metas.clone(), system_program.clone()],
-                &[extra_metas_seeds],
-            )?;
-
-            invoke_signed(
-                &system_instruction::assign(extra_metas.key, program_id),
-                &[extra_metas.clone(), system_program.clone()],
-                &[extra_metas_seeds],
-            )?;
-        }
+        extra_metas.resize(EXTRA_METAS_ACCOUNT_LEN)?;
+        data = extra_metas.try_borrow_mut_data()?;
     }
-
-    extra_metas.resize(EXTRA_METAS_ACCOUNT_LEN)?;
-    data = extra_metas.try_borrow_mut_data()?;
-}
 
     data[0..8].copy_from_slice(&EXECUTE_DISCRIMINATOR);
     let tlv_value_len: u32 = (4 + EXTRA_META_ENTRY_LEN * EXTRA_META_COUNT) as u32;

@@ -293,6 +293,46 @@ mod tests {
         n
     }
 
+    // ── verify_portfolio_account_id ─────────────────────────────────────
+    //
+    // The three call sites (valuation.rs, transfer_hook.rs, processor.rs
+    // SettleFunding) all trust `provenance_header.portfolio_account_id` to name the
+    // very account they were handed. The PR that added this check shipped no tests
+    // for it at all, so both arms are pinned here.
+
+    #[test]
+    fn portfolio_account_id_matching_passes() {
+        let key = Pubkey::new_unique();
+        let mut p = portfolio_with_leg([1u8; 32], 9, 100, 500);
+        p.provenance_header.portfolio_account_id = key.to_bytes();
+        assert!(verify_portfolio_account_id(&p, &key, "test").is_ok());
+    }
+
+    #[test]
+    fn portfolio_account_id_mismatch_is_rejected() {
+        let key = Pubkey::new_unique();
+        let other = Pubkey::new_unique();
+        let mut p = portfolio_with_leg([1u8; 32], 9, 100, 500);
+        p.provenance_header.portfolio_account_id = other.to_bytes();
+        assert_eq!(
+            verify_portfolio_account_id(&p, &key, "test"),
+            Err(NftError::InvalidNftPda.into()),
+        );
+    }
+
+    #[test]
+    fn portfolio_account_id_zeroed_is_rejected() {
+        // A zeroed provenance header must not pass by accident — the all-zero
+        // pubkey is not a legitimate portfolio address.
+        let key = Pubkey::new_unique();
+        let p = portfolio_with_leg([1u8; 32], 9, 100, 500);
+        assert_eq!(p.provenance_header.portfolio_account_id, [0u8; 32]);
+        assert_eq!(
+            verify_portfolio_account_id(&p, &key, "test"),
+            Err(NftError::InvalidNftPda.into()),
+        );
+    }
+
     #[test]
     fn mint_eligibility() {
         let owner = [1u8; 32];
