@@ -241,6 +241,30 @@ fn registry_registers_program(data: &[u8], program_id: &Pubkey) -> bool {
     }
 }
 
+/// `(is_signer, is_writable)` for the seven ExtraAccountMetaList entries, which the
+/// Token-2022 transfer hook receives at account indices 5..=11.
+///
+/// Shared by the mint path and by RepairExtraMetas so the two can never disagree.
+/// RepairExtraMetas is PERMISSIONLESS, so a divergence would let any caller rewrite a
+/// live NFT's metas into a shape the hook cannot use.
+///
+/// Entry 5 (PositionNft PDA) must stay writable: #105 removed the f_snap_at_mint write,
+/// but #152/#153 added `nft_state.last_holder = new_owner` in process_transfer_hook
+/// (transfer_hook.rs:542-545), which runs on every genuine Token-2022 transfer. A
+/// read-only meta there makes each such TransferChecked fail.
+///
+/// Entry 6 (Portfolio) is read-only: the hook performs no invoke/invoke_signed and never
+/// mutably borrows `portfolio` — it only reads it to check the NFT PDA binding.
+pub(crate) const EXTRA_META_ENTRY_FLAGS: [(bool, bool); 7] = [
+    (false, true),  // 5: PositionNft PDA        — writable (hook writes last_holder)
+    (false, false), // 6: Portfolio account      — read-only (hook only reads)
+    (false, false), // 7: Percolator program     — read-only
+    (false, false), // 8: Mint authority PDA     — read-only
+    (false, false), // 9: Instructions sysvar    — read-only
+    (false, false), // 10: NFT program (self)    — read-only
+    (false, false), // 11: NFT registry PDA      — read-only
+];
+
 fn process_mint_position_nft(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -585,8 +609,8 @@ fn process_mint_position_nft(
     // Atomic ExtraAccountMetaList PDA initialization
     //
     // TLV layout (7 entries):
-    //   [5] PositionNft PDA        — read-only (#105: hook is validation-only)
-    //   [6] Portfolio account      — read-only (#105: B-3 CPI moved to mint/burn, not hook)
+    //   [5] PositionNft PDA        — WRITABLE (hook records last_holder, #152/#153)
+    //   [6] Portfolio account      — read-only (hook only reads it; B-3 CPI moved to mint/burn per #105)
     //   [7] Percolator program     — read-only (from portfolio.owner, allowlist-verified)
     //   [8] Mint authority PDA     — read-only
     //   [9] Instructions sysvar    — read-only
@@ -668,22 +692,20 @@ fn process_mint_position_nft(
         data[8..12].copy_from_slice(&tlv_value_len.to_le_bytes());
         data[12..16].copy_from_slice(&(EXTRA_META_COUNT as u32).to_le_bytes());
 
-        let entries: [(Pubkey, bool, bool); EXTRA_META_COUNT] = [
-            // 5: PositionNft PDA   — read-only (#105: hook is validation-only, no longer writes f_snap_at_mint)
-            (*nft_pda.key, false, false),
-            // 6: Portfolio account — read-only (#105: B-3 ownership CPI moved to mint/burn; hook only reads)
-            (*portfolio.key, false, false),
-            // 7: Percolator program — read-only, from verified portfolio.owner
-            (percolator_prog_id, false, false),
-            // 8: Mint authority PDA — read-only
-            (*mint_auth.key, false, false),
-            // 9: Instructions sysvar — read-only
-            (sysvar_instructions::id(), false, false),
-            // 10: NFT program (self) — read-only
-            (*program_id, false, false),
-            // 11: Per-market NFT registry PDA — read-only, derived under wrapper_program_id
-            (registry_pda, false, false),
+        let keys: [Pubkey; EXTRA_META_COUNT] = [
+            *nft_pda.key,
+            *portfolio.key,
+            percolator_prog_id,
+            *mint_auth.key,
+            sysvar_instructions::id(),
+            *program_id,
+            registry_pda,
         ];
+        // Flags come from the shared table so mint and RepairExtraMetas cannot diverge.
+        let entries: [(Pubkey, bool, bool); EXTRA_META_COUNT] = core::array::from_fn(|i| {
+            let (is_signer, is_writable) = EXTRA_META_ENTRY_FLAGS[i];
+            (keys[i], is_signer, is_writable)
+        });
 
         for (i, (key, is_signer, is_writable)) in entries.iter().enumerate() {
             let off = 16 + i * EXTRA_META_ENTRY_LEN;
@@ -1063,23 +1085,43 @@ fn process_emergency_burn(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
         let portfolio_data = portfolio.try_borrow_data()?;
         match slab_types_v16::decode_portfolio(&portfolio_data) {
             Ok(p) => {
-                // #110C (from main): apply the same provenance check MintPositionNft
-                // (line 304) enforces. The PR's version dropped it.
+                // #110C: apply the same provenance check that MintPositionNft (line 304)
+                // enforces. Without this, a portfolio with a mismatched portfolio_account_id
+                // passes decode_portfolio at emergency-burn even though it would be rejected at mint.
                 if p.provenance_header.portfolio_account_id != portfolio.key.to_bytes() {
                     msg!("EmergencyBurn: portfolio_account_id mismatch (#110C)");
                     return Err(NftError::InvalidNftPda.into());
                 }
-                cpi_v16::emergency_burn_ok(p, &nft_state_copy)
-                    .map_err(ProgramError::from)?;
+                cpi_v16::emergency_burn_ok(p, &nft_state_copy).map_err(ProgramError::from)?;
             }
-            Err(e) => {
-                // #110B: portfolio present and wrapper-owned but undecodable (e.g. a
-                // future layout migration changed magic/version). We cannot verify
-                // eligibility, but the position cannot be operated while escrowed, so
-                // skip the check and fall through to the unwrap CPI which the wrapper
-                // handles on its own terms.
-                msg!("EmergencyBurn: portfolio present but undecodable ({:?}) — skipping eligibility, proceeding to unwrap (#110B)", e);
+            // #110B, NARROWED: only a genuine layout migration may bypass the
+            // eligibility gate.
+            //
+            // Skipping the gate lets a position be emergency-burned without proving it
+            // is flat, and this falls through to UnwrapEscrowedPortfolio, which is not
+            // itself leg-gated — so the set of errors that reach it must be exactly the
+            // set this fallback was justified by ("a future layout migration changed
+            // magic/version"), not every decode failure.
+            //
+            // Admitted: BadVersion / BadAccountVersion / BadLayoutDiscriminator — the
+            // account IS ours (wrapper-owned, verified above by verify_portfolio_program)
+            // and is a shape this build predates.
+            //
+            // Rejected: TooShort, BadMagic, BadKind, Cast, OwnerMismatch — on a
+            // wrapper-owned account these mean corruption or a wrong account, not a
+            // migration. OwnerMismatch in particular is a violated engine invariant and
+            // must never widen burn eligibility.
+            Err(
+                e @ (slab_types_v16::PortfolioDecodeError::BadVersion
+                | slab_types_v16::PortfolioDecodeError::BadAccountVersion
+                | slab_types_v16::PortfolioDecodeError::BadLayoutDiscriminator),
+            ) => {
+                msg!(
+                    "EmergencyBurn: portfolio present but from an unknown layout version ({:?}) — skipping eligibility, proceeding to unwrap (#110B)",
+                    e
+                );
             }
+            Err(e) => return Err(cpi_v16::map_decode_err(e)),
         }
     }
 
@@ -1503,15 +1545,20 @@ fn process_repair_extra_metas(
     data[8..12].copy_from_slice(&tlv_value_len.to_le_bytes());
     data[12..16].copy_from_slice(&(EXTRA_META_COUNT as u32).to_le_bytes());
 
-    let entries: [(Pubkey, bool, bool); EXTRA_META_COUNT] = [
-        (*nft_pda.key, false, false),                    // 5: PositionNft PDA   — read-only (#105)
-        (*portfolio.key, false, false),                  // 6: Portfolio account — read-only (#105)
-        (percolator_prog_id, false, false),              // 7: Percolator program — read-only
-        (*mint_auth.key, false, false),                  // 8: Mint authority PDA — read-only
-        (sysvar_instructions::id(), false, false),       // 9: Instructions sysvar — read-only
-        (*program_id, false, false),                     // 10: NFT program (self) — read-only
-        (registry_pda, false, false),                    // 11: Per-market NFT registry PDA — read-only
+    let keys: [Pubkey; EXTRA_META_COUNT] = [
+        *nft_pda.key,
+        *portfolio.key,
+        percolator_prog_id,
+        *mint_auth.key,
+        sysvar_instructions::id(),
+        *program_id,
+        registry_pda,
     ];
+    // Same shared table as the mint path — see EXTRA_META_ENTRY_FLAGS.
+    let entries: [(Pubkey, bool, bool); EXTRA_META_COUNT] = core::array::from_fn(|i| {
+        let (is_signer, is_writable) = EXTRA_META_ENTRY_FLAGS[i];
+        (keys[i], is_signer, is_writable)
+    });
     for (i, (key, is_signer, is_writable)) in entries.iter().enumerate() {
         let off = HEADER_LEN + i * EXTRA_META_ENTRY_LEN;
         data[off] = 0;
@@ -1756,3 +1803,56 @@ fn rent_recipient_guard_accepts_writable_holder() {
     assert!(result.is_ok());
 }
 
+
+#[cfg(test)]
+mod extra_meta_flag_tests {
+    use super::*;
+
+    /// Entry 5 is the PositionNft PDA and the transfer hook WRITES it
+    /// (`nft_state.last_holder = new_owner`, transfer_hook.rs:542-545, gated on
+    /// `is_genuine_token2022_transfer`). Flipping it read-only makes every genuine
+    /// Token-2022 TransferChecked fail, and because RepairExtraMetas is permissionless
+    /// that is a free brick-any-NFT vector. This pins the flag so the regression cannot
+    /// return silently — the 34 pre-existing tests all passed with it read-only.
+    #[test]
+    fn position_nft_pda_meta_entry_is_writable() {
+        assert_eq!(
+            EXTRA_META_ENTRY_FLAGS[0],
+            (false, true),
+            "entry 5 (PositionNft PDA) must be non-signer and WRITABLE: the transfer hook \
+             writes last_holder to it on every genuine Token-2022 transfer"
+        );
+    }
+
+    /// Entry 6 is the Portfolio account. The hook performs no invoke/invoke_signed and
+    /// never mutably borrows it, so read-only is correct and narrows the write lock.
+    #[test]
+    fn portfolio_meta_entry_is_read_only() {
+        assert_eq!(
+            EXTRA_META_ENTRY_FLAGS[1],
+            (false, false),
+            "entry 6 (Portfolio) is read-only: the hook only reads it to check the NFT \
+             PDA binding"
+        );
+    }
+
+    /// Everything from entry 7 on is a program/sysvar/PDA the hook only reads.
+    #[test]
+    fn remaining_meta_entries_are_read_only_non_signers() {
+        for (i, flags) in EXTRA_META_ENTRY_FLAGS.iter().enumerate().skip(2) {
+            assert_eq!(
+                *flags,
+                (false, false),
+                "entry {} must be a read-only non-signer",
+                i + 5
+            );
+        }
+    }
+
+    /// No entry is ever a signer — the hook is invoked by Token-2022, which cannot
+    /// produce signatures for these accounts.
+    #[test]
+    fn no_meta_entry_is_a_signer() {
+        assert!(EXTRA_META_ENTRY_FLAGS.iter().all(|(s, _)| !*s));
+    }
+}
