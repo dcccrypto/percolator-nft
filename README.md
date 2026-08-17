@@ -92,8 +92,9 @@ percolator-nft (this program)
 ## v17 Layout Support
 
 The NFT program mirrors the converged v17 portfolio layout (`PortfolioAccountV16Account`,
-9227 bytes) to read position state directly without CPI. Struct offsets are validated at
-compile-time with size and offset assertions.
+9227 bytes) to read position state directly without CPI. Struct field offsets are verified
+for internal consistency via compile-time `const_assert!` macros; alignment with the live
+engine layout requires runtime validation against real on-chain data (deferred, see #110H).
 
 ## Transfer Hook
 

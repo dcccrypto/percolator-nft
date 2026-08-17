@@ -112,16 +112,20 @@ pub const TAG_EMERGENCY_BURN: u8 = 5;
 
 /// Tag 6: RepairExtraAccountMetas
 ///
-/// Rewrite the ExtraAccountMetaList PDA data for an existing NFT mint so
-/// its flags match the current processor's `build_extra_account_metas`
-/// output — most importantly, marking the portfolio account writable.
+/// Rewrite the ExtraAccountMetaList PDA data for an existing NFT mint so its
+/// flags match the current processor's `EXTRA_META_ENTRY_FLAGS`.
 ///
-/// Historical mints produced an ExtraAccountMetaList where the portfolio was
-/// declared read-only. That was wrong — the transfer hook CPIs into
-/// percolator-prog with `TransferPortfolioOwnership` (tag 72), which mutates
-/// `owner` in the portfolio. Without portfolio writable, the CPI fails with
-/// `writable privilege escalated` and every transfer bounces. Burn + remint
-/// is not a workaround: burn requires the position already be closed.
+/// Current flags (see EXTRA_META_ENTRY_FLAGS in processor.rs):
+///   [5] PositionNft PDA — WRITABLE. #105 removed the f_snap_at_mint write, but
+///       #152/#153 added a new one: the hook writes `nft_state.last_holder` on
+///       every genuine Token-2022 transfer, so this must stay writable or such a
+///       transfer fails.
+///   [6] Portfolio      — read-only. The hook performs no invoke/invoke_signed
+///       and never mutably borrows it; the pre-#105 B-3 ownership CPI that once
+///       required write access moved to mint/burn.
+///
+/// Historical mints may carry either shape; `RepairExtraMetas` rewrites them to
+/// the current one.
 ///
 /// Permissionless by design. The only data written to the PDA is
 /// deterministic from the on-chain state of `nft_mint` + its `nft_pda`

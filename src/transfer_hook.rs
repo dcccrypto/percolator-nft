@@ -281,7 +281,7 @@ pub fn process_execute(
     let _source_authority = next_account_info(accounts_iter)?; // 3: source authority (unused per spec)
     let extra_metas = next_account_info(accounts_iter)?;      // 4: ExtraAccountMetaList PDA
     let nft_pda = next_account_info(accounts_iter)?;          // 5: PositionNft PDA (writable)
-    let portfolio = next_account_info(accounts_iter)?;        // 6: Portfolio account (writable)
+    let portfolio = next_account_info(accounts_iter)?;        // 6: Portfolio account (read-only — hook only reads it)
     let percolator_prog = next_account_info(accounts_iter)?;  // 7: Percolator program
     let mint_auth = next_account_info(accounts_iter)?;        // 8: Mint authority PDA
     let sysvar_ix = next_account_info(accounts_iter)?;        // 9: Instructions sysvar
