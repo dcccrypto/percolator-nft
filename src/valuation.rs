@@ -88,6 +88,8 @@ pub fn process_get_position_value(
     let p = slab_types_v16::decode_portfolio(&portfolio_data)
         .map_err(cpi_v16::map_decode_err)?;
 
+    cpi_v16::verify_portfolio_account_id(p, portfolio.key, "GetPositionValue")?;
+
     // ── Find active leg for the bound asset_index ──
     match p.active_leg_slot_for_asset(asset_index) {
         None => {

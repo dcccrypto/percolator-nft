@@ -46,7 +46,7 @@
 //! So the reuse check is `market_id`-only (design-correction (b), §16.2). The
 //! mint-time `epoch_snap`/`position_owner` snapshots are kept informational.
 
-use solana_program::{account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey};
+use solana_program::{account_info::AccountInfo, msg, program_error::ProgramError, pubkey::Pubkey};
 
 // ═══════════════════════════════════════════════════════════════
 // NFT registry PDA (SHARED SEED CONTRACT with percolator-prog)
@@ -107,6 +107,27 @@ pub fn verify_portfolio_program(portfolio_ai: &AccountInfo) -> Result<(), Progra
 pub fn map_decode_err(e: PortfolioDecodeError) -> ProgramError {
     solana_program::msg!("portfolio decode failed: {:?}", e);
     NftError::PortfolioDecodeFailed.into()
+}
+
+
+/// Verify that the decoded portfolio provenance binds to the actual portfolio
+/// account passed to the handler.
+///
+/// This is intentionally separated from `decode_portfolio`: decoding validates
+/// the internal v16 layout and provenance-owner consistency, while each handler
+/// must also prove that the decoded `portfolio_account_id` is the same account
+/// it is about to value, settle, transfer-gate, or otherwise trust.
+pub fn verify_portfolio_account_id(
+    portfolio: &PortfolioAccountV16Account,
+    portfolio_key: &Pubkey,
+    context: &str,
+) -> Result<(), ProgramError> {
+    if portfolio.provenance_header.portfolio_account_id != portfolio_key.to_bytes() {
+        msg!("{}: portfolio_account_id does not match passed portfolio account", context);
+        return Err(NftError::InvalidNftPda.into());
+    }
+
+    Ok(())
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -270,6 +291,46 @@ mod tests {
         n.market_id_at_mint = V16PodU64::new(market_id);
         n.position_owner_at_mint = owner;
         n
+    }
+
+    // ── verify_portfolio_account_id ─────────────────────────────────────
+    //
+    // The three call sites (valuation.rs, transfer_hook.rs, processor.rs
+    // SettleFunding) all trust `provenance_header.portfolio_account_id` to name the
+    // very account they were handed. The PR that added this check shipped no tests
+    // for it at all, so both arms are pinned here.
+
+    #[test]
+    fn portfolio_account_id_matching_passes() {
+        let key = Pubkey::new_unique();
+        let mut p = portfolio_with_leg([1u8; 32], 9, 100, 500);
+        p.provenance_header.portfolio_account_id = key.to_bytes();
+        assert!(verify_portfolio_account_id(&p, &key, "test").is_ok());
+    }
+
+    #[test]
+    fn portfolio_account_id_mismatch_is_rejected() {
+        let key = Pubkey::new_unique();
+        let other = Pubkey::new_unique();
+        let mut p = portfolio_with_leg([1u8; 32], 9, 100, 500);
+        p.provenance_header.portfolio_account_id = other.to_bytes();
+        assert_eq!(
+            verify_portfolio_account_id(&p, &key, "test"),
+            Err(NftError::InvalidNftPda.into()),
+        );
+    }
+
+    #[test]
+    fn portfolio_account_id_zeroed_is_rejected() {
+        // A zeroed provenance header must not pass by accident — the all-zero
+        // pubkey is not a legitimate portfolio address.
+        let key = Pubkey::new_unique();
+        let p = portfolio_with_leg([1u8; 32], 9, 100, 500);
+        assert_eq!(p.provenance_header.portfolio_account_id, [0u8; 32]);
+        assert_eq!(
+            verify_portfolio_account_id(&p, &key, "test"),
+            Err(NftError::InvalidNftPda.into()),
+        );
     }
 
     #[test]
