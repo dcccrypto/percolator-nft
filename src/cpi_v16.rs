@@ -84,18 +84,32 @@ use crate::state_v16::PositionNftV16;
 // Wrapper-program allowlist (fail-closed)
 // ═══════════════════════════════════════════════════════════════
 
-/// Known Percolator wrapper program IDs. The mainnet ID is the live wrapper
-/// (`ESa89R5…`, unchanged at v16 cutover per hard constraint #5).
-pub const PERCOLATOR_DEVNET: Pubkey =
-    solana_program::pubkey!("DhSkE7uTb8HBUYYWF1xkxMYBGtLYJEoDq1tfBD7SnHcj");
+/// The live mainnet Percolator wrapper (`ESa89R5…`, unchanged at v16 cutover per
+/// hard constraint #5). This is the only wrapper a default build trusts; see
+/// `PERCOLATOR_DEVNET` below for the feature-gated devnet counterpart.
 pub const PERCOLATOR_MAINNET: Pubkey =
     solana_program::pubkey!("ESa89R5Es3rJ5mnwGybVRG1GrNt9etP11Z5V2QWD4edv");
+
+/// Devnet wrapper ID, compiled in ONLY under the `devnet` feature.
+///
+/// A devnet id must never compile into a mainnet binary, so that a compromised
+/// devnet deploy keypair cannot inherit mainnet authority. A program's address
+/// is its deploy keypair's public key and is not cluster-scoped, so a devnet id
+/// left on a mainnet allowlist is a standing grant to whoever holds that key.
+/// percolator-stake gates this same pair of ids the same way; percolator-prog
+/// documents the rule on its own `devnet` feature.
+#[cfg(feature = "devnet")]
+pub const PERCOLATOR_DEVNET: Pubkey =
+    solana_program::pubkey!("DhSkE7uTb8HBUYYWF1xkxMYBGtLYJEoDq1tfBD7SnHcj");
 
 /// Verify the portfolio account is owned by a known Percolator wrapper program.
 /// Fail-closed: anything not on the allowlist is rejected. (v16 analog of v12
 /// `verify_slab_owner`.)
 pub fn verify_portfolio_program(portfolio_ai: &AccountInfo) -> Result<(), ProgramError> {
-    if portfolio_ai.owner != &PERCOLATOR_DEVNET && portfolio_ai.owner != &PERCOLATOR_MAINNET {
+    let is_valid = portfolio_ai.owner == &PERCOLATOR_MAINNET;
+    #[cfg(feature = "devnet")]
+    let is_valid = is_valid || portfolio_ai.owner == &PERCOLATOR_DEVNET;
+    if !is_valid {
         return Err(NftError::InvalidPortfolioOwner.into());
     }
     Ok(())

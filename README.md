@@ -109,8 +109,16 @@ transfer moves only the bearer token; the underlying position stays escrowed.
 ## Build and Test
 
 ```bash
-# Build BPF binary (no warnings expected)
+# Build BPF binary for MAINNET (no warnings expected).
+# The point is simply that `devnet` is OFF: the crate declares no `default`
+# feature, so --no-default-features is a no-op and a bare `cargo build-sbf`
+# produces a byte-identical artifact.
 cargo build-sbf --no-default-features
+
+# Build BPF binary for DEVNET — the `devnet` feature is required, and is what
+# compiles the devnet wrapper id into the allowlist. Omitting it produces a
+# binary that will reject every devnet portfolio.
+cargo build-sbf -- --features devnet
 
 # Run tests
 RUST_MIN_STACK=8388608 cargo test
@@ -119,7 +127,9 @@ RUST_MIN_STACK=8388608 cargo test
 ## Security Notes
 
 - `forbid(unsafe_code)` enforced
-- Portfolio owner verified against known Percolator program IDs (devnet + mainnet)
+- Portfolio owner verified against the mainnet Percolator program ID. The devnet
+  ID is compiled in only under the `devnet` feature, so it can never be trusted by
+  a mainnet artifact (mirrors percolator-stake and percolator-prog)
 - Position ownership verified before minting; provenance header validated (#110C)
 - PDA re-derivation on every read operation uses `market_id_at_mint` (u64), not
   `asset_index` (#108 / #118 — the #122 critical bug used asset_index here)

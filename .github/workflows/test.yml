@@ -12,5 +12,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Run tests
+      # Both feature configurations must be exercised. The `devnet` feature is a
+      # SECURITY gate: it is the only thing keeping the devnet wrapper id out of
+      # the mainnet artifact, so a default build that silently regained it, or a
+      # devnet build that stopped compiling, must both fail CI.
+      - name: Run tests (default — this is the MAINNET artifact configuration)
         run: cargo test --lib --tests --verbose
+      - name: Run tests (devnet — the configuration devnet deploys must use)
+        run: cargo test --lib --tests --features devnet --verbose

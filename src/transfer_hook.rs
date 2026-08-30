@@ -43,7 +43,7 @@ use solana_program::{
 use crate::{
     cpi_v16::{
         derive_nft_registry, map_decode_err, transfer_gate_check, verify_bound_leg,
-        verify_portfolio_program, PERCOLATOR_DEVNET, PERCOLATOR_MAINNET,
+        verify_portfolio_program, PERCOLATOR_MAINNET,
     },
     error::NftError,
     slab_types_v16,
@@ -53,6 +53,8 @@ use crate::{
     },
     token2022,
 };
+#[cfg(feature = "devnet")]
+use crate::cpi_v16::PERCOLATOR_DEVNET;
 
 // ═══════════════════════════════════════════════════════════════
 // SPL TransferHook interface constants
@@ -397,7 +399,11 @@ pub fn process_execute(
     // ── Validate percolator_prog key against known constants ──────────
     // Prevents an attacker from supplying a malicious program as account[7].
     // Without this, the CPI target is attacker-controlled.
-    if percolator_prog.key != &PERCOLATOR_DEVNET && percolator_prog.key != &PERCOLATOR_MAINNET {
+    let known_percolator_prog = percolator_prog.key == &PERCOLATOR_MAINNET;
+    #[cfg(feature = "devnet")]
+    let known_percolator_prog =
+        known_percolator_prog || percolator_prog.key == &PERCOLATOR_DEVNET;
+    if !known_percolator_prog {
         msg!(
             "Transfer rejected: percolator_prog key {} is not a known Percolator program",
             percolator_prog.key
