@@ -73,7 +73,12 @@ pub const TAG_SETTLE_FUNDING: u8 = 2;
 /// Read-only valuation diagnostics for marketplaces and lending protocols.
 /// Emits raw leg/valuation fields via transaction logs; does NOT return a
 /// value via CPI (no set_return_data). Clients use `simulateTransaction`.
-/// Fail-CLOSED: stale/slot-reuse/no-active-leg conditions return an error.
+/// Fail-CLOSED: every condition that makes the bound leg non-transferable
+/// returns an error. `POSITION_VALUE_V16:status=` carries the reason, one of:
+/// `ok`, `no_active_leg`, `leg_stale`, `portfolio_locked_or_stale`, `resolved`,
+/// `close_in_progress`, `slot_reuse_detected`. Blocked positions still report
+/// their economics under the separate `POSITION_BLOCKED_V16:` prefix (except
+/// slot-reuse, whose fields would describe a different position instance).
 ///
 /// Accounts:
 ///   0. `[]`  PositionNft PDA
