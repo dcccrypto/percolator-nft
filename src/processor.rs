@@ -759,13 +759,70 @@ fn process_mint_position_nft(
 // derive it — permanently leaking its rent (~0.00207 SOL per NFT). Closing it
 // as part of burn returns that rent to the holder. The PDA is program-owned, so
 // it is drained directly (same lamport-transfer pattern as the PositionNft PDA
-// close); no signer/CPI is needed. Idempotent: if the account was never created
-// or is already closed, it is skipped so the burn never fails on it.
+// close) and then handed back to the System program by
+// `release_closed_account_to_system`, so a same-transaction lamport credit cannot
+// leave a program-owned husk behind; no signer/CPI is needed. Idempotent: if the
+// account was never created or is already closed, it is skipped so the burn never
+// fails on it.
 /// Ensures the burn rent recipient can receive returned lamports.
 fn require_writable_rent_recipient(holder: &AccountInfo) -> ProgramResult {
     if !holder.is_writable {
          return Err(ProgramError::InvalidAccountData);
     }
+    Ok(())
+}
+
+/// Hand a just-closed, program-owned account back to the System program.
+///
+/// Zeroing the data and draining the lamports is NOT sufficient on its own. The
+/// runtime reaps zero-lamport accounts only at the END of a transaction, so a
+/// later instruction in the SAME transaction that credits lamports back leaves
+/// the account alive — still owned by this program and still full length. That
+/// state is a permanent deadlock for the PositionNft PDA: `MintPositionNft`
+/// gates on `!nft_pda.data_is_empty()`, so it reads as "already minted"
+/// forever, while `verify_position_nft` rejects `magic == 0`, so no handler can
+/// clear it. `ReconcileBurnedNft` needs no signer, which makes that reachable by
+/// any third party for the price of one rent-exempt balance.
+///
+/// Handing the account back makes a revived one System-owned and zero-length,
+/// which the `#129` transfer→allocate→assign creation path already absorbs.
+///
+/// In-VM order is NOT load-bearing: `resize` and `assign` are plain writes into
+/// the input region and consult no owner, and the runtime commits the result in
+/// a fixed lamports → data/length → owner sequence at instruction end. Both SPL
+/// Token-2022's `delete_account` and Anchor's `close()` assign BEFORE shrinking,
+/// which would be impossible if the owner check were live. The order used here
+/// is chosen only so the account is coherent at every intermediate point, in
+/// case a CPI is ever inserted before the end of the instruction — no call site
+/// performs one after the release today.
+///
+/// The resize must not run off-target. `AccountInfo::resize` writes the new
+/// length through `data_ptr.offset(-8)` and reads `original_data_len()` through
+/// `key_ptr.offset(-4)`; both are only valid for an AccountInfo the runtime
+/// serialized, so calling it against a host-built fixture corrupts the heap.
+/// percolator-prog guards the equivalent call in
+/// `close_portfolio_account_to_market_slab` with `#[cfg(target_os = "solana")]`.
+///
+/// A runtime `cfg!` is used here instead of that attribute deliberately: the
+/// attribute removes the line from every build this repo actually performs (CI
+/// runs host `cargo test` only), so the resize would never be type-checked or
+/// linted, and an API change would ship silently. `cfg!` folds to a constant
+/// false off-target — so it still never executes host-side — while keeping the
+/// call compiled and linted everywhere.
+///
+/// Both halves are required on-chain: `assign` alone leaves the account
+/// full-length so `data_is_empty()` still reads false and the mint gate still
+/// bricks, while `resize` alone leaves it program-owned so `#129`'s
+/// `system_instruction::allocate` would reject it.
+fn release_closed_account_to_system(account: &AccountInfo) -> ProgramResult {
+    {
+        let mut data = account.try_borrow_mut_data()?;
+        data.fill(0);
+    }
+    if cfg!(target_os = "solana") {
+        account.resize(0)?;
+    }
+    account.assign(&solana_program::system_program::id());
     Ok(())
 }
 
@@ -796,7 +853,7 @@ fn close_extra_metas(
         .checked_add(amt)
         .ok_or(ProgramError::ArithmeticOverflow)?;
     **extra_metas.try_borrow_mut_lamports()? = 0;
-    extra_metas.try_borrow_mut_data()?.fill(0);
+    release_closed_account_to_system(extra_metas)?;
     Ok(())
 }
 
@@ -958,11 +1015,7 @@ fn process_burn_position_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
         .checked_add(pda_lamports)
         .ok_or(ProgramError::ArithmeticOverflow)?;
     **nft_pda.try_borrow_mut_lamports()? = 0;
-
-    {
-        let mut pda_data = nft_pda.try_borrow_mut_data()?;
-        pda_data.fill(0);
-    }
+    release_closed_account_to_system(nft_pda)?;
 
     // ── #102: close the ExtraAccountMetaList PDA (return rent to holder) ──
     close_extra_metas(program_id, extra_metas, nft_mint.key, holder)?;
@@ -1188,11 +1241,7 @@ fn process_emergency_burn(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
         .checked_add(pda_lamports)
         .ok_or(ProgramError::ArithmeticOverflow)?;
     **nft_pda.try_borrow_mut_lamports()? = 0;
-
-    {
-        let mut pda_data = nft_pda.try_borrow_mut_data()?;
-        pda_data.fill(0);
-    }
+    release_closed_account_to_system(nft_pda)?;
 
     // ── #102: close the ExtraAccountMetaList PDA (return rent to holder) ──
     close_extra_metas(program_id, extra_metas, nft_mint.key, holder)?;
@@ -1327,10 +1376,7 @@ fn process_reconcile_burned_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -
         .checked_add(pda_lamports)
         .ok_or(ProgramError::ArithmeticOverflow)?;
     **nft_pda.try_borrow_mut_lamports()? = 0;
-    {
-        let mut pda_data = nft_pda.try_borrow_mut_data()?;
-        pda_data.fill(0);
-    }
+    release_closed_account_to_system(nft_pda)?;
 
     msg!(
         "ReconcileBurnedNft: released stranded position {} to last holder {}",
@@ -1481,14 +1527,17 @@ fn process_repair_extra_metas(
     //    PositionNftV16 bound to this mint and portfolio (checked below), so metas
     //    cannot be conjured for an NFT that does not exist.
     //
-    // On the post-burn state: a burned NFT's extra_metas DOES eventually present this
-    // way. close_extra_metas (:747) zeroes its lamports and data without reassigning
-    // the owner, but the runtime reaps zero-lamport accounts at end of transaction, so
-    // on any LATER transaction it loads as System-owned and empty and reaches this
-    // branch. (An earlier revision of this comment claimed the opposite; that was
-    // wrong.) What actually keeps a burned NFT out is the NEXT gate: the same burn
-    // drains nft_pda, so `nft_pda.owner != program_id` below rejects before anything
-    // is written. The safety rests on that check, not on the owner byte here.
+    // On the post-burn state: a burned NFT's extra_metas presents exactly this way.
+    // close_extra_metas now hands the account back to the System program explicitly
+    // (resize(0) + assign), so it is System-owned and empty immediately rather than
+    // only after the runtime reaps it. That distinction matters: reaping happens at
+    // END of transaction, so relying on it left the account program-owned and full
+    // length for the rest of the transaction — and a same-transaction lamport credit
+    // made that state permanent. What keeps a burned NFT out is still the NEXT gate:
+    // the same burn drains nft_pda, so `nft_pda.owner != program_id` below rejects
+    // before anything is written — and post-fix that rejection is structural: the
+    // burn ASSIGNS nft_pda back to the System program rather than merely draining
+    // it, so the owner check fires immediately instead of only after reaping.
     let extra_metas_system_owned =
         *extra_metas.owner == solana_program::system_program::id();
 
@@ -1798,13 +1847,17 @@ mod burn_rent_recipient_writable_tests {
             0,
         );
 
+        // Own owner slot, not `&program_id`: the close now calls
+        // `AccountInfo::assign`, which writes THROUGH this reference. Sharing it
+        // with the `program_id` argument would silently rewrite that local too.
+        let extra_metas_owner = program_id;
         let extra_metas = AccountInfo::new(
             &extra_metas_key,
             false,
             true,
             &mut extra_metas_lamports,
             &mut extra_metas_data,
-            &program_id,
+            &extra_metas_owner,
             false,
             0,
         );
@@ -1815,6 +1868,10 @@ mod burn_rent_recipient_writable_tests {
         assert_eq!(holder.lamports(), 15);
         assert_eq!(extra_metas.lamports(), 0);
         assert!(extra_metas.data.borrow().iter().all(|byte| *byte == 0));
+        // Handed back to the System program, so a same-transaction lamport credit
+        // cannot leave a program-owned husk behind. (The accompanying resize(0) is
+        // `target_os = "solana"`-gated and so is not exercised host-side.)
+        assert_eq!(extra_metas.owner, &system_program_id);
     }
 }
 
