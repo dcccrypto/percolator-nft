@@ -86,8 +86,40 @@ percolator-nft (this program)
   is exposed. Gated by program-upgrade governance.
 - **no-entrypoint Feature**: Program entrypoint is gated behind a `no-entrypoint` cargo
   feature for library-style composition (e.g. embedding in test harnesses).
-- **GetPositionValue is fail-CLOSED**: stale/slot-reuse/no-active-leg conditions return
+- **GetPositionValue is fail-CLOSED**: every non-transferable condition returns
   errors, not `Ok(())`. Clients using `simulateTransaction` must check the error.
+
+### GetPositionValue log contract
+
+The instruction returns nothing via CPI, so its logs are its API. Every response
+emits `POSITION_VALUE_V16:portfolio=`, `POSITION_VALUE_V16:asset_index=` and
+exactly one `POSITION_VALUE_V16:status=`:
+
+| `status=` | Meaning | Error |
+|---|---|---|
+| `ok` | Healthy bound leg; the economic fields follow under `POSITION_VALUE_V16:`. | — |
+| `no_active_leg` | The position is closed or never existed; route to `EmergencyBurn`. | `LegNotActive` (22) |
+| `leg_stale` | The bound leg owes chunked settlement. Transient — a crank clears it. | `TransferBlocked` (24) |
+| `portfolio_locked_or_stale` | Portfolio-level liquidation lock or stale state. | `TransferBlocked` (24) |
+| `resolved` | Terminal resolved-payout receipt present; claim rather than price it. | `TransferBlocked` (24) |
+| `close_in_progress` | A close is mid-flight for this asset. Transient. | `TransferBlocked` (24) |
+| `slot_reuse_detected` | The slot was reused by a different position instance; this NFT is dead. Accompanied by `market_id_at_mint=` and `current_market_id=`. | `MarketIdMismatch` (25) |
+
+Notes for integrators:
+
+- `simulateTransaction` returns `logs` alongside `err`, so the status line is
+  readable on a failed instruction. (`logs` is `null` only when simulation fails
+  *before* execution — bad blockhash, unloadable account, signature verification.)
+- On a blocked status the economic fields are emitted under the separate
+  **`POSITION_BLOCKED_V16:`** prefix, not `POSITION_VALUE_V16:`. A parser
+  scanning for the latter therefore fails closed by construction; opt into
+  distressed pricing deliberately by reading the former. `slot_reuse_detected`
+  emits no economics at all — they would describe a different position.
+- **Batching caveat:** a failing instruction aborts the whole transaction, so
+  packing many `GetPositionValue` calls into one simulation means a single
+  blocked position suppresses every instruction after it. Batch defensively, or
+  price positions individually.
+- Logs are capped at 10,000 bytes per transaction and truncate silently.
 
 ## v17 Layout Support
 
