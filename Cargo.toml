@@ -8,6 +8,12 @@ description = "Position NFT wrapper for Percolator — mint transferable NFTs re
 no-entrypoint = []
 test = []
 kani = []
+# Compiles the DEVNET wrapper id into the allowlist. A devnet id must never
+# compile into a mainnet binary, so that a compromised devnet deploy keypair
+# cannot inherit mainnet authority. Mirrors percolator-stake's `devnet` feature
+# (percolator-stake/src/processor.rs) and percolator-prog's N-3 rationale.
+# Devnet deploys must build with `--features devnet`.
+devnet = []
 
 [dependencies]
 solana-program = "=2.2.1"

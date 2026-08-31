@@ -624,12 +624,12 @@ fn process_mint_position_nft(
         // refactor-proof: if a future edit moves this block above the top-of-handler
         // verify_portfolio_program, this re-assertion still enforces the allowlist.
         cpi_v16::verify_portfolio_program(portfolio)?;
-        // SAFETY: verify_portfolio_program above guarantees portfolio.owner is one of
-        // {PERCOLATOR_DEVNET, PERCOLATOR_MAINNET}.
-        debug_assert!(
-            percolator_prog_id == cpi_v16::PERCOLATOR_DEVNET
-                || percolator_prog_id == cpi_v16::PERCOLATOR_MAINNET
-        );
+        // SAFETY: verify_portfolio_program above guarantees portfolio.owner is the
+        // mainnet wrapper, or — only in a `devnet` build — the devnet wrapper.
+        let known_wrapper = percolator_prog_id == cpi_v16::PERCOLATOR_MAINNET;
+        #[cfg(feature = "devnet")]
+        let known_wrapper = known_wrapper || percolator_prog_id == cpi_v16::PERCOLATOR_DEVNET;
+        debug_assert!(known_wrapper);
 
         // Derive the per-market NFT registry PDA under the wrapper program id.
         // The wrapper's B-3 re-derives the same PDA and validates the account.
@@ -1307,8 +1307,9 @@ fn process_reconcile_burned_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -
     //    if it was already unwrapped (a normal burn ran first), the wrapper rejects
     //    on the escrow invariant — i.e. there was nothing stranded to reconcile. ──
     //
-    // verify_portfolio_program checks portfolio.owner is on the {DEVNET, MAINNET}
-    // allowlist. verify_percolator_prog_account then checks percolator_prog.key ==
+    // verify_portfolio_program checks portfolio.owner is the MAINNET wrapper — plus
+    // the devnet wrapper only in a `devnet` build, which never ships to mainnet.
+    // verify_percolator_prog_account then checks percolator_prog.key ==
     // portfolio.owner. Both checks are required: verify_percolator_prog_account alone
     // is satisfied by any (percolator_prog, portfolio) pair the attacker controls.
     cpi_v16::verify_portfolio_program(portfolio)?;
