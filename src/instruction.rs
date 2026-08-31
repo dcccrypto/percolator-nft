@@ -155,6 +155,17 @@ pub const TAG_EMERGENCY_BURN: u8 = 5;
 pub const TAG_REPAIR_EXTRA_METAS: u8 = 6;
 /// Tag 7: ReconcileBurnedNft (#138) — release a stranded out-of-band-burned
 /// position to its recorded last holder. Permissionless.
+///
+/// Accounts:
+///   0. `[writable]` PositionNft PDA (closed; rent to the last holder)
+///   1. `[writable]` NFT mint (Token-2022, supply must be 0; closed — #182)
+///   2. `[writable]` Portfolio account (escrow released by the unwrap CPI)
+///   3. `[]`         Mint authority PDA (unwrap + mint-close CPI signer)
+///   4. `[]`         Per-market NftRegistry PDA
+///   5. `[]`         Percolator wrapper program (unwrap CPI target)
+///   6. `[writable]` Recorded last-holder wallet (escrow + all rent recipient)
+///   7. `[writable]` ExtraAccountMetaList PDA (closed — #182)
+///   8. `[]`         Token-2022 program
 pub const TAG_RECONCILE_BURNED_NFT: u8 = 7;
 
 /// Decoded instruction for the Position NFT program.

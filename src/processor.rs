@@ -1271,12 +1271,14 @@ fn process_emergency_burn(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
 //
 // Accounts:
 //   0. [writable] PositionNft PDA (closed)
-//   1. []         NFT mint (Token-2022 — supply must be 0)
+//   1. [writable] NFT mint (Token-2022 — supply must be 0; closed, #182)
 //   2. [writable] Portfolio account (escrow released by the unwrap CPI)
 //   3. []         Mint authority PDA (unwrap CPI signer)
 //   4. []         Per-market NftRegistry PDA
 //   5. []         Percolator wrapper program (unwrap CPI target)
-//   6. [writable] Recorded last-holder wallet (escrow + PDA-rent recipient)
+//   6. [writable] Recorded last-holder wallet (escrow + all rent recipient)
+//   7. [writable] ExtraAccountMetaList PDA (closed, #182)
+//   8. []         Token-2022 program (mint-close CPI target, #182)
 fn process_reconcile_burned_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     let accounts_iter = &mut accounts.iter();
     let nft_pda = next_account_info(accounts_iter)?; // 0
@@ -1286,6 +1288,13 @@ fn process_reconcile_burned_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -
     let nft_registry = next_account_info(accounts_iter)?; // 4
     let percolator_prog = next_account_info(accounts_iter)?; // 5
     let last_holder_ai = next_account_info(accounts_iter)?; // 6 (writable)
+    // #182: required, not optional. Reconcile is permissionless, irreversible
+    // and one-shot — it closes nft_pda, and every path that could later reclaim
+    // the mint or the metas PDA needs nft_pda alive. An opt-in would mean any
+    // stale client, helpful third party or griefer could permanently destroy
+    // that rent with a single short call, with no second chance to notice.
+    let extra_metas = next_account_info(accounts_iter)?; // 7 (writable, closed)
+    let token_program = next_account_info(accounts_iter)?; // 8
 
     if nft_pda.owner != program_id {
         msg!("ReconcileBurnedNft: nft_pda not owned by this program");
@@ -1371,6 +1380,54 @@ fn process_reconcile_burned_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -
         last_holder_ai.key,
         mint_auth_bump,
     )?;
+
+    // ── #182: optionally reclaim the mint + ExtraAccountMetaList rent ──
+    // #102 stopped this leak for BurnPositionNft/EmergencyBurn. ReconcileBurnedNft
+    // was added later (#138) and never got the same treatment, so ~0.0077 SOL per
+    // reconciled NFT was abandoned unrecoverably (2,707,440 for the 261-byte metas
+    // PDA + 4,969,440 for the 586-byte mint). The two accounts are in fact dead
+    // from the out-of-band burn onward, not merely from Reconcile: BurnPositionNft
+    // and EmergencyBurn are the only instructions that close them and both require
+    // the holder ATA to hold amount == 1, which is already 0. Reconcile is
+    // therefore the ONLY place a recovery can live, and it runs at most once.
+    //
+    // They grant no new authority: `close_extra_metas` re-derives extra_metas
+    // from nft_mint, nft_mint is itself pinned to nft_state.nft_mint above, and
+    // the rent goes to the same `last_holder_ai` the PDA rent already goes to.
+    //
+    // This does NOT recover everything. The holder's own ATA (~0.0021 SOL) is
+    // still theirs to close directly against Token-2022 — closing the mint here
+    // does not block that, since Token-2022's mint close checks only the
+    // close-authority extension, supply and signature, and never scans for live
+    // token accounts.
+    //
+    // Requires the mint to carry MintCloseAuthority. Every mint this program
+    // creates has it (added before ReconcileBurnedNft existed), but a mint
+    // predating that would make this CPI — and therefore the whole reconcile,
+    // including the escrow release — revert.
+    if *token_program.key != token2022::TOKEN_2022_PROGRAM_ID {
+        msg!("ReconcileBurnedNft: invalid Token-2022 program key");
+        return Err(ProgramError::IncorrectProgramId);
+    }
+    if !nft_mint.is_writable {
+        msg!("ReconcileBurnedNft: nft_mint must be writable to reclaim its rent");
+        return Err(ProgramError::InvalidAccountData);
+    }
+    // Supply was verified 0 above, so Token-2022 permits the close. Both rents
+    // go to `last_holder_ai`, the same address the PDA rent already goes to and
+    // the one BurnPositionNft/EmergencyBurn already pay these to.
+    let mint_auth_seeds: &[&[u8]] = &[MINT_AUTHORITY_SEED, &[mint_auth_bump]];
+    invoke_signed(
+        &token2022::close_account(nft_mint.key, last_holder_ai.key, mint_auth.key),
+        &[
+            nft_mint.clone(),
+            last_holder_ai.clone(),
+            mint_auth.clone(),
+            token_program.clone(),
+        ],
+        &[mint_auth_seeds],
+    )?;
+    close_extra_metas(program_id, extra_metas, nft_mint.key, last_holder_ai)?;
 
     // ── Close the PositionNft PDA — rent to the last holder (the rightful party) ──
     let dest_lamports = last_holder_ai.lamports();

@@ -25,6 +25,7 @@ percolator-nft (this program)
 | 0 | `MintPositionNft` | 12 | Mint an NFT for an open position (caller must own the position) |
 | 1 | `BurnPositionNft` | 10 | Burn the NFT, release position back to direct ownership (requires active bound leg) |
 | 2 | `SettleFunding` | 4 | Holder-only crank — update funding index snapshot `f_snap_at_mint` |
+| 7 | `ReconcileBurnedNft` | 9 | Permissionless recovery for an NFT burned out-of-band: releases the stranded escrow to the recorded last holder and closes the PositionNft PDA, NFT mint and ExtraAccountMetaList, returning all rent to that holder |
 | 3 | `GetPositionValue` | 2 | Read-only valuation diagnostics (emits raw leg/valuation fields via transaction logs; does NOT return via CPI; clients use simulateTransaction; fail-CLOSED) |
 | 4 | `ExecuteTransferHook` | 12+ | SPL TransferHook interface execute (called by Token-2022 automatically on transfer; do NOT call directly) |
 | 5 | `EmergencyBurn` | 10 | Holder-only emergency burn for flat or liquidated positions (not admin-only) |
