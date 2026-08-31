@@ -249,9 +249,11 @@ fn registry_registers_program(data: &[u8], program_id: &Pubkey) -> bool {
 /// live NFT's metas into a shape the hook cannot use.
 ///
 /// Entry 5 (PositionNft PDA) must stay writable: #105 removed the f_snap_at_mint write,
-/// but #152/#153 added `nft_state.last_holder = new_owner` in process_transfer_hook
-/// (transfer_hook.rs:542-545), which runs on every genuine Token-2022 transfer. A
-/// read-only meta there makes each such TransferChecked fail.
+/// but #152/#153 added `nft_state.last_holder = new_owner` in `process_execute`, which
+/// runs on every transfer that provably moved the token -- a genuine direct Token-2022
+/// TransferChecked AND a marketplace/orderbook CPI transfer. A read-only meta there
+/// makes each such transfer fail. Note this set is WIDER than it once was: the write
+/// was previously skipped for CPI transfers, which is what left `last_holder` stale.
 ///
 /// Entry 6 (Portfolio) is read-only: the hook performs no invoke/invoke_signed and never
 /// mutably borrows `portfolio` — it only reads it to check the NFT PDA binding.
@@ -1875,18 +1877,18 @@ mod extra_meta_flag_tests {
     use super::*;
 
     /// Entry 5 is the PositionNft PDA and the transfer hook WRITES it
-    /// (`nft_state.last_holder = new_owner`, transfer_hook.rs:542-545, gated on
-    /// `is_genuine_token2022_transfer`). Flipping it read-only makes every genuine
-    /// Token-2022 TransferChecked fail, and because RepairExtraMetas is permissionless
-    /// that is a free brick-any-NFT vector. This pins the flag so the regression cannot
-    /// return silently — the 34 pre-existing tests all passed with it read-only.
+    /// (`nft_state.last_holder = new_owner` in `process_execute`, gated on a genuine
+    /// direct transfer OR Token-2022's in-flight `transferring` flag). Flipping it
+    /// read-only makes every such transfer fail — direct and marketplace-CPI alike —
+    /// and because RepairExtraMetas is permissionless that is a free brick-any-NFT
+    /// vector. This pins the flag so the regression cannot return silently.
     #[test]
     fn position_nft_pda_meta_entry_is_writable() {
         assert_eq!(
             EXTRA_META_ENTRY_FLAGS[0],
             (false, true),
             "entry 5 (PositionNft PDA) must be non-signer and WRITABLE: the transfer hook \
-             writes last_holder to it on every genuine Token-2022 transfer"
+             writes last_holder to it on every transfer that moved the token,              including marketplace/orderbook CPI transfers"
         );
     }
 

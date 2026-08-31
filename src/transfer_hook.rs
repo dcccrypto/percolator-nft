@@ -98,25 +98,31 @@ const TOKEN_IX_TRANSFER_CHECKED_WITH_FEE: u8 = 26;
 ///   `Ok(true)`  — outer instruction IS Token-2022 TransferChecked/WithFee;
 ///                 this is a direct wallet→wallet transfer. The `last_holder`
 ///                 state write is authorised.
-///   `Ok(false)` — outer instruction is NOT Token-2022 (CPI-initiated path, e.g.
-///                 marketplace/orderbook); validation gates pass, but the caller
-///                 MUST NOT write `last_holder` (the new_owner value is
-///                 attacker-controllable in this path — #152/#153 fix).
+///   `Ok(false)` — outer instruction is NOT Token-2022: either a CPI-initiated
+///                 transfer (marketplace/orderbook) or a spoofed direct Execute.
+///                 Validation gates pass. This alone does not AUTHORISE the
+///                 `last_holder` write, but it no longer FORBIDS it either —
+///                 the caller additionally consults Token-2022's in-flight
+///                 `transferring` flag, which separates the two cases.
 ///   `Err(_)`    — outer instruction is Token-2022 but is invalid (wrong tag,
 ///                 wrong mint, empty data); reject the transfer entirely.
 ///
-/// This is the canonical anti-spoofing signal for the SPL TransferHook interface.
-/// Token-2022 sets source/dest `TransferHookAccount.transferring = true` only for
-/// the duration of a real transfer, but reading that extension requires the
-/// `spl-token-2022` crate which conflicts with our `solana-program = 2.2.1` pin
-/// (see Cargo.toml). The top-level-instruction check is the next-best equivalent:
-/// it correctly distinguishes genuine direct transfers (Token-2022 top-level) from
-/// CPI-initiated transfers (marketplace top-level) AND from spoofed direct Execute
-/// calls (both of the latter return `Ok(false)`, skipping the `last_holder` write).
+/// This separates a genuine DIRECT transfer from everything else. It does NOT
+/// separate a genuine marketplace/orderbook CPI transfer from a spoofed direct
+/// Execute — both return `Ok(false)` — so on its own it cannot decide the
+/// `last_holder` write. `account_is_transferring` supplies that second signal.
+///
+/// An earlier note here claimed the canonical signal (Token-2022's
+/// `TransferHookAccount.transferring`) was unreadable because it needs the
+/// `spl-token-2022` crate, which conflicts with our `solana-program` pin. That is
+/// not so: the flag is a single byte of TLV in the token account, and this file
+/// already hand-parses those same accounts for mint/owner/state. No dependency
+/// was added to read it.
 ///
 /// #145 composability: Requiring top-level = Token-2022 for the ENTIRE Execute
-/// would block marketplace/orderbook CPI transfers. We only require it for the
-/// `last_holder` WRITE — the validation gates run for both paths.
+/// would block marketplace/orderbook CPI transfers, so it is not required at all
+/// for the transfer to proceed — the validation gates run for both paths, and the
+/// `last_holder` write is decided by the in-flight flag rather than by this check.
 ///
 /// How it works:
 /// - On Solana, when program A CPI-calls program B, program B's instruction
@@ -147,23 +153,24 @@ fn verify_cpi_caller_is_token2022(
     // by another program via CPI — e.g. an NFT marketplace or the position
     // orderbook moving the NFT on a match. The validation gates (ATA checks,
     // bound-leg / market_id anchor, transfer-gate, registry) still run and must
-    // pass. The `last_holder` write is controlled by the return value: `false`
-    // tells the caller to skip it. This is safe because:
-    //   (a) In a legitimate marketplace CPI, Token-2022 is invoked by the
-    //       marketplace, which is invoked as the top-level instruction. The
-    //       actual NFT token moves; the last genuine holder update happened at
-    //       the previous genuine Token-2022 top-level transfer (or mint). Skipping
-    //       the update here means `last_holder` stays at the PREVIOUS genuine
-    //       holder — still correct for ReconcileBurnedNft.
+    // pass. A `false` return means "not a genuine DIRECT transfer"; it no longer
+    // decides the `last_holder` write on its own. This is safe because:
+    //   (a) In a legitimate marketplace CPI the NFT really does move, so the
+    //       holder MUST be recorded. Returning `false` here does not skip that
+    //       write any more; the caller recovers the case from Token-2022's
+    //       in-flight flag. Treating this case as "no write" is what pinned
+    //       `last_holder` at the minter for every program-traded NFT and let
+    //       ReconcileBurnedNft pay an already-paid seller.
     //   (b) In a spoofed direct Execute call (attacker invokes Execute directly,
-    //       top-level = attacker's program), we also return `false`, so
-    //       `last_holder` is never updated. Theft closed.
+    //       top-level = attacker's program) we also return `false`, and no
+    //       transfer is in flight, so `last_holder` is never updated. Theft
+    //       stays closed.
     //
     // Requiring the top-level instruction to be Token-2022 would block every
     // program-escrow marketplace/orderbook transfer — the core of the
-    // composability goal (#145). We only gate the last_holder WRITE on it.
+    // composability goal (#145).
     if current_ix.program_id != token2022::TOKEN_2022_PROGRAM_ID {
-        return Ok(false); // CPI-initiated or spoofed direct call: gates pass, no last_holder write
+        return Ok(false); // CPI-initiated or spoofed: not a genuine DIRECT transfer
     }
     // Top-level IS Token-2022 (a direct wallet→wallet transfer): keep the strict
     // instruction-type + mint-match validation below (incl. #103 plain-Transfer reject).
@@ -239,6 +246,67 @@ fn verify_cpi_caller_is_token2022(
 // ═══════════════════════════════════════════════════════════════
 // Execute — called by Token-2022 on every NFT transfer
 // ═══════════════════════════════════════════════════════════════
+
+/// `ExtensionType::TransferHookAccount` (`spl-token-2022`, `#[repr(u16)]`).
+const EXT_TYPE_TRANSFER_HOOK_ACCOUNT: u16 = 15;
+/// Length of the Token-2022 base token account, before `account_type` + TLV.
+const TOKEN_ACCOUNT_BASE_LEN: usize = 165;
+/// `AccountType::Account` — the discriminant at byte [165] of a token account.
+const ACCOUNT_TYPE_ACCOUNT: u8 = 2;
+
+/// Read `TransferHookAccount.transferring` straight out of a token account's
+/// TLV region.
+///
+/// Token-2022 sets this flag on BOTH the source and the destination immediately
+/// before invoking a transfer hook and clears it immediately afterwards (see
+/// `process_transfer`). It is therefore true exactly while a genuine transfer is
+/// in flight — for direct AND CPI-initiated transfers alike — and false during
+/// a spoofed direct `Execute` call, where no transfer is running at all. That is
+/// the discrimination the top-level-instruction heuristic stands in for, minus
+/// the marketplace blind spot.
+///
+/// Layout: base account is 165 bytes, `account_type` at [165], then TLV entries
+/// of `[type: u16 LE][len: u16 LE][value; len]` from [166]. The value here is a
+/// 1-byte `PodBool`. No new dependency is needed; this file already hand-parses
+/// the same accounts for mint/owner/state.
+///
+/// Returns `false` rather than an error when the extension is absent or the
+/// account carries no TLV region, so callers degrade to prior behaviour.
+///
+/// LOAD-BEARING INVARIANT. This signal is trustworthy only because the flag can
+/// be observed set exclusively from inside Token-2022's own `invoke_execute`:
+///   (i)   `set_transferring` / `unset_transferring` bracket that call;
+///   (ii)  a failing inner instruction aborts the whole transaction, so a
+///         set-without-unset state can never commit or be seen later; and
+///   (iii) `process_execute` performs NO CPI, so no foreign code runs inside
+///         the window.
+/// If this program ever gains a CPI from `process_execute`, revisit this.
+fn account_is_transferring(ata: &AccountInfo) -> Result<bool, ProgramError> {
+    let data = ata.try_borrow_data()?;
+    if data.len() <= TOKEN_ACCOUNT_BASE_LEN {
+        return Ok(false);
+    }
+    // [165] is `account_type`; TLV entries start at [166]. TransferHookAccount is
+    // account-scoped, so anything not tagged as a token account cannot carry it.
+    if data[TOKEN_ACCOUNT_BASE_LEN] != ACCOUNT_TYPE_ACCOUNT {
+        return Ok(false);
+    }
+    let mut off = TOKEN_ACCOUNT_BASE_LEN + 1;
+    while off + 4 <= data.len() {
+        let ext_type = u16::from_le_bytes([data[off], data[off + 1]]);
+        let len = usize::from(u16::from_le_bytes([data[off + 2], data[off + 3]]));
+        off += 4;
+        // `Uninitialized` marks the end of the initialised TLV region.
+        if ext_type == 0 || off + len > data.len() {
+            break;
+        }
+        if ext_type == EXT_TYPE_TRANSFER_HOOK_ACCOUNT {
+            return Ok(len >= 1 && data[off] != 0);
+        }
+        off += len;
+    }
+    Ok(false)
+}
 
 /// Process the TransferHook Execute instruction.
 ///
@@ -387,9 +455,10 @@ pub fn process_execute(
     //
     // Returns Ok(true)  — genuine direct Token-2022 transfer (direct wallet).
     // Returns Ok(false) — CPI-initiated (marketplace/orderbook) OR spoofed
-    //                     direct Execute call. Both pass the validation gates;
-    //                     only genuine direct transfers authorise the
-    //                     last_holder write (#152/#153 anti-spoof fix).
+    //                     direct Execute call. Both pass the validation gates.
+    //                     These two are separated later by Token-2022's
+    //                     in-flight `transferring` flag, which authorises the
+    //                     last_holder write for the former but not the latter.
     // Returns Err(_)    — Token-2022 top-level but invalid tag/mint; reject.
     // ────────────────────────────────────────────────────────────────────
     let is_genuine_token2022_transfer = verify_cpi_caller_is_token2022(sysvar_ix, mint.key)?;
@@ -515,31 +584,36 @@ pub fn process_execute(
     // no longer forwarded into one.
     let _ = nft_program_self;
 
-    // #138 + #152/#153 anti-spoof: record the new holder ONLY when the outer
-    // instruction is provably a genuine Token-2022 TransferChecked/WithFee
-    // (is_genuine_token2022_transfer == true). This is the canonical signal that
-    // a real NFT token movement occurred — not a spoofed direct Execute call or a
-    // marketplace CPI whose new_owner (dest_ata.data[32..64]) is attacker-controlled.
+    // #138 + #152/#153: record the new holder whenever a real NFT token movement
+    // provably occurred — either a genuine direct Token-2022 TransferChecked /
+    // WithFee, or a transfer Token-2022 is executing right now on behalf of
+    // another program. Both are real; a spoofed direct Execute is neither.
     //
-    // Why skipping the write for CPI-initiated marketplace transfers is safe:
-    //   - `last_holder` is consumed ONLY by ReconcileBurnedNft — which fires when
-    //     the NFT was burned out-of-band. In that scenario the most recent genuine
-    //     transfer's last_holder is the correct recovery target. If the last genuine
-    //     transfer was marketplace-CPI-initiated the last_holder from the previous
-    //     direct transfer (or mint) remains recorded — still the rightful party.
-    //   - The marketplace path successfully validates all gates (ATA, bound-leg,
-    //     transfer-gate, registry) and the token moves; it just does not update
-    //     last_holder. A recipient who receives an NFT only via marketplace CPI and
-    //     never via direct TransferChecked can still use BurnPositionNft normally
-    //     (which does not consult last_holder at all); only ReconcileBurnedNft falls
-    //     back to last_holder, and in that case the previous genuine-transfer holder
-    //     is a safe default (both parties are real holders; neither is an attacker).
+    // A CPI-initiated transfer is just as genuine as a direct one, so the write
+    // is additionally authorised by Token-2022's own in-flight signal. The flag
+    // is set on BOTH the source and the destination immediately before the hook
+    // is invoked and cleared immediately after, so requiring both to be set
+    // admits every real transfer (direct or marketplace/orderbook CPI) while
+    // still excluding a spoofed direct `Execute`, where no transfer is running.
     //
-    // Attack closed: a spoofed direct Execute (top-level = attacker's program) or a
-    // thin CPI-wrapper attacking Execute receives is_genuine_token2022_transfer==false
-    // and cannot forge last_holder. ReconcileBurnedNft therefore cannot be used to
-    // divert the escrowed position to an attacker-controlled address.
-    if is_genuine_token2022_transfer {
+    // Gating on the top-level instruction ALONE left `last_holder` pinned at the
+    // minter for any NFT traded only through a program. Since `last_holder` is
+    // the sole authorisation for ReconcileBurnedNft's escrow release, that paid
+    // the entire escrowed portfolio to a seller who had already been paid, and
+    // locked the actual owner out of their own recovery.
+    //
+    // The disjunction is deliberate and monotonic: every case authorised before
+    // is still authorised, so if a token account somehow carries no
+    // TransferHookAccount extension the behaviour degrades to exactly the prior
+    // (fail-closed) one rather than regressing.
+    //
+    // Attack still closed: a spoofed direct Execute (top-level = attacker's
+    // program) or a thin CPI-wrapper sees is_genuine_token2022_transfer == false
+    // AND both transferring flags clear, so it cannot forge last_holder.
+    let transfer_in_flight =
+        account_is_transferring(source_ata)? && account_is_transferring(dest_ata)?;
+    let holder_recorded = is_genuine_token2022_transfer || transfer_in_flight;
+    if holder_recorded {
         let mut pda_data = nft_pda.try_borrow_mut_data()?;
         let nft_state =
             bytemuck::from_bytes_mut::<PositionNftV16>(&mut pda_data[..POSITION_NFT_V16_LEN]);
@@ -550,7 +624,7 @@ pub fn process_execute(
         "Position NFT transferred (position remains escrowed): portfolio={}, asset_index={}, new_holder_recorded={}",
         portfolio.key,
         asset_index_u16,
-        is_genuine_token2022_transfer
+        holder_recorded
     );
 
     Ok(())
@@ -568,12 +642,14 @@ pub fn process_execute(
 //      tag = 12, correct mint → Ok(true) → last_holder write authorised.
 //
 //  (B) Marketplace/orderbook CPI:  top-level = marketplace program (not
-//      Token-2022) → Ok(false) → last_holder write skipped; transfer gate
+//      Token-2022) → Ok(false); the last_holder write is then decided by the
+//      in-flight `transferring` flag, not by this return value; transfer gate
 //      still passes (composability preserved).
 //
 //  (C) Spoofed direct Execute call:  attacker invokes Execute directly with
 //      top-level = attacker's program (also not Token-2022) → Ok(false) →
-//      last_holder write skipped.  Theft closed.
+//      Ok(false) AND no transfer in flight → last_holder write skipped.
+//      Theft closed.
 //
 //  (D) Spoofed fake Token-2022 top-level with wrong mint:  top-level IS
 //      Token-2022 but TransferChecked mint != expected → Err(Unauthorized).
@@ -733,7 +809,7 @@ mod last_holder_antispoof_152_153 {
         assert_eq!(
             result,
             Ok(false),
-            "marketplace/orderbook CPI (non-Token-2022 top-level) must return Ok(false) — gates pass, no last_holder write (#145 composability preserved)"
+            "marketplace/orderbook CPI (non-Token-2022 top-level) must return Ok(false) — gates pass; the last_holder write is decided separately by the in-flight flag (#145 composability preserved)"
         );
     }
 

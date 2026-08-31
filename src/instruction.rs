@@ -118,8 +118,9 @@ pub const TAG_EMERGENCY_BURN: u8 = 5;
 /// Current flags (see EXTRA_META_ENTRY_FLAGS in processor.rs):
 ///   [5] PositionNft PDA — WRITABLE. #105 removed the f_snap_at_mint write, but
 ///       #152/#153 added a new one: the hook writes `nft_state.last_holder` on
-///       every genuine Token-2022 transfer, so this must stay writable or such a
-///       transfer fails.
+///       every transfer that provably moved the token — a genuine direct
+///       Token-2022 transfer AND a marketplace/orderbook CPI transfer — so this
+///       must stay writable or such a transfer fails.
 ///   [6] Portfolio      — read-only. The hook performs no invoke/invoke_signed
 ///       and never mutably borrows it; the pre-#105 B-3 ownership CPI that once
 ///       required write access moved to mint/burn.

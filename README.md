@@ -106,6 +106,15 @@ wrapped life — escrow is set once at mint (via the wrapper's `TransferPortfoli
 tag 72) and released only at burn (via `UnwrapEscrowedPortfolio` tag 82). An NFT
 transfer moves only the bearer token; the underlying position stays escrowed.
 
+The hook's one state write is `PositionNftV16.last_holder`, recorded whenever a
+transfer provably moved the token — a direct Token-2022 transfer, or one
+Token-2022 is executing on behalf of another program (marketplace, orderbook,
+multisig). It is detected via Token-2022's own in-flight `transferring` flag, so
+a spoofed direct `Execute` cannot forge it. `ReconcileBurnedNft` uses this field
+as the sole authorisation for releasing an escrowed portfolio after an
+out-of-band burn, so it must track the current holder, and extra-meta entry [5]
+must stay writable for every such transfer.
+
 ## Build and Test
 
 ```bash
