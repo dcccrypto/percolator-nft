@@ -199,7 +199,10 @@ mod tests {
         assert_eq!(back.basis_pos_q_at_mint.get(), -12345);
         assert_eq!(back.market_id_at_mint.get(), 42);
         assert_eq!(back.minted_at.get(), 1_700_000_000);
-        assert_eq!(back.portfolio_account_pubkey(), Pubkey::new_from_array([9u8; 32]));
+        assert_eq!(
+            back.portfolio_account_pubkey(),
+            Pubkey::new_from_array([9u8; 32])
+        );
         verify_position_nft(back).expect("valid");
     }
 
@@ -225,7 +228,7 @@ mod tests {
         let (a1, _) = position_nft_pda(&portfolio, 101, &prog);
         assert_eq!(a0, a0b); // deterministic
         assert_ne!(a0, a1); // distinct per market_id (per-position-instance NFT)
-        // Re-opening the SAME asset_index yields a NEW market_id → a NEW PDA,
-        // so a stale NFT can never squat the new position's wrap slot.
+                            // Re-opening the SAME asset_index yields a NEW market_id → a NEW PDA,
+                            // so a stale NFT can never squat the new position's wrap slot.
     }
 }

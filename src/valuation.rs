@@ -54,9 +54,7 @@ pub(crate) fn gate_status(gate: LegTransferGate) -> (&'static str, Option<NftErr
             ("portfolio_locked_or_stale", Some(NftError::TransferBlocked))
         }
         LegTransferGate::Resolved => ("resolved", Some(NftError::TransferBlocked)),
-        LegTransferGate::CloseInProgress => {
-            ("close_in_progress", Some(NftError::TransferBlocked))
-        }
+        LegTransferGate::CloseInProgress => ("close_in_progress", Some(NftError::TransferBlocked)),
         LegTransferGate::NoActiveLeg => ("no_active_leg", Some(NftError::LegNotActive)),
     }
 }
@@ -79,10 +77,7 @@ fn emit_position_header(portfolio: &Pubkey, asset_index: u32) {
 ///   1. `[]`  Portfolio account
 ///
 /// Data: tag(1) — no additional data needed.
-pub fn process_get_position_value(
-    program_id: &Pubkey,
-    accounts: &[AccountInfo],
-) -> ProgramResult {
+pub fn process_get_position_value(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     let accounts_iter = &mut accounts.iter();
     let nft_pda = next_account_info(accounts_iter)?;
     let portfolio = next_account_info(accounts_iter)?;
@@ -100,8 +95,7 @@ pub fn process_get_position_value(
     if pda_data.len() < POSITION_NFT_V16_LEN {
         return Err(ProgramError::InvalidAccountData);
     }
-    let nft_state =
-        bytemuck::from_bytes::<PositionNftV16>(&pda_data[..POSITION_NFT_V16_LEN]);
+    let nft_state = bytemuck::from_bytes::<PositionNftV16>(&pda_data[..POSITION_NFT_V16_LEN]);
     verify_position_nft(nft_state)?;
     if nft_state.portfolio_account != portfolio.key.to_bytes() {
         return Err(ProgramError::InvalidAccountData);
@@ -129,8 +123,7 @@ pub fn process_get_position_value(
 
     // ── Decode portfolio ──
     let portfolio_data = portfolio.try_borrow_data()?;
-    let p = slab_types_v16::decode_portfolio(&portfolio_data)
-        .map_err(cpi_v16::map_decode_err)?;
+    let p = slab_types_v16::decode_portfolio(&portfolio_data).map_err(cpi_v16::map_decode_err)?;
 
     cpi_v16::verify_portfolio_account_id(p, portfolio.key, "GetPositionValue")?;
 
@@ -194,7 +187,10 @@ pub fn process_get_position_value(
         // this path previously did) makes `status` parse as a compound value.
         msg!("POSITION_VALUE_V16:status=slot_reuse_detected");
         msg!("POSITION_VALUE_V16:market_id_at_mint={}", nft_market_id);
-        msg!("POSITION_VALUE_V16:current_market_id={}", leg.market_id.get());
+        msg!(
+            "POSITION_VALUE_V16:current_market_id={}",
+            leg.market_id.get()
+        );
         return Err(NftError::MarketIdMismatch.into());
     }
 

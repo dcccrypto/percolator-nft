@@ -252,7 +252,10 @@ fn every_gate_blocked_state_is_also_valuation_blocked() {
         Blocked::NoActiveLeg,
     ] {
         assert!(!gate_says_transferable(state), "{state:?}");
-        assert!(run_valuation(state).is_err(), "{state:?} must also be blocked");
+        assert!(
+            run_valuation(state).is_err(),
+            "{state:?} must also be blocked"
+        );
     }
     // ...and the converse genuinely does not hold:
     assert!(gate_says_transferable(Blocked::None));

@@ -19,8 +19,7 @@ use bytemuck::Zeroable;
 use percolator_nft::{
     cpi_v16::{derive_nft_registry, PERCOLATOR_MAINNET},
     instruction::TAG_RECONCILE_BURNED_NFT,
-    processor,
-    slab_types_v16 as sl,
+    processor, slab_types_v16 as sl,
     state_v16::{
         mint_authority_pda, position_nft_pda, PositionNftV16, POSITION_NFT_V16_LEN,
         POSITION_NFT_V16_MAGIC, POSITION_NFT_V16_VERSION,
@@ -203,7 +202,14 @@ fn run_hook(
     starting_last_holder: [u8; 32],
     in_flight: Option<(bool, bool)>,
 ) -> (Result<(), ProgramError>, AccountInfo<'static>) {
-    run_hook_inner(top_prog, top_data, top_accounts, starting_last_holder, in_flight, false)
+    run_hook_inner(
+        top_prog,
+        top_data,
+        top_accounts,
+        starting_last_holder,
+        in_flight,
+        false,
+    )
 }
 
 fn run_hook_inner(
@@ -247,9 +253,7 @@ fn run_hook_inner(
             TOKEN_2022_PROGRAM_ID,
             match in_flight {
                 None => token_account(&NFT_MINT, &BOB, 0),
-                Some((_, dst)) if realistic => {
-                    token_account_realistic_ata(&NFT_MINT, &BOB, 0, dst)
-                }
+                Some((_, dst)) if realistic => token_account_realistic_ata(&NFT_MINT, &BOB, 0, dst),
                 Some((_, dst)) => token_account_ext(&NFT_MINT, &BOB, 0, dst),
             },
             0,
@@ -258,7 +262,13 @@ fn run_hook_inner(
         acct(ALICE, Pubkey::default(), vec![], 0, false),
         acct(metas, PROG, vec![0u8; 261], 0, false),
         nft_pda.clone(),
-        acct(PORTFOLIO, PERCOLATOR_MAINNET, portfolio_buf(mint_auth.to_bytes()), 0, false),
+        acct(
+            PORTFOLIO,
+            PERCOLATOR_MAINNET,
+            portfolio_buf(mint_auth.to_bytes()),
+            0,
+            false,
+        ),
         acct(PERCOLATOR_MAINNET, Pubkey::default(), vec![], 0, false),
         acct(mint_auth, Pubkey::default(), vec![], 0, false),
         acct(
@@ -298,11 +308,23 @@ fn run_reconcile(
     let recipient_ai = acct(recipient, Pubkey::default(), vec![], 0, true);
 
     let accounts = vec![
-        acct(nft_pda_key, PROG, nft_pda_buf(bump, last_holder_in_state), PDA_RENT, true),
+        acct(
+            nft_pda_key,
+            PROG,
+            nft_pda_buf(bump, last_holder_in_state),
+            PDA_RENT,
+            true,
+        ),
         // supply == 0: the NFT really was burned out of band.
         // #182: writable, because reconcile now closes the mint to reclaim rent.
         acct(NFT_MINT, TOKEN_2022_PROGRAM_ID, mint_account(0), 0, true),
-        acct(PORTFOLIO, PERCOLATOR_MAINNET, portfolio_buf(mint_auth.to_bytes()), 0, true),
+        acct(
+            PORTFOLIO,
+            PERCOLATOR_MAINNET,
+            portfolio_buf(mint_auth.to_bytes()),
+            0,
+            true,
+        ),
         acct(mint_auth, Pubkey::default(), vec![], 0, false),
         acct(registry, PERCOLATOR_MAINNET, vec![], 0, false),
         acct(PERCOLATOR_MAINNET, Pubkey::default(), vec![], 0, false),
@@ -328,13 +350,20 @@ fn marketplace_sale_without_the_extension_degrades_to_prior_behaviour() {
     // so the TOP-LEVEL instruction is the marketplace, not Token-2022.
     let (r, nft_pda) = run_hook(MARKETPLACE, vec![7u8], vec![], ALICE.to_bytes(), None);
 
-    assert!(r.is_ok(), "the sale itself must succeed (#145 composability): {r:?}");
+    assert!(
+        r.is_ok(),
+        "the sale itself must succeed (#145 composability): {r:?}"
+    );
     assert_eq!(
         read_last_holder(&nft_pda),
         ALICE.to_bytes(),
         "last_holder still points at the SELLER after the sale settled",
     );
-    assert_ne!(read_last_holder(&nft_pda), BOB.to_bytes(), "the buyer was never recorded");
+    assert_ne!(
+        read_last_holder(&nft_pda),
+        BOB.to_bytes(),
+        "the buyer was never recorded"
+    );
 }
 
 // -- 2. control: the harness DOES observe a write ----------------------------
@@ -349,7 +378,13 @@ fn control_a_direct_transfer_does_record_the_buyer() {
     data.push(0); // decimals
     let top_accounts = vec![SRC_ATA, NFT_MINT, DST_ATA, ALICE];
 
-    let (r, nft_pda) = run_hook(TOKEN_2022_PROGRAM_ID, data, top_accounts, ALICE.to_bytes(), None);
+    let (r, nft_pda) = run_hook(
+        TOKEN_2022_PROGRAM_ID,
+        data,
+        top_accounts,
+        ALICE.to_bytes(),
+        None,
+    );
 
     assert!(r.is_ok(), "genuine direct transfer must succeed: {r:?}");
     assert_eq!(
@@ -388,7 +423,10 @@ fn control_a_correctly_recorded_buyer_can_reconcile() {
     // only the recorded last_holder differs. This isolates the gate at
     // processor.rs:1275 as the sole reason Bob was refused above.
     let (r, bob_lamports) = run_reconcile(BOB.to_bytes(), BOB);
-    assert!(r.is_ok(), "with the buyer correctly recorded, he recovers: {r:?}");
+    assert!(
+        r.is_ok(),
+        "with the buyer correctly recorded, he recovers: {r:?}"
+    );
     assert_eq!(bob_lamports, RECONCILE_PAYOUT);
 }
 
@@ -399,7 +437,13 @@ fn marketplace_sale_in_flight_records_the_buyer() {
     // The same marketplace-CPI sale as above, except the source and destination
     // now carry Token-2022's in-flight `transferring` flag -- exactly what the
     // token program sets around `invoke_execute`. The buyer is now recorded.
-    let (r, nft_pda) = run_hook(MARKETPLACE, vec![7u8], vec![], ALICE.to_bytes(), Some((true, true)));
+    let (r, nft_pda) = run_hook(
+        MARKETPLACE,
+        vec![7u8],
+        vec![],
+        ALICE.to_bytes(),
+        Some((true, true)),
+    );
 
     assert!(r.is_ok(), "the marketplace sale must still succeed: {r:?}");
     assert_eq!(
@@ -413,11 +457,20 @@ fn marketplace_sale_in_flight_records_the_buyer() {
 fn buyer_recorded_by_the_fix_can_reconcile_and_seller_cannot() {
     // The end-to-end consequence: run the sale, take the resulting state, and
     // feed it to ReconcileBurnedNft. The roles are now the right way round.
-    let (_, nft_pda) = run_hook(MARKETPLACE, vec![7u8], vec![], ALICE.to_bytes(), Some((true, true)));
+    let (_, nft_pda) = run_hook(
+        MARKETPLACE,
+        vec![7u8],
+        vec![],
+        ALICE.to_bytes(),
+        Some((true, true)),
+    );
     let recorded = read_last_holder(&nft_pda);
 
     let (bob_r, bob_lamports) = run_reconcile(recorded, BOB);
-    assert!(bob_r.is_ok(), "the real owner recovers his own position: {bob_r:?}");
+    assert!(
+        bob_r.is_ok(),
+        "the real owner recovers his own position: {bob_r:?}"
+    );
     assert_eq!(bob_lamports, RECONCILE_PAYOUT);
 
     let (alice_r, _) = run_reconcile(recorded, ALICE);
@@ -434,7 +487,13 @@ fn spoofed_direct_execute_still_cannot_forge_last_holder() {
     // The #152/#153 attack: an attacker invokes Execute top-level with a
     // dest_ata they own. No transfer is in flight, so both flags read false and
     // the write must still be suppressed.
-    let (r, nft_pda) = run_hook(MARKETPLACE, vec![7u8], vec![], ALICE.to_bytes(), Some((false, false)));
+    let (r, nft_pda) = run_hook(
+        MARKETPLACE,
+        vec![7u8],
+        vec![],
+        ALICE.to_bytes(),
+        Some((false, false)),
+    );
 
     assert!(r.is_ok(), "gates pass, as before: {r:?}");
     assert_eq!(
@@ -449,8 +508,13 @@ fn a_half_set_flag_pair_is_not_enough() {
     // Both source and destination must be in flight. Token-2022 always sets the
     // pair together, so a single flag is not a real transfer window.
     for (src, dst) in [(true, false), (false, true)] {
-        let (r, nft_pda) =
-            run_hook(MARKETPLACE, vec![7u8], vec![], ALICE.to_bytes(), Some((src, dst)));
+        let (r, nft_pda) = run_hook(
+            MARKETPLACE,
+            vec![7u8],
+            vec![],
+            ALICE.to_bytes(),
+            Some((src, dst)),
+        );
         assert!(r.is_ok(), "gates still pass for ({src},{dst}): {r:?}");
         assert_eq!(
             read_last_holder(&nft_pda),
@@ -469,7 +533,13 @@ fn a_non_account_type_tlv_is_not_honoured() {
     let (metas, _) = extra_account_metas_pda(&NFT_MINT, &PROG);
     let (registry, _) = derive_nft_registry(&PERCOLATOR_MAINNET, &MARKET_GROUP);
 
-    let nft_pda = acct(nft_pda_key, PROG, nft_pda_buf(bump, ALICE.to_bytes()), PDA_RENT, true);
+    let nft_pda = acct(
+        nft_pda_key,
+        PROG,
+        nft_pda_buf(bump, ALICE.to_bytes()),
+        PDA_RENT,
+        true,
+    );
     let accounts = vec![
         acct(
             SRC_ATA,
@@ -489,7 +559,13 @@ fn a_non_account_type_tlv_is_not_honoured() {
         acct(ALICE, Pubkey::default(), vec![], 0, false),
         acct(metas, PROG, vec![0u8; 261], 0, false),
         nft_pda.clone(),
-        acct(PORTFOLIO, PERCOLATOR_MAINNET, portfolio_buf(mint_auth.to_bytes()), 0, false),
+        acct(
+            PORTFOLIO,
+            PERCOLATOR_MAINNET,
+            portfolio_buf(mint_auth.to_bytes()),
+            0,
+            false,
+        ),
         acct(PERCOLATOR_MAINNET, Pubkey::default(), vec![], 0, false),
         acct(mint_auth, Pubkey::default(), vec![], 0, false),
         acct(
