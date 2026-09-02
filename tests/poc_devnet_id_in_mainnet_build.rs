@@ -147,19 +147,38 @@ fn run_hook_under_wrapper(wrapper: Pubkey) -> Result<(), ProgramError> {
     t22_data.push(0);
 
     let accounts = vec![
-        acct(SRC_ATA, TOKEN_2022_PROGRAM_ID, token_account(&NFT_MINT, &ALICE, 1), false),
+        acct(
+            SRC_ATA,
+            TOKEN_2022_PROGRAM_ID,
+            token_account(&NFT_MINT, &ALICE, 1),
+            false,
+        ),
         acct(NFT_MINT, TOKEN_2022_PROGRAM_ID, mint_account(), false),
-        acct(DST_ATA, TOKEN_2022_PROGRAM_ID, token_account(&NFT_MINT, &BOB, 0), false),
+        acct(
+            DST_ATA,
+            TOKEN_2022_PROGRAM_ID,
+            token_account(&NFT_MINT, &BOB, 0),
+            false,
+        ),
         acct(ALICE, Pubkey::default(), vec![], false),
         acct(metas, PROG, vec![0u8; 261], false),
         acct(nft_pda_key, PROG, nft_pda_buf(bump), true),
-        acct(PORTFOLIO, wrapper, portfolio_buf(mint_auth.to_bytes()), false),
+        acct(
+            PORTFOLIO,
+            wrapper,
+            portfolio_buf(mint_auth.to_bytes()),
+            false,
+        ),
         acct(wrapper, Pubkey::default(), vec![], false),
         acct(mint_auth, Pubkey::default(), vec![], false),
         acct(
             sysvar_instructions::ID,
             Pubkey::default(),
-            build_sysvar(&TOKEN_2022_PROGRAM_ID, &t22_data, &[SRC_ATA, NFT_MINT, DST_ATA, ALICE]),
+            build_sysvar(
+                &TOKEN_2022_PROGRAM_ID,
+                &t22_data,
+                &[SRC_ATA, NFT_MINT, DST_ATA, ALICE],
+            ),
             false,
         ),
         acct(PROG, Pubkey::default(), vec![], false),
@@ -217,7 +236,10 @@ fn control_an_unrelated_program_is_rejected() {
 fn a_devnet_build_still_accepts_the_devnet_wrapper() {
     // The gate must not break devnet deploys: built with --features devnet, the
     // same id is trusted exactly as before.
-    assert_eq!(percolator_nft::cpi_v16::PERCOLATOR_DEVNET, DEVNET_WRAPPER_ID);
+    assert_eq!(
+        percolator_nft::cpi_v16::PERCOLATOR_DEVNET,
+        DEVNET_WRAPPER_ID
+    );
     let devnet_owned = acct(PORTFOLIO, DEVNET_WRAPPER_ID, vec![], false);
     assert!(verify_portfolio_program(&devnet_owned).is_ok());
     assert!(run_hook_under_wrapper(DEVNET_WRAPPER_ID).is_ok());

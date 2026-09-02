@@ -308,7 +308,10 @@ mod tests {
         let result = NftInstruction::unpack(&data);
 
         assert!(
-            matches!(result, Ok(NftInstruction::ExecuteTransferHook { amount: 1 })),
+            matches!(
+                result,
+                Ok(NftInstruction::ExecuteTransferHook { amount: 1 })
+            ),
             "TransferHook Execute should accept exactly 16 bytes"
         );
     }

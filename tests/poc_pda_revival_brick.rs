@@ -32,8 +32,7 @@ use bytemuck::Zeroable;
 use percolator_nft::{
     cpi_v16::{derive_nft_registry, PERCOLATOR_MAINNET},
     instruction::{TAG_MINT_POSITION_NFT, TAG_RECONCILE_BURNED_NFT},
-    processor,
-    slab_types_v16 as sl,
+    processor, slab_types_v16 as sl,
     state_v16::{
         mint_authority_pda, position_nft_pda, verify_position_nft, PositionNftV16,
         POSITION_NFT_V16_LEN, POSITION_NFT_V16_MAGIC, POSITION_NFT_V16_VERSION,
@@ -41,9 +40,7 @@ use percolator_nft::{
     token2022::{get_associated_token_address, ATA_PROGRAM_ID, TOKEN_2022_PROGRAM_ID},
     transfer_hook::extra_account_metas_pda,
 };
-use solana_program::{
-    account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey,
-};
+use solana_program::{account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey};
 
 const PROG: Pubkey = Pubkey::new_from_array([9u8; 32]);
 const OWNER: Pubkey = Pubkey::new_from_array([0xA1; 32]);
@@ -64,7 +61,6 @@ const NFT_REGISTRY_PROGRAM_ID_OFFSET: usize = CORE_HEADER_LEN + 32;
 fn leak<T>(v: T) -> &'static mut T {
     Box::leak(Box::new(v))
 }
-
 
 fn acct(
     key: Pubkey,
@@ -140,24 +136,66 @@ fn run_reconcile() -> (Result<(), ProgramError>, AccountInfo<'static>) {
     let (registry, _) = derive_nft_registry(&PERCOLATOR_MAINNET, &MARKET_GROUP);
     let (extra_metas, _) = extra_account_metas_pda(&NFT_MINT, &PROG);
 
-    let nft_pda = acct(nft_pda_key, PROG, live_nft_pda_buf(bump), PDA_RENT, true, false);
+    let nft_pda = acct(
+        nft_pda_key,
+        PROG,
+        live_nft_pda_buf(bump),
+        PDA_RENT,
+        true,
+        false,
+    );
 
     let accounts = vec![
         nft_pda.clone(),
         // #182: the mint must be WRITABLE now — reconcile closes it to reclaim
         // its rent, and refuses a read-only one.
-        acct(NFT_MINT, TOKEN_2022_PROGRAM_ID, mint_account(0), 0, true, false),
-        acct(PORTFOLIO, PERCOLATOR_MAINNET, portfolio_buf(mint_auth.to_bytes()), 0, true, false),
+        acct(
+            NFT_MINT,
+            TOKEN_2022_PROGRAM_ID,
+            mint_account(0),
+            0,
+            true,
+            false,
+        ),
+        acct(
+            PORTFOLIO,
+            PERCOLATOR_MAINNET,
+            portfolio_buf(mint_auth.to_bytes()),
+            0,
+            true,
+            false,
+        ),
         acct(mint_auth, Pubkey::default(), vec![], 0, false, false),
-        acct(registry, PERCOLATOR_MAINNET, registry_buf(), 0, false, false),
-        acct(PERCOLATOR_MAINNET, Pubkey::default(), vec![], 0, false, false),
+        acct(
+            registry,
+            PERCOLATOR_MAINNET,
+            registry_buf(),
+            0,
+            false,
+            false,
+        ),
+        acct(
+            PERCOLATOR_MAINNET,
+            Pubkey::default(),
+            vec![],
+            0,
+            false,
+            false,
+        ),
         acct(OWNER, Pubkey::default(), vec![], 0, true, false), // 6 last_holder
         // #182 made these two REQUIRED rather than optional, so that the mint
         // and ExtraAccountMetaList rent can be reclaimed while nft_pda is still
         // alive. This fixture predates that change (#179) and was not updated
         // when it landed, which is what turned main's CI red.
         acct(extra_metas, PROG, vec![0u8; 8], PDA_RENT, true, false), // 7 (writable, closed)
-        acct(TOKEN_2022_PROGRAM_ID, Pubkey::default(), vec![], 0, false, false), // 8
+        acct(
+            TOKEN_2022_PROGRAM_ID,
+            Pubkey::default(),
+            vec![],
+            0,
+            false,
+            false,
+        ), // 8
     ];
 
     // Permissionless: assert it, do not merely assume it.
@@ -180,17 +218,59 @@ fn run_mint(nft_pda: AccountInfo<'static>) -> Result<(), ProgramError> {
 
     let accounts = vec![
         acct(OWNER, Pubkey::default(), vec![], 1_000_000_000, true, true), // 0 owner, signer
-        nft_pda,                                                          // 1
-        acct(NFT_MINT, Pubkey::default(), vec![], 0, true, true),         // 2 fresh + signer
-        acct(get_associated_token_address(&OWNER, &NFT_MINT), Pubkey::default(), vec![], 0, true, false), // 3
-        acct(PORTFOLIO, PERCOLATOR_MAINNET, portfolio_buf(OWNER.to_bytes()), 0, true, false), // 4
-        acct(mint_auth, Pubkey::default(), vec![], 0, false, false),      // 5
-        acct(TOKEN_2022_PROGRAM_ID, Pubkey::default(), vec![], 0, false, false), // 6
-        acct(ATA_PROGRAM_ID, Pubkey::default(), vec![], 0, false, false), // 7 ata prog
-        acct(Pubkey::default(), Pubkey::default(), vec![], 0, false, false), // 8 system
-        acct(metas, Pubkey::default(), vec![], 0, true, false),           // 9
-        acct(registry, PERCOLATOR_MAINNET, registry_buf(), 0, false, false), // 10
-        acct(PERCOLATOR_MAINNET, Pubkey::default(), vec![], 0, false, false), // 11
+        nft_pda,                                                           // 1
+        acct(NFT_MINT, Pubkey::default(), vec![], 0, true, true),          // 2 fresh + signer
+        acct(
+            get_associated_token_address(&OWNER, &NFT_MINT),
+            Pubkey::default(),
+            vec![],
+            0,
+            true,
+            false,
+        ), // 3
+        acct(
+            PORTFOLIO,
+            PERCOLATOR_MAINNET,
+            portfolio_buf(OWNER.to_bytes()),
+            0,
+            true,
+            false,
+        ), // 4
+        acct(mint_auth, Pubkey::default(), vec![], 0, false, false),       // 5
+        acct(
+            TOKEN_2022_PROGRAM_ID,
+            Pubkey::default(),
+            vec![],
+            0,
+            false,
+            false,
+        ), // 6
+        acct(ATA_PROGRAM_ID, Pubkey::default(), vec![], 0, false, false),  // 7 ata prog
+        acct(
+            Pubkey::default(),
+            Pubkey::default(),
+            vec![],
+            0,
+            false,
+            false,
+        ), // 8 system
+        acct(metas, Pubkey::default(), vec![], 0, true, false),            // 9
+        acct(
+            registry,
+            PERCOLATOR_MAINNET,
+            registry_buf(),
+            0,
+            false,
+            false,
+        ), // 10
+        acct(
+            PERCOLATOR_MAINNET,
+            Pubkey::default(),
+            vec![],
+            0,
+            false,
+            false,
+        ), // 11
     ];
 
     let mut data = vec![TAG_MINT_POSITION_NFT];
@@ -207,10 +287,7 @@ fn reconcile_hands_the_pda_back_to_the_system_program() {
     // The signer-free precondition is asserted inside run_reconcile().
 
     assert_eq!(**nft_pda.lamports.borrow(), 0, "lamports drained");
-    assert!(
-        nft_pda.data.borrow().iter().all(|b| *b == 0),
-        "data zeroed",
-    );
+    assert!(nft_pda.data.borrow().iter().all(|b| *b == 0), "data zeroed",);
     assert_eq!(
         nft_pda.owner,
         &solana_program::system_program::id(),
@@ -283,7 +360,14 @@ fn guard_a_program_owned_full_length_pda_is_still_rejected() {
 fn guard_a_live_nft_still_blocks_a_second_mint() {
     // The gate's real job, unaffected: a genuine live NFT still blocks re-mint.
     let (nft_pda_key, bump) = position_nft_pda(&PORTFOLIO, MARKET_ID, &PROG);
-    let live = acct(nft_pda_key, PROG, live_nft_pda_buf(bump), PDA_RENT, true, false);
+    let live = acct(
+        nft_pda_key,
+        PROG,
+        live_nft_pda_buf(bump),
+        PDA_RENT,
+        true,
+        false,
+    );
     let r = run_mint(live);
     assert!(matches!(r, Err(ProgramError::Custom(c)) if c == 1));
 }

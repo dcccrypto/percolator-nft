@@ -190,10 +190,10 @@ pub fn initialize_token_metadata(
     Instruction {
         program_id: TOKEN_2022_PROGRAM_ID,
         accounts: vec![
-            AccountMeta::new(*mint, false),                      // metadata account (= mint for embedded)
-            AccountMeta::new_readonly(*update_authority, false),  // update authority
-            AccountMeta::new_readonly(*mint, false),              // mint (same pubkey, read-only)
-            AccountMeta::new_readonly(*mint_authority, true),     // mint authority (signer)
+            AccountMeta::new(*mint, false), // metadata account (= mint for embedded)
+            AccountMeta::new_readonly(*update_authority, false), // update authority
+            AccountMeta::new_readonly(*mint, false), // mint (same pubkey, read-only)
+            AccountMeta::new_readonly(*mint_authority, true), // mint authority (signer)
         ],
         data,
     }
@@ -323,13 +323,10 @@ pub const MINT_CLOSE_AUTHORITY_EXTENSION_SIZE: u64 = 4 + 32; // type(2) + len(2)
 ///
 /// Instruction tag 25 = InitializeMintCloseAuthority.
 /// Data: tag(1) + option(1) + authority(32)
-pub fn initialize_mint_close_authority(
-    mint: &Pubkey,
-    close_authority: &Pubkey,
-) -> Instruction {
+pub fn initialize_mint_close_authority(mint: &Pubkey, close_authority: &Pubkey) -> Instruction {
     let mut data = Vec::with_capacity(34);
     data.push(25); // InitializeMintCloseAuthority instruction tag
-    data.push(1);  // COption::Some
+    data.push(1); // COption::Some
     data.extend_from_slice(close_authority.as_ref());
 
     Instruction {

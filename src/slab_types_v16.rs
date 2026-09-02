@@ -172,7 +172,9 @@ pub struct V16PodU16 {
 }
 impl V16PodU16 {
     pub fn new(value: u16) -> Self {
-        Self { bytes: value.to_le_bytes() }
+        Self {
+            bytes: value.to_le_bytes(),
+        }
     }
     pub fn get(self) -> u16 {
         u16::from_le_bytes(self.bytes)
@@ -186,7 +188,9 @@ pub struct V16PodU32 {
 }
 impl V16PodU32 {
     pub fn new(value: u32) -> Self {
-        Self { bytes: value.to_le_bytes() }
+        Self {
+            bytes: value.to_le_bytes(),
+        }
     }
     pub fn get(self) -> u32 {
         u32::from_le_bytes(self.bytes)
@@ -200,7 +204,9 @@ pub struct V16PodU64 {
 }
 impl V16PodU64 {
     pub fn new(value: u64) -> Self {
-        Self { bytes: value.to_le_bytes() }
+        Self {
+            bytes: value.to_le_bytes(),
+        }
     }
     pub fn get(self) -> u64 {
         u64::from_le_bytes(self.bytes)
@@ -214,7 +220,9 @@ pub struct V16PodU128 {
 }
 impl V16PodU128 {
     pub fn new(value: u128) -> Self {
-        Self { bytes: value.to_le_bytes() }
+        Self {
+            bytes: value.to_le_bytes(),
+        }
     }
     pub fn get(self) -> u128 {
         u128::from_le_bytes(self.bytes)
@@ -228,7 +236,9 @@ pub struct V16PodI128 {
 }
 impl V16PodI128 {
     pub fn new(value: i128) -> Self {
-        Self { bytes: value.to_le_bytes() }
+        Self {
+            bytes: value.to_le_bytes(),
+        }
     }
     pub fn get(self) -> i128 {
         i128::from_le_bytes(self.bytes)
@@ -244,7 +254,9 @@ pub struct V16PodI64 {
 }
 impl V16PodI64 {
     pub fn new(value: i64) -> Self {
-        Self { bytes: value.to_le_bytes() }
+        Self {
+            bytes: value.to_le_bytes(),
+        }
     }
     pub fn get(self) -> i64 {
         i64::from_le_bytes(self.bytes)
@@ -479,7 +491,12 @@ const _: () = assert!(offset_of!(PortfolioAccountV16Account, capital) == 132);
 const _: () = assert!(offset_of!(PortfolioAccountV16Account, pnl) == 148);
 const _: () = assert!(offset_of!(PortfolioAccountV16Account, reserved_pnl) == 164);
 // residual counters start at 180 (after capital/pnl/reserved_pnl)
-const _: () = assert!(offset_of!(PortfolioAccountV16Account, residual_crystallized_loss_atoms_total) == 180);
+const _: () = assert!(
+    offset_of!(
+        PortfolioAccountV16Account,
+        residual_crystallized_loss_atoms_total
+    ) == 180
+);
 const _: () = assert!(offset_of!(PortfolioAccountV16Account, fee_credits) == 228);
 const _: () = assert!(offset_of!(PortfolioAccountV16Account, last_fee_slot) == 260);
 const _: () = assert!(offset_of!(PortfolioAccountV16Account, active_bitmap) == 268);
@@ -689,7 +706,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn v17_layout_revision_is_5() {
         assert_eq!(LAYOUT_REVISION, 5);
@@ -719,7 +735,10 @@ mod tests {
         assert_eq!(decode_portfolio(&buf), Err(PortfolioDecodeError::BadKind));
 
         let short = vec![0u8; HEADER_LEN + 10];
-        assert_eq!(decode_portfolio(&short), Err(PortfolioDecodeError::TooShort));
+        assert_eq!(
+            decode_portfolio(&short),
+            Err(PortfolioDecodeError::TooShort)
+        );
     }
 
     #[test]

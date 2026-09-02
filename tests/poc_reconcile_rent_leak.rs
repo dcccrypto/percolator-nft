@@ -24,8 +24,7 @@ use bytemuck::Zeroable;
 use percolator_nft::{
     cpi_v16::{derive_nft_registry, PERCOLATOR_MAINNET},
     instruction::{TAG_EMERGENCY_BURN, TAG_RECONCILE_BURNED_NFT},
-    processor,
-    slab_types_v16 as sl,
+    processor, slab_types_v16 as sl,
     state_v16::{
         mint_authority_pda, position_nft_pda, PositionNftV16, POSITION_NFT_V16_MAGIC,
         POSITION_NFT_V16_VERSION,
@@ -46,10 +45,10 @@ const MARKET_ID: u64 = 42;
 /// Rent-exempt minimums, `(128 + len) * 3480 * 2`.
 const PDA_RENT: u64 = 2_275_920; // 199 bytes
 const METAS_RENT: u64 = 2_707_440; // 261 bytes
-// The mint is allocated `mint_space + metadata_tlv_size + 128` = 338 + 120 + 128
-// = 586 bytes and funded at minimum_balance(586). Nothing ever reallocs it — the
-// Token-2022 metadata Initialize writes into the existing TLV region — so the
-// trailing 128 bytes of slack are funded and never refunded.
+                                   // The mint is allocated `mint_space + metadata_tlv_size + 128` = 338 + 120 + 128
+                                   // = 586 bytes and funded at minimum_balance(586). Nothing ever reallocs it — the
+                                   // Token-2022 metadata Initialize writes into the existing TLV region — so the
+                                   // trailing 128 bytes of slack are funded and never refunded.
 const MINT_RENT: u64 = 4_969_440; // 586 bytes
 
 fn leak<T>(v: T) -> &'static mut T {
@@ -156,10 +155,24 @@ fn run_reconcile_form(f: &Fixture, extended: bool) -> Result<(), ProgramError> {
     let accounts = vec![
         f.nft_pda.clone(),
         f.nft_mint.clone(),
-        acct(PORTFOLIO, PERCOLATOR_MAINNET, portfolio_buf(), 0, true, false),
+        acct(
+            PORTFOLIO,
+            PERCOLATOR_MAINNET,
+            portfolio_buf(),
+            0,
+            true,
+            false,
+        ),
         acct(mint_auth, Pubkey::default(), vec![], 0, false, false),
         acct(registry, PERCOLATOR_MAINNET, vec![], 0, false, false),
-        acct(PERCOLATOR_MAINNET, Pubkey::default(), vec![], 0, false, false),
+        acct(
+            PERCOLATOR_MAINNET,
+            Pubkey::default(),
+            vec![],
+            0,
+            false,
+            false,
+        ),
         acct(ALICE, Pubkey::default(), vec![], 0, true, false),
     ];
     let mut accounts = accounts;
@@ -194,12 +207,33 @@ fn run_emergency_burn(f: &Fixture) -> Result<(), ProgramError> {
             true,
             false,
         ),
-        acct(PORTFOLIO, PERCOLATOR_MAINNET, portfolio_buf(), 0, true, false),
+        acct(
+            PORTFOLIO,
+            PERCOLATOR_MAINNET,
+            portfolio_buf(),
+            0,
+            true,
+            false,
+        ),
         acct(mint_auth, Pubkey::default(), vec![], 0, false, false),
-        acct(TOKEN_2022_PROGRAM_ID, Pubkey::default(), vec![], 0, false, false),
+        acct(
+            TOKEN_2022_PROGRAM_ID,
+            Pubkey::default(),
+            vec![],
+            0,
+            false,
+            false,
+        ),
         f.extra_metas.clone(),
         acct(registry, PERCOLATOR_MAINNET, vec![], 0, false, false),
-        acct(PERCOLATOR_MAINNET, Pubkey::default(), vec![], 0, false, false),
+        acct(
+            PERCOLATOR_MAINNET,
+            Pubkey::default(),
+            vec![],
+            0,
+            false,
+            false,
+        ),
     ];
     processor::process(&PROG, &accounts, &[TAG_EMERGENCY_BURN])
 }
@@ -216,13 +250,34 @@ fn reconcile_reclaims_the_metas_rent_and_issues_the_mint_close() {
     let accounts = vec![
         f.nft_pda.clone(),
         f.nft_mint.clone(),
-        acct(PORTFOLIO, PERCOLATOR_MAINNET, portfolio_buf(), 0, true, false),
+        acct(
+            PORTFOLIO,
+            PERCOLATOR_MAINNET,
+            portfolio_buf(),
+            0,
+            true,
+            false,
+        ),
         acct(mint_auth, Pubkey::default(), vec![], 0, false, false),
         acct(registry, PERCOLATOR_MAINNET, vec![], 0, false, false),
-        acct(PERCOLATOR_MAINNET, Pubkey::default(), vec![], 0, false, false),
+        acct(
+            PERCOLATOR_MAINNET,
+            Pubkey::default(),
+            vec![],
+            0,
+            false,
+            false,
+        ),
         last_holder.clone(),
         f.extra_metas.clone(),
-        acct(TOKEN_2022_PROGRAM_ID, Pubkey::default(), vec![], 0, false, false),
+        acct(
+            TOKEN_2022_PROGRAM_ID,
+            Pubkey::default(),
+            vec![],
+            0,
+            false,
+            false,
+        ),
     ];
     let r = processor::process(&PROG, &accounts, &[TAG_RECONCILE_BURNED_NFT]);
     assert!(r.is_ok(), "reconcile must succeed: {r:?}");
@@ -275,13 +330,34 @@ fn a_substituted_token_program_is_rejected() {
     let accounts = vec![
         f.nft_pda.clone(),
         f.nft_mint.clone(),
-        acct(PORTFOLIO, PERCOLATOR_MAINNET, portfolio_buf(), 0, true, false),
+        acct(
+            PORTFOLIO,
+            PERCOLATOR_MAINNET,
+            portfolio_buf(),
+            0,
+            true,
+            false,
+        ),
         acct(mint_auth, Pubkey::default(), vec![], 0, false, false),
         acct(registry, PERCOLATOR_MAINNET, vec![], 0, false, false),
-        acct(PERCOLATOR_MAINNET, Pubkey::default(), vec![], 0, false, false),
+        acct(
+            PERCOLATOR_MAINNET,
+            Pubkey::default(),
+            vec![],
+            0,
+            false,
+            false,
+        ),
         acct(ALICE, Pubkey::default(), vec![], 0, true, false),
         f.extra_metas.clone(),
-        acct(Pubkey::new_from_array([0xCC; 32]), Pubkey::default(), vec![], 0, false, false),
+        acct(
+            Pubkey::new_from_array([0xCC; 32]),
+            Pubkey::default(),
+            vec![],
+            0,
+            false,
+            false,
+        ),
     ];
     let r = processor::process(&PROG, &accounts, &[TAG_RECONCILE_BURNED_NFT]);
     assert!(

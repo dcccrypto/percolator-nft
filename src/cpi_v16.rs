@@ -75,9 +75,7 @@ pub fn derive_nft_registry(wrapper_program_id: &Pubkey, market_group: &Pubkey) -
 }
 
 use crate::error::NftError;
-use crate::slab_types_v16::{
-    LegTransferGate, PortfolioAccountV16Account, PortfolioDecodeError,
-};
+use crate::slab_types_v16::{LegTransferGate, PortfolioAccountV16Account, PortfolioDecodeError};
 use crate::state_v16::PositionNftV16;
 
 // ═══════════════════════════════════════════════════════════════
@@ -122,7 +120,6 @@ pub fn map_decode_err(e: PortfolioDecodeError) -> ProgramError {
     NftError::PortfolioDecodeFailed.into()
 }
 
-
 /// Verify that the decoded portfolio provenance binds to the actual portfolio
 /// account passed to the handler.
 ///
@@ -136,7 +133,10 @@ pub fn verify_portfolio_account_id(
     context: &str,
 ) -> Result<(), ProgramError> {
     if portfolio.provenance_header.portfolio_account_id != portfolio_key.to_bytes() {
-        msg!("{}: portfolio_account_id does not match passed portfolio account", context);
+        msg!(
+            "{}: portfolio_account_id does not match passed portfolio account",
+            context
+        );
         return Err(NftError::InvalidNftPda.into());
     }
 
@@ -227,9 +227,7 @@ pub fn emergency_burn_ok(
             let leg = &portfolio.legs[slot];
             // Eligible if the bound position is gone (slot reused with a newer
             // market_id) OR the bound leg is flat (liquidated / fully reduced).
-            if leg.market_id.get() != nft.market_id_at_mint.get()
-                || leg.basis_pos_q.get() == 0
-            {
+            if leg.market_id.get() != nft.market_id_at_mint.get() || leg.basis_pos_q.get() == 0 {
                 Ok(())
             } else {
                 Err(NftError::PositionNotClosed) // bound position still open → use normal Burn
@@ -270,7 +268,10 @@ mod tests {
         let (pda_b, _) = derive_nft_registry(&wrapper, &group_b);
         // Two different market groups under the same wrapper yield different PDAs
         // (per-market correctness — each market group has its own registry).
-        assert_ne!(pda_a, pda_b, "distinct market_groups must produce distinct registry PDAs");
+        assert_ne!(
+            pda_a, pda_b,
+            "distinct market_groups must produce distinct registry PDAs"
+        );
     }
 
     #[test]
@@ -283,9 +284,12 @@ mod tests {
         assert_eq!(bump1, bump2, "same inputs must yield the same bump");
     }
 
-    fn portfolio_with_leg(owner: [u8; 32], asset_index: u32, market_id: u64, basis: i128)
-        -> PortfolioAccountV16Account
-    {
+    fn portfolio_with_leg(
+        owner: [u8; 32],
+        asset_index: u32,
+        market_id: u64,
+        basis: i128,
+    ) -> PortfolioAccountV16Account {
         let mut acct: PortfolioAccountV16Account = Zeroable::zeroed();
         acct.owner = owner;
         acct.provenance_header.owner = owner;
@@ -353,7 +357,10 @@ mod tests {
         // happy
         assert_eq!(mint_leg_slot(&p, &owner, 9), Ok(4));
         // wrong owner
-        assert_eq!(mint_leg_slot(&p, &[2u8; 32], 9), Err(NftError::NotNftHolder));
+        assert_eq!(
+            mint_leg_slot(&p, &[2u8; 32], 9),
+            Err(NftError::NotNftHolder)
+        );
         // no active leg for that asset
         assert_eq!(mint_leg_slot(&p, &owner, 10), Err(NftError::LegNotActive));
     }
@@ -420,7 +427,10 @@ mod tests {
 
         // position closed (no active leg) -> LegNotActive (holder uses EmergencyBurn).
         let p_closed: PortfolioAccountV16Account = Zeroable::zeroed();
-        assert_eq!(verify_bound_leg(&p_closed, &nft), Err(NftError::LegNotActive));
+        assert_eq!(
+            verify_bound_leg(&p_closed, &nft),
+            Err(NftError::LegNotActive)
+        );
     }
 
     #[test]
@@ -473,13 +483,22 @@ mod tests {
         // Burn / Settle: position intact -> bound leg verified on the same slot.
         assert_eq!(verify_bound_leg(&p_open, &nft), Ok(slot));
         // EmergencyBurn while open -> rejected (use normal Burn).
-        assert_eq!(emergency_burn_ok(&p_open, &nft), Err(NftError::PositionNotClosed));
+        assert_eq!(
+            emergency_burn_ok(&p_open, &nft),
+            Err(NftError::PositionNotClosed)
+        );
 
         // Position closed (leg gone): Burn/Settle -> LegNotActive; transfer
         // gate -> LegNotActive; EmergencyBurn -> allowed (recover rent).
         let p_closed: PortfolioAccountV16Account = Zeroable::zeroed();
-        assert_eq!(verify_bound_leg(&p_closed, &nft), Err(NftError::LegNotActive));
-        assert_eq!(transfer_gate_check(&p_closed, 9), Err(NftError::LegNotActive));
+        assert_eq!(
+            verify_bound_leg(&p_closed, &nft),
+            Err(NftError::LegNotActive)
+        );
+        assert_eq!(
+            transfer_gate_check(&p_closed, 9),
+            Err(NftError::LegNotActive)
+        );
         assert_eq!(emergency_burn_ok(&p_closed, &nft), Ok(()));
     }
 
@@ -494,34 +513,55 @@ mod tests {
         // blocked by lock
         let mut p_locked = portfolio_with_leg(owner, 9, 100, 500);
         p_locked.liquidation_lock = 1;
-        assert_eq!(transfer_gate_check(&p_locked, 9), Err(NftError::TransferBlocked));
+        assert_eq!(
+            transfer_gate_check(&p_locked, 9),
+            Err(NftError::TransferBlocked)
+        );
         // blocked by close-in-progress
         let mut p_closing = portfolio_with_leg(owner, 9, 100, 500);
         p_closing.close_progress.active = 1;
         p_closing.close_progress.asset_index = V16PodU32::new(9);
-        assert_eq!(transfer_gate_check(&p_closing, 9), Err(NftError::TransferBlocked));
+        assert_eq!(
+            transfer_gate_check(&p_closing, 9),
+            Err(NftError::TransferBlocked)
+        );
 
         // blocked by terminal resolved payout receipt
         let mut p_resolved = portfolio_with_leg(owner, 9, 100, 500);
         p_resolved.resolved_payout_receipt.present = 1;
-        assert_eq!(transfer_gate_check(&p_resolved, 9), Err(NftError::TransferBlocked));
+        assert_eq!(
+            transfer_gate_check(&p_resolved, 9),
+            Err(NftError::TransferBlocked)
+        );
 
         // blocked by portfolio-level stale flags
         let mut p_stale = portfolio_with_leg(owner, 9, 100, 500);
         p_stale.stale_state = 1;
-        assert_eq!(transfer_gate_check(&p_stale, 9), Err(NftError::TransferBlocked));
+        assert_eq!(
+            transfer_gate_check(&p_stale, 9),
+            Err(NftError::TransferBlocked)
+        );
 
         let mut p_b_stale = portfolio_with_leg(owner, 9, 100, 500);
         p_b_stale.b_stale_state = 1;
-        assert_eq!(transfer_gate_check(&p_b_stale, 9), Err(NftError::TransferBlocked));
+        assert_eq!(
+            transfer_gate_check(&p_b_stale, 9),
+            Err(NftError::TransferBlocked)
+        );
 
         // blocked by leg-level stale flags
         let mut p_leg_stale = portfolio_with_leg(owner, 9, 100, 500);
         p_leg_stale.legs[4].stale = 1;
-        assert_eq!(transfer_gate_check(&p_leg_stale, 9), Err(NftError::TransferBlocked));
+        assert_eq!(
+            transfer_gate_check(&p_leg_stale, 9),
+            Err(NftError::TransferBlocked)
+        );
 
         let mut p_leg_b_stale = portfolio_with_leg(owner, 9, 100, 500);
         p_leg_b_stale.legs[4].b_stale = 1;
-        assert_eq!(transfer_gate_check(&p_leg_b_stale, 9), Err(NftError::TransferBlocked));
+        assert_eq!(
+            transfer_gate_check(&p_leg_b_stale, 9),
+            Err(NftError::TransferBlocked)
+        );
     }
 }
