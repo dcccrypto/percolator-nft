@@ -127,7 +127,16 @@ Notes for integrators:
 The NFT program mirrors the converged v17 portfolio layout (`PortfolioAccountV16Account`,
 9227 bytes) to read position state directly without CPI. Struct field offsets are verified
 for internal consistency via compile-time `const_assert!` macros; alignment with the live
-engine layout requires runtime validation against real on-chain data (deferred, see #110H).
+engine layout requires runtime validation against real on-chain data — **still deferred, and
+tracked in #160**. (This previously pointed at "#110H"; #110 is closed, so the deferral was
+documented as tracked somewhere that no longer tracked it.)
+
+What that means concretely: the `const_assert!`s cannot detect the one failure that matters
+here — the mirror drifting from the engine. Under the exact change they exist to guard against,
+raising the asset count, whoever made it would update `EXPECTED_PORTFOLIO_ACCOUNT_SIZE` to
+whatever the (wrong) struct computed and the assertion would pass. #185 removed one concrete
+instance of that vector by deriving `V16_ACTIVE_BITMAP_WORDS` from the asset count instead of
+hardcoding it; the general case still needs a real portfolio account decoded at runtime.
 
 ## Transfer Hook
 
