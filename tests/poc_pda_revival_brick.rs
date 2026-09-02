@@ -138,17 +138,26 @@ fn run_reconcile() -> (Result<(), ProgramError>, AccountInfo<'static>) {
     let (mint_auth, _) = mint_authority_pda(&PROG);
     let (nft_pda_key, bump) = position_nft_pda(&PORTFOLIO, MARKET_ID, &PROG);
     let (registry, _) = derive_nft_registry(&PERCOLATOR_MAINNET, &MARKET_GROUP);
+    let (extra_metas, _) = extra_account_metas_pda(&NFT_MINT, &PROG);
 
     let nft_pda = acct(nft_pda_key, PROG, live_nft_pda_buf(bump), PDA_RENT, true, false);
 
     let accounts = vec![
         nft_pda.clone(),
-        acct(NFT_MINT, TOKEN_2022_PROGRAM_ID, mint_account(0), 0, false, false),
+        // #182: the mint must be WRITABLE now — reconcile closes it to reclaim
+        // its rent, and refuses a read-only one.
+        acct(NFT_MINT, TOKEN_2022_PROGRAM_ID, mint_account(0), 0, true, false),
         acct(PORTFOLIO, PERCOLATOR_MAINNET, portfolio_buf(mint_auth.to_bytes()), 0, true, false),
         acct(mint_auth, Pubkey::default(), vec![], 0, false, false),
         acct(registry, PERCOLATOR_MAINNET, registry_buf(), 0, false, false),
         acct(PERCOLATOR_MAINNET, Pubkey::default(), vec![], 0, false, false),
-        acct(OWNER, Pubkey::default(), vec![], 0, true, false), // last_holder
+        acct(OWNER, Pubkey::default(), vec![], 0, true, false), // 6 last_holder
+        // #182 made these two REQUIRED rather than optional, so that the mint
+        // and ExtraAccountMetaList rent can be reclaimed while nft_pda is still
+        // alive. This fixture predates that change (#179) and was not updated
+        // when it landed, which is what turned main's CI red.
+        acct(extra_metas, PROG, vec![0u8; 8], PDA_RENT, true, false), // 7 (writable, closed)
+        acct(TOKEN_2022_PROGRAM_ID, Pubkey::default(), vec![], 0, false, false), // 8
     ];
 
     // Permissionless: assert it, do not merely assume it.

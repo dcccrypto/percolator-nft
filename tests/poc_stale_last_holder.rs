@@ -278,6 +278,14 @@ fn run_hook_inner(
 
 /// Drive `ReconcileBurnedNft` (tag 7) with `recipient` supplied as account 6.
 /// Returns the result plus the recipient's lamports afterwards.
+/// What a successful reconcile now pays the recorded holder.
+///
+/// #182 made reconcile reclaim the ExtraAccountMetaList rent as well as the
+/// nft_pda rent, both to `last_holder`. The fixture funds each PDA with
+/// PDA_RENT, so the payout is two of them. (The mint in this fixture holds 0
+/// lamports, so closing it contributes nothing here.)
+const RECONCILE_PAYOUT: u64 = PDA_RENT + PDA_RENT;
+
 fn run_reconcile(
     last_holder_in_state: [u8; 32],
     recipient: Pubkey,
@@ -285,18 +293,25 @@ fn run_reconcile(
     let (mint_auth, _) = mint_authority_pda(&PROG);
     let (nft_pda_key, bump) = position_nft_pda(&PORTFOLIO, MARKET_ID, &PROG);
     let (registry, _) = derive_nft_registry(&PERCOLATOR_MAINNET, &MARKET_GROUP);
+    let (extra_metas, _) = extra_account_metas_pda(&NFT_MINT, &PROG);
 
     let recipient_ai = acct(recipient, Pubkey::default(), vec![], 0, true);
 
     let accounts = vec![
         acct(nft_pda_key, PROG, nft_pda_buf(bump, last_holder_in_state), PDA_RENT, true),
-        // supply == 0: the NFT really was burned out of band
-        acct(NFT_MINT, TOKEN_2022_PROGRAM_ID, mint_account(0), 0, false),
+        // supply == 0: the NFT really was burned out of band.
+        // #182: writable, because reconcile now closes the mint to reclaim rent.
+        acct(NFT_MINT, TOKEN_2022_PROGRAM_ID, mint_account(0), 0, true),
         acct(PORTFOLIO, PERCOLATOR_MAINNET, portfolio_buf(mint_auth.to_bytes()), 0, true),
         acct(mint_auth, Pubkey::default(), vec![], 0, false),
         acct(registry, PERCOLATOR_MAINNET, vec![], 0, false),
         acct(PERCOLATOR_MAINNET, Pubkey::default(), vec![], 0, false),
-        recipient_ai.clone(),
+        recipient_ai.clone(), // 6 last_holder
+        // #182 made these REQUIRED: the mint and ExtraAccountMetaList rent can
+        // only be reclaimed while nft_pda is still alive, so reconcile is the
+        // one place it can happen. This fixture predates that change.
+        acct(extra_metas, PROG, vec![0u8; 8], PDA_RENT, true), // 7 (writable, closed)
+        acct(TOKEN_2022_PROGRAM_ID, Pubkey::default(), vec![], 0, false), // 8
     ];
 
     let r = processor::process(&PROG, &accounts, &[TAG_RECONCILE_BURNED_NFT]);
@@ -362,7 +377,7 @@ fn seller_is_paid_the_escrowed_portfolio_and_the_rent() {
     let (r, alice_lamports) = run_reconcile(ALICE.to_bytes(), ALICE);
     assert!(r.is_ok(), "reconcile to the stale seller succeeds: {r:?}");
     assert_eq!(
-        alice_lamports, PDA_RENT,
+        alice_lamports, RECONCILE_PAYOUT,
         "PDA rent swept to the seller (the unwrap CPI likewise names her as new owner)",
     );
 }
@@ -374,7 +389,7 @@ fn control_a_correctly_recorded_buyer_can_reconcile() {
     // processor.rs:1275 as the sole reason Bob was refused above.
     let (r, bob_lamports) = run_reconcile(BOB.to_bytes(), BOB);
     assert!(r.is_ok(), "with the buyer correctly recorded, he recovers: {r:?}");
-    assert_eq!(bob_lamports, PDA_RENT);
+    assert_eq!(bob_lamports, RECONCILE_PAYOUT);
 }
 
 // -- 5. the fix ---------------------------------------------------------------
@@ -403,7 +418,7 @@ fn buyer_recorded_by_the_fix_can_reconcile_and_seller_cannot() {
 
     let (bob_r, bob_lamports) = run_reconcile(recorded, BOB);
     assert!(bob_r.is_ok(), "the real owner recovers his own position: {bob_r:?}");
-    assert_eq!(bob_lamports, PDA_RENT);
+    assert_eq!(bob_lamports, RECONCILE_PAYOUT);
 
     let (alice_r, _) = run_reconcile(recorded, ALICE);
     assert!(
