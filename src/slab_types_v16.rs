@@ -97,7 +97,25 @@ pub const V16_ACCOUNT_VERSION: u16 = 1;
 /// Number of leg slots in a portfolio's `legs` array (V16_MAX_PORTFOLIO_ASSETS_N).
 pub const V16_MAX_PORTFOLIO_ASSETS_N: usize = 16;
 /// `ceil(V16_MAX_PORTFOLIO_ASSETS_N / 64)` = 1.
-pub const V16_ACTIVE_BITMAP_WORDS: usize = 1;
+///
+/// M-1 (#160): DERIVED from the asset count, not hardcoded. The engine writes
+/// the same quantity as `(V16_MAX_PORTFOLIO_ASSETS_N + 63) / 64` (`v16.rs`);
+/// `div_ceil` is that value expressed the way clippy requires here. Both
+/// evaluate to 1 today.
+///
+/// The value was previously written as a literal `1` with the formula only in
+/// this comment. That is precisely the drift this module's `const_assert!`s
+/// cannot catch: they compare the mirror against itself, so raising the asset
+/// count past 64 would grow the engine's bitmap to two words while a literal
+/// `1` stayed put — silently shifting `legs` and every field after it,
+/// including the `stale_state` / `b_stale_state` / `liquidation_lock` flags the
+/// transfer gate reads. The size assertion would not save us either: whoever
+/// bumped the count would update `EXPECTED_PORTFOLIO_ACCOUNT_SIZE` to whatever
+/// the (wrong) struct computed, and the assertion would pass.
+///
+/// `PORTFOLIO_SOURCE_DOMAIN_CAP` below was already derived; this closes the
+/// asymmetry.
+pub const V16_ACTIVE_BITMAP_WORDS: usize = V16_MAX_PORTFOLIO_ASSETS_N.div_ceil(64);
 /// Largest active-leg *count* the wrapper permits per portfolio (CU envelope).
 /// This is NOT a bound on the asset *identifier* (`legs[].asset_index`): an
 /// NFT's `asset_index` is matched against the engine's market-group asset
@@ -112,6 +130,24 @@ pub const WRAPPER_MAX_PORTFOLIO_ASSETS: u16 = 14;
 /// Production: 2 * V16_MAX_PORTFOLIO_ASSETS_N = 32.
 /// (kani uses 4 for tractability; the NFT program never runs kani.)
 pub const PORTFOLIO_SOURCE_DOMAIN_CAP: usize = 2 * V16_MAX_PORTFOLIO_ASSETS_N; // = 32
+
+// M-1 (#160): the array-length constants must stay DERIVED from
+// V16_MAX_PORTFOLIO_ASSETS_N, matching the engine's own expressions. These are
+// const assertions rather than #[test]s so every build checks them — including
+// `cargo build-sbf`, and any environment where the dev-dependency graph cannot
+// be built.
+//
+// This is the one drift vector the size assertions below cannot catch. They
+// compare the mirror against itself, so a literal that stops tracking the
+// engine's formula still yields a self-consistent struct: whoever raised the
+// asset count would update EXPECTED_PORTFOLIO_ACCOUNT_SIZE to whatever the
+// wrong layout computed, and every assertion would pass while `legs` and the
+// gate flags after it read from shifted bytes.
+const _: () = assert!(V16_ACTIVE_BITMAP_WORDS == V16_MAX_PORTFOLIO_ASSETS_N.div_ceil(64));
+const _: () = assert!(PORTFOLIO_SOURCE_DOMAIN_CAP == 2 * V16_MAX_PORTFOLIO_ASSETS_N);
+// The property the formula exists to guarantee, asserted independently of it:
+// the bitmap must be able to address every leg slot.
+const _: () = assert!(V16_ACTIVE_BITMAP_WORDS * 64 >= V16_MAX_PORTFOLIO_ASSETS_N);
 
 // ════════════════════════════════════════════════════════════════════════════
 // EXPECTED SIZES — empirically verified against the v17 engine crate
@@ -652,6 +688,7 @@ mod tests {
             32 * 196,
         );
     }
+
 
     #[test]
     fn v17_layout_revision_is_5() {
