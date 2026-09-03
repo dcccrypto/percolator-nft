@@ -219,7 +219,28 @@ fn verify_cpi_caller_is_token2022(
         TOKEN_IX_TRANSFER_CHECKED_WITH_FEE => {
             // TransferCheckedWithFee — same account layout as TransferChecked.
             // Accounts: [source, mint, dest, authority]
-            // Verify the mint matches to prevent cross-mint hook invocation.
+            //
+            // #184 (1.2): tag 26 is Token-2022's TransferFee extension FAMILY tag,
+            // not an instruction. `TransferCheckedWithFee` is 26/1; 26/0 and 26/2..5
+            // are InitializeTransferFeeConfig, WithdrawWithheldTokensFromMint /
+            // FromAccounts, HarvestWithheldTokensToMint and SetTransferFee. This arm
+            // matched on `data[0] == 26` alone and never read the sub-tag, so it
+            // admitted the whole family.
+            //
+            // Dead width rather than a hole: reaching here requires the current
+            // instruction's program to BE Token-2022, and Token-2022's only CPI out
+            // of a transfer path is the mint's registered hook — so Ok(true) still
+            // implied a real transfer. It also describes a state that cannot exist,
+            // since this program never creates a fee-enabled mint (`mint_space`
+            // allocates MetadataPointer + TransferHook + MintCloseAuthority only, and
+            // InitializeTransferFeeConfig is never issued).
+            //
+            // Narrowed anyway: an arm justified by a mint shape we do not create
+            // should at least match the instruction it names.
+            if current_ix.data.get(1) != Some(&1) {
+                msg!("Transfer rejected: tag 26 sub-instruction is not TransferCheckedWithFee");
+                return Err(NftError::UnauthorizedDirectInvocation.into());
+            }
             if current_ix.accounts.len() < 2 {
                 msg!("Transfer rejected: TransferCheckedWithFee has insufficient accounts");
                 return Err(NftError::UnauthorizedDirectInvocation.into());
@@ -453,6 +474,23 @@ pub fn process_execute(
         // Extract the wallet from the ATA's owner field (bytes 32..64).
         // This is the real new owner of the portfolio position.
         new_owner = Pubkey::new_from_array(dst_data[32..64].try_into().unwrap());
+
+        // #184 (2.3): refuse the zero pubkey as a holder.
+        //
+        // This value is written to `last_holder`, and `ReconcileBurnedNft` hands it
+        // to `UnwrapEscrowedPortfolio` as the owner to release the stranded
+        // position to. Recording `Pubkey::default()` there means the escrow is
+        // released to an address nobody can act as — permanently.
+        //
+        // Self-inflicted (the holder authorises the transfer), and the guard is
+        // free, which is the whole argument for having it. Only the zero pubkey is
+        // rejected: a PDA or another token account's address is indistinguishable
+        // from a wallet here, so a shape check that tried to catch those would be
+        // guessing.
+        if new_owner == Pubkey::default() {
+            msg!("Transfer rejected: destination ATA owner is the zero pubkey");
+            return Err(NftError::UnauthorizedDirectInvocation.into());
+        }
     }
 
     // ────────────────────────────────────────────────────────────────────

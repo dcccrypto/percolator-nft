@@ -519,6 +519,25 @@ fn process_mint_position_nft(
         let uri_len = 4 + nft_uri.len();
         4 + 32 + 32 + name_len + symbol_len + uri_len + 4
     };
+    // #184 (3.2) NOT TAKEN — and the reason matters more than the 128 bytes.
+    //
+    // The report proposes dropping this slack, on the grounds that "both size
+    // terms are exact against `try_calculate_account_len` and `get_packed_len`".
+    // `metadata_tlv_size` is NOT computed that way: it is hand-rolled directly
+    // above as `4 + 32 + 32 + name_len + symbol_len + uri_len + 4`. If that
+    // arithmetic is off by a single byte, removing the slack turns every mint
+    // into AccountDataTooSmall — and #115 records that this already happened once,
+    // when only `mint_space` was allocated.
+    //
+    // There is no LiteSVM mint test to catch it either, so the change would ship
+    // unverified. The cost of keeping it is 890,880 lamports per NFT, RECOVERED at
+    // burn (the close sweeps the whole balance to the holder) — lockup, not loss.
+    // Trading a recoverable lockup for a chance of bricking minting is the wrong
+    // way round.
+    //
+    // To take it properly: replace the hand-rolled arithmetic with the real
+    // `get_packed_len`, and add a mint test. Then the slack is provably redundant
+    // rather than assumed to be.
     let final_size = mint_space as usize + metadata_tlv_size + 128;
     let mint_rent = rent.minimum_balance(final_size);
     // #115: allocate `final_size` bytes (not just `mint_space`), because
