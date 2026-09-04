@@ -39,3 +39,23 @@ crate-type = ["cdylib", "lib"]
 [dev-dependencies]
 solana-sdk = "=2.2.1"
 proptest = "1.4"
+
+# GH#160 — the REAL engine, pinned, so the vendored mirror in slab_types_v16.rs can
+# be checked against the layout it claims to mirror.
+#
+# The `const_assert!`s in that module measure the mirror against ITSELF. They prove
+# internal consistency and nothing about correspondence to the engine, which is the
+# failure SCHEMA_DRIFT_v12.19.md names: "mirror schema drift can mask itself as
+# compile-pass". Every security decision the NFT program makes — owner, market_id
+# slot-reuse anchor, lock/stale gate flags — is read through that mirror at a byte
+# offset, so a silent reorder upstream reads garbage while every check still passes.
+#
+# A git dependency rather than a path: it needs no sibling checkout, so it works
+# identically on a laptop and in CI, and the `rev` makes drift a DELIBERATE bump
+# with a diff to read rather than something that follows main silently.
+#
+# dev-dependency only — the deployed program keeps its zero-dependency mirror and
+# does not link the engine.
+[dev-dependencies.percolator]
+git = "https://github.com/dcccrypto/percolator"
+rev = "99bc9c8d19c2f130b32bf0d5e867d1ad586f9517"
