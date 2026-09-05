@@ -126,17 +126,36 @@ Notes for integrators:
 
 The NFT program mirrors the converged v17 portfolio layout (`PortfolioAccountV16Account`,
 9227 bytes) to read position state directly without CPI. Struct field offsets are verified
-for internal consistency via compile-time `const_assert!` macros; alignment with the live
-engine layout requires runtime validation against real on-chain data — **still deferred, and
-tracked in #160**. (This previously pointed at "#110H"; #110 is closed, so the deferral was
-documented as tracked somewhere that no longer tracked it.)
+for internal consistency via compile-time `const_assert!` macros — and, since #160,
+alignment with the live engine layout is verified too: `tests/layout_parity_160.rs` asserts
+total size, alignment, every field the NFT program reads, and every provenance-header field
+against the **real `percolator` crate**, pinned by git rev as a dev-dependency.
 
-What that means concretely: the `const_assert!`s cannot detect the one failure that matters
-here — the mirror drifting from the engine. Under the exact change they exist to guard against,
-raising the asset count, whoever made it would update `EXPECTED_PORTFOLIO_ACCOUNT_SIZE` to
-whatever the (wrong) struct computed and the assertion would pass. #185 removed one concrete
-instance of that vector by deriving `V16_ACTIVE_BITMAP_WORDS` from the asset count instead of
-hardcoding it; the general case still needs a real portfolio account decoded at runtime.
+That closes the gap the `const_assert!`s structurally cannot see: they measure the mirror
+against itself, so a size-preserving field REORDER upstream passes every one of them while
+`decode_portfolio` silently reads `owner` and the transfer-gate flags from the wrong bytes.
+The parity test is what fails in that case.
+
+The pin is deliberate — bumping it is a decision with a diff to read, not something that
+follows engine `main` on its own. It is a dev-dependency only: the deployed program keeps
+its zero-dependency mirror and does not link the engine.
+
+What that means concretely: the `const_assert!`s alone cannot detect the one failure that
+matters here — the mirror drifting from the engine. Under the exact change they exist to
+guard against, raising the asset count, whoever made it would update
+`EXPECTED_PORTFOLIO_ACCOUNT_SIZE` to whatever the (wrong) struct computed and the assertion
+would pass. #185 removed one concrete instance of that vector by deriving
+`V16_ACTIVE_BITMAP_WORDS` from the asset count instead of hardcoding it, and the #160 parity
+test now catches the general case, because it compares against the engine rather than
+against the mirror's own expectations.
+
+**What the parity test still does NOT do**, stated plainly so nobody reads more into it than
+is there: it compares Rust TYPES — sizes, alignment and `offset_of!` — between the two
+crates. It does not decode a real portfolio account fetched from chain. That would be a
+strictly stronger check, since it would also exercise the deployed program's actual
+serialization rather than the layout the compiler computes for both sides. A LiteSVM or
+devnet-fetch test remains worth having; the parity test is not a substitute for it, only a
+guard that fails on the drift that has no other detector today.
 
 ## Transfer Hook
 
