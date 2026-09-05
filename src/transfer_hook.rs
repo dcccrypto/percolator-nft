@@ -520,6 +520,29 @@ pub fn process_execute(
         return Err(NftError::InvalidPercolatorProgram.into());
     }
 
+    // #184 (2.1): also require it to be the wrapper that actually OWNS this
+    // portfolio, which is what `verify_percolator_prog_account` enforces at every
+    // other call site (processor.rs).
+    //
+    // The allowlist above and `verify_portfolio_program` accept the same SET
+    // independently, so before this a DEVNET program id alongside a MAINNET-owned
+    // portfolio satisfied both — strictly weaker than the check used everywhere else,
+    // for no reason. Harmless today (the hook performs no CPI post-#105 and the
+    // account is pinned by the ExtraAccountMetaList), but an asymmetry like this is
+    // the kind that stops being harmless when someone reintroduces a CPI here.
+    //
+    // Note this mostly dissolves once #176 feature-gates the devnet id — a default
+    // build then has one allowlist entry. Landing it anyway: the guarantee should not
+    // depend on which features happen to be off.
+    if percolator_prog.key != portfolio.owner {
+        msg!(
+            "Transfer rejected: percolator_prog {} is not the wrapper that owns the portfolio ({})",
+            percolator_prog.key,
+            portfolio.owner
+        );
+        return Err(NftError::InvalidPortfolioOwner.into());
+    }
+
     // ── Validate mint authority PDA ───────────────────────────────────
     // mint_auth is used as the CPI signer for B-3. Without verification an
     // attacker could pass a different PDA, causing the CPI to fail or —
@@ -538,7 +561,7 @@ pub fn process_execute(
 
     // ── Read PositionNftV16 state (scoped borrow; must drop before CPI) ──
     // Copy out all needed fields so no borrow is live at invoke_signed.
-    let (asset_index_u16, market_id_at_mint, nft_state_copy);
+    let (asset_index, market_id_at_mint, nft_state_copy);
     {
         let pda_data = nft_pda.try_borrow_data()?;
         if pda_data.len() < POSITION_NFT_V16_LEN {
@@ -559,7 +582,19 @@ pub fn process_execute(
             return Err(NftError::InvalidNftPda.into());
         }
 
-        asset_index_u16 = nft_state.asset_index.get() as u16;
+        // #184 (1.1): carry the FULL u32. This used to narrow to u16 here and widen
+        // back at the transfer gate, so for any stored `asset_index > 0xFFFF` the
+        // slot-reuse anchor (`verify_bound_leg`, which reads the full u32) and the
+        // safety gate (`transfer_gate_check`, which got the truncated value)
+        // evaluated DIFFERENT legs.
+        //
+        // Unreachable today only because `MintPositionNft` decodes `asset_index` as a
+        // u16. But the stored field is `V16PodU32`, `cpi_v16.rs` documents the valid
+        // domain as `config.max_market_slots` (a u32), and #94 was specifically about
+        // REMOVING a too-narrow bound — so widening the instruction is a plausible
+        // change that would silently turn this into a gate bypass. The truncation
+        // bought nothing, so it is gone rather than guarded.
+        asset_index = nft_state.asset_index.get();
         market_id_at_mint = nft_state.market_id_at_mint.get();
         nft_state_copy = *nft_state;
 
@@ -591,7 +626,7 @@ pub fn process_execute(
         let _slot = verify_bound_leg(p, &nft_state_copy).map_err(ProgramError::from)?;
 
         // Transfer-gate check (flags: active leg + no lock/stale/resolved/mid-close).
-        transfer_gate_check(p, asset_index_u16 as u32).map_err(ProgramError::from)?;
+        transfer_gate_check(p, asset_index).map_err(ProgramError::from)?;
         // portfolio_data (Ref) is dropped here.
     }
 
@@ -667,7 +702,7 @@ pub fn process_execute(
     msg!(
         "Position NFT transferred (position remains escrowed): portfolio={}, asset_index={}, new_holder_recorded={}",
         portfolio.key,
-        asset_index_u16,
+        asset_index,
         holder_recorded
     );
 
@@ -703,7 +738,10 @@ pub fn process_execute(
 
 #[cfg(test)]
 mod last_holder_antispoof_152_153 {
-    use super::{verify_cpi_caller_is_token2022, TOKEN_IX_TRANSFER, TOKEN_IX_TRANSFER_CHECKED};
+    use super::{
+        verify_cpi_caller_is_token2022, TOKEN_IX_TRANSFER, TOKEN_IX_TRANSFER_CHECKED,
+        TOKEN_IX_TRANSFER_CHECKED_WITH_FEE,
+    };
     use crate::{error::NftError, token2022::TOKEN_2022_PROGRAM_ID};
     use solana_program::{
         account_info::AccountInfo, pubkey::Pubkey, sysvar::instructions as sysvar_instructions,
@@ -820,6 +858,86 @@ mod last_holder_antispoof_152_153 {
             result,
             Ok(true),
             "direct wallet TransferChecked must return Ok(true) — last_holder write authorised"
+        );
+    }
+
+    // ── #184 (1.2) tag 26 is a FAMILY tag; only sub-tag 1 is a transfer ─────
+    //
+    // The arm used to match `data[0] == 26` alone, admitting every
+    // TransferFeeExtension instruction: 26/0 InitializeTransferFeeConfig,
+    // 26/2..3 WithdrawWithheldTokens*, 26/4 HarvestWithheldTokensToMint,
+    // 26/5 SetTransferFee. Only 26/1 is TransferCheckedWithFee.
+    fn sysvar_for_tag26(sub: Option<u8>, nft_mint: &Pubkey) -> (Vec<u8>, Vec<Pubkey>) {
+        let mut ix_data = vec![TOKEN_IX_TRANSFER_CHECKED_WITH_FEE];
+        if let Some(b) = sub {
+            ix_data.push(b);
+        }
+        ix_data.extend_from_slice(&1u64.to_le_bytes()); // amount
+        ix_data.push(0u8); // decimals
+        let ix_accounts = vec![
+            Pubkey::new_unique(),
+            *nft_mint,
+            Pubkey::new_unique(),
+            Pubkey::new_unique(),
+        ];
+        (ix_data, ix_accounts)
+    }
+
+    #[test]
+    fn tag26_sub1_transfer_checked_with_fee_is_accepted() {
+        // POSITIVE CONTROL. Without it the rejections below would also pass against
+        // an arm that refused tag 26 outright.
+        let nft_mint = Pubkey::new_from_array([0x11u8; 32]);
+        let (ix_data, ix_accounts) = sysvar_for_tag26(Some(1), &nft_mint);
+        let mut sysvar_data = build_sysvar(&TOKEN_2022_PROGRAM_ID, &ix_data, &ix_accounts);
+        let sysvar_key = sysvar_instructions::id();
+        let mut lamports = 0u64;
+        let sysvar_ai = make_sysvar_account(&sysvar_key, &mut sysvar_data, &mut lamports);
+        assert_eq!(
+            verify_cpi_caller_is_token2022(&sysvar_ai, &nft_mint),
+            Ok(true),
+            "26/1 IS TransferCheckedWithFee and must still be accepted"
+        );
+    }
+
+    #[test]
+    fn tag26_non_transfer_sub_instructions_are_rejected() {
+        let nft_mint = Pubkey::new_from_array([0x22u8; 32]);
+        for sub in [0u8, 2, 3, 4, 5] {
+            let (ix_data, ix_accounts) = sysvar_for_tag26(Some(sub), &nft_mint);
+            let mut sysvar_data = build_sysvar(&TOKEN_2022_PROGRAM_ID, &ix_data, &ix_accounts);
+            let sysvar_key = sysvar_instructions::id();
+            let mut lamports = 0u64;
+            let sysvar_ai = make_sysvar_account(&sysvar_key, &mut sysvar_data, &mut lamports);
+            assert!(
+                verify_cpi_caller_is_token2022(&sysvar_ai, &nft_mint).is_err(),
+                "26/{sub} is not TransferCheckedWithFee and must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn tag26_with_no_sub_tag_byte_is_rejected() {
+        // A bare `[26]` has no sub-tag at all. `data.get(1)` is None, which must not
+        // be read as "close enough".
+        let nft_mint = Pubkey::new_from_array([0x33u8; 32]);
+        let ix_accounts = vec![
+            Pubkey::new_unique(),
+            nft_mint,
+            Pubkey::new_unique(),
+            Pubkey::new_unique(),
+        ];
+        let mut sysvar_data = build_sysvar(
+            &TOKEN_2022_PROGRAM_ID,
+            &[TOKEN_IX_TRANSFER_CHECKED_WITH_FEE],
+            &ix_accounts,
+        );
+        let sysvar_key = sysvar_instructions::id();
+        let mut lamports = 0u64;
+        let sysvar_ai = make_sysvar_account(&sysvar_key, &mut sysvar_data, &mut lamports);
+        assert!(
+            verify_cpi_caller_is_token2022(&sysvar_ai, &nft_mint).is_err(),
+            "a tag-26 instruction with no sub-tag byte must be refused"
         );
     }
 
