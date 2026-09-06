@@ -33,9 +33,15 @@ jobs:
 
       # The SBF build is the artifact that actually ships. It is also the only build
       # that compiles the `target_os = "solana"` paths.
+      # `stable`, not a pinned version — matching percolator-prog and percolator-stake.
+      # A pinned v2.1.0 installer bundles cargo 1.79, which cannot parse a transitive
+      # dependency requiring edition2024 (`toml_parser`), and that dependency arrives
+      # through the engine dev-dependency #190 added for the layout-parity test. So the
+      # pin failed the moment these two changes met. stake's CI carries the same note
+      # for the same reason: release.anza.xyz does not serve every point release.
       - name: Install Solana toolchain (for build-sbf)
         run: |
-          sh -c "$(curl -sSfL https://release.anza.xyz/v2.1.0/install)"
+          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
 
       - name: Build SBF artifact (devnet — the configuration devnet deploys must use)
