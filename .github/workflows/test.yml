@@ -20,3 +20,31 @@ jobs:
         run: cargo test --lib --tests --verbose
       - name: Run tests (devnet — the configuration devnet deploys must use)
         run: cargo test --lib --tests --features devnet --verbose
+
+      # #184 (4.3): CI ran neither clippy nor a BPF build, while the README asserts
+      # "no warnings expected" for the SBF build. Two consequences seen in the audit
+      # that produced #184: a clippy regression would not have been caught, and code
+      # under `#[cfg(target_os = "solana")]` was never compiled by ANYTHING in CI —
+      # which is exactly why #178 had to switch to a runtime `cfg!`.
+      - name: Clippy (-D warnings, both feature configurations)
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo clippy --all-targets --features devnet -- -D warnings
+
+      # The SBF build is the artifact that actually ships. It is also the only build
+      # that compiles the `target_os = "solana"` paths.
+      # `stable`, not a pinned version — matching percolator-prog and percolator-stake.
+      # A pinned v2.1.0 installer bundles cargo 1.79, which cannot parse a transitive
+      # dependency requiring edition2024 (`toml_parser`), and that dependency arrives
+      # through the engine dev-dependency #190 added for the layout-parity test. So the
+      # pin failed the moment these two changes met. stake's CI carries the same note
+      # for the same reason: release.anza.xyz does not serve every point release.
+      - name: Install Solana toolchain (for build-sbf)
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      - name: Build SBF artifact (devnet — the configuration devnet deploys must use)
+        run: |
+          cargo build-sbf -- --features devnet
+          test -f target/deploy/percolator_nft.so || { echo "no .so produced"; exit 1; }

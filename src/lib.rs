@@ -1,8 +1,14 @@
 #![forbid(unsafe_code)]
-// The solana_program `entrypoint!` macro uses platform-specific cfgs
-// (custom-heap, custom-panic, target_os="solana") that are not in our
-// check-cfg list. These are SBF-toolchain internals — suppress here.
-#![allow(unexpected_cfgs)]
+// #184 (4.2): the `unexpected_cfgs` allow is NOT crate-wide.
+//
+// It exists for the `entrypoint!` macro's SBF-toolchain internals (custom-heap,
+// custom-panic, target_os="solana"), so it now lives on that module alone.
+//
+// Crate-wide, it silenced every misspelled cfg in the crate: a typo'd
+// `#[cfg(feature = "devnett")]` produced NO diagnostic — not from build, not under
+// -D warnings, not from clippy — even though cargo passes --check-cfg correctly.
+// That was harmless until a feature became load-bearing; with the devnet gate it is
+// the difference between a devnet build that trusts nothing and a silent mainnet one.
 
 pub mod cpi_v16;
 #[cfg(not(feature = "no-entrypoint"))]
