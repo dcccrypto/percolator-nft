@@ -44,8 +44,6 @@ blake3 = { git = "https://github.com/BLAKE3-team/BLAKE3", tag = "1.5.5" }
 crate-type = ["cdylib", "lib"]
 
 [dev-dependencies]
-solana-sdk = "=2.2.1"
-proptest = "1.4"
 
 # GH#160 — the REAL engine, pinned, so the vendored mirror in slab_types_v16.rs can
 # be checked against the layout it claims to mirror.
