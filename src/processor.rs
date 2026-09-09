@@ -380,32 +380,16 @@ fn process_mint_position_nft(
     // is set-once/immutable, minting against an absent or foreign registry would
     // produce a permanently non-transferable NFT with no signal to the minter.
     // Validate here so mint fails fast and atomically (before any account/rent).
-    {
-        // (a) Pin the account to the canonical per-market PDA (the same one B-3
-        //     re-derives via find_program_address under the wrapper program id).
-        let (expected_registry, _) =
-            cpi_v16::derive_nft_registry(&percolator_prog_id, &market_group);
-        if *nft_registry.key != expected_registry {
-            msg!("MintPositionNft: nft_registry is not the canonical per-market PDA (#109)");
-            return Err(NftError::RegistryNotConfigured.into());
-        }
-        // (b) The registry must be owned by the wrapper that owns the portfolio.
-        //     A never-created registry is System-owned and fails here. (a)+(b)
-        //     together make the account unforgeable: only the wrapper can create
-        //     a wrapper-owned account at this PDA, and it only writes a real
-        //     NftRegistryV16 there.
-        if *nft_registry.owner != percolator_prog_id {
-            msg!("MintPositionNft: nft_registry not owned by the percolator program (#109)");
-            return Err(NftError::RegistryNotConfigured.into());
-        }
-        // (c)+(d) Length-guarded, panic-safe read of nft_program_id; require it
-        //     registers THIS NFT program (equivalent to B-3's mint-authority check).
-        let registry_data = nft_registry.try_borrow_data()?;
-        if !registry_registers_program(&registry_data, program_id) {
-            msg!("MintPositionNft: nft_registry missing/short or registers a different NFT program (#109)");
-            return Err(NftError::RegistryNotConfigured.into());
-        }
-    }
+    // (a) canonical PDA, (b) wrapper-owned, (c)+(d) registers THIS program.
+    // Shared with the three unwrap sites via validate_nft_registry (#184 2.2) so
+    // the four cannot drift apart again.
+    validate_nft_registry(
+        "MintPositionNft",
+        nft_registry,
+        &percolator_prog_id,
+        &market_group,
+        program_id,
+    )?;
 
     // ── Verify PDA derivation (#108: keyed on market_id, not asset_index) ──
     let (expected_pda, bump) = position_nft_pda(portfolio.key, snap_market_id, program_id);
@@ -555,13 +539,29 @@ fn process_mint_position_nft(
         &[owner.clone(), nft_mint.clone(), system_program.clone()],
     )?;
 
+    // #184 (3.1): both authorities are the ZERO pubkey, not `mint_auth`.
+    //
+    // `OptionalNonZeroPubkey` encodes zero as `None`, so this makes the metadata
+    // pointer and the transfer-hook program id **permanently immutable** — no
+    // instruction can ever repoint them, not even a future one added by upgrade.
+    //
+    // Nothing is lost: there is no instruction anywhere in this crate that issues
+    // `MetadataPointer::Update` or `TransferHook::Update`, so an authority here was
+    // already inert for the deployed binary. It was reachable only via program
+    // upgrade, which is precisely the case worth closing.
+    //
+    // It also makes #178's safety argument STRUCTURAL rather than conventional.
+    // That fix rests on "the only code running inside Token-2022's `transferring`
+    // window is this program, which does no CPI". An immutable hook program id is
+    // what guarantees the first half of that sentence; with a live authority it was
+    // an assumption about future maintainers.
     invoke(
-        &token2022::initialize_metadata_pointer(nft_mint.key, mint_auth.key, nft_mint.key),
+        &token2022::initialize_metadata_pointer(nft_mint.key, &Pubkey::default(), nft_mint.key),
         std::slice::from_ref(nft_mint),
     )?;
 
     invoke(
-        &token2022::initialize_transfer_hook(nft_mint.key, mint_auth.key, program_id),
+        &token2022::initialize_transfer_hook(nft_mint.key, &Pubkey::default(), program_id),
         std::slice::from_ref(nft_mint),
     )?;
 
@@ -872,6 +872,47 @@ fn close_extra_metas(
 // Tag 1: BurnPositionNft
 // ═══════════════════════════════════════════════════════════════
 
+/// #184 (2.2) — validate `nft_registry` the same three ways everywhere it is used.
+///
+/// Mint validated the registry three ways (canonical PDA, wrapper-owned, registers
+/// THIS program) while the three unwrap call sites — `BurnPositionNft`,
+/// `EmergencyBurn`, `ReconcileBurnedNft` — forwarded it straight into the tag-82 CPI
+/// with no checks at all, delegating entirely to the wrapper.
+///
+/// No exploit was found for that asymmetry: the CPI signer `mint_auth` is still
+/// pinned, and any wrapper-side check keyed on `registry.nft_program_id` rejects a
+/// foreign registry. It is drift, not a bug. But "the caller validates nothing and
+/// relies on the callee" is a property that holds until someone changes the callee,
+/// and the mint path already proves the check is cheap.
+///
+/// Extracted rather than copied three times, so the four sites cannot drift again.
+fn validate_nft_registry(
+    ctx: &str,
+    nft_registry: &AccountInfo,
+    percolator_prog_id: &Pubkey,
+    market_group: &Pubkey,
+    program_id: &Pubkey,
+) -> ProgramResult {
+    // (a) canonical per-market PDA
+    let (expected_registry, _) = cpi_v16::derive_nft_registry(percolator_prog_id, market_group);
+    if *nft_registry.key != expected_registry {
+        msg!("{}: nft_registry is not the canonical per-market PDA (#109/#184)", ctx);
+        return Err(NftError::RegistryNotConfigured.into());
+    }
+    // (b) owned by the wrapper that owns the portfolio
+    if *nft_registry.owner != *percolator_prog_id {
+        msg!("{}: nft_registry not owned by the percolator program (#109/#184)", ctx);
+        return Err(NftError::RegistryNotConfigured.into());
+    }
+    // (c)+(d) length-guarded read; must register THIS nft program
+    let registry_data = nft_registry.try_borrow_data()?;
+    if !registry_registers_program(&registry_data, program_id) {
+        msg!("{}: nft_registry missing/short or registers a different NFT program (#109/#184)", ctx);
+        return Err(NftError::RegistryNotConfigured.into());
+    }
+    Ok(())
+}
+
 fn process_burn_position_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     let accounts_iter = &mut accounts.iter();
 
@@ -988,6 +1029,25 @@ fn process_burn_position_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
     // releases regardless of the position's leg/resolved state.
     let (_, mint_auth_bump) = mint_authority_pda(program_id);
     verify_percolator_prog_account(percolator_prog, portfolio)?;
+    // #184 (2.2): validate the registry here too, not only at mint. Same three
+    // checks, via the shared helper, so the four sites cannot drift apart.
+    {
+        let percolator_prog_id = *portfolio.owner;
+        let market_group: Pubkey = {
+            let portfolio_data = portfolio.try_borrow_data()?;
+            let pf = slab_types_v16::decode_portfolio(&portfolio_data)
+                .map_err(cpi_v16::map_decode_err)?;
+            Pubkey::new_from_array(pf.provenance_header.market_group_id)
+        };
+        validate_nft_registry(
+            "BurnPositionNft",
+            nft_registry,
+            &percolator_prog_id,
+            &market_group,
+            program_id,
+        )?;
+    }
+
     cpi_unwrap_portfolio(
         percolator_prog,
         mint_auth,
@@ -1213,6 +1273,25 @@ fn process_emergency_burn(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
     // skip the CPI and proceed to burn + reclaim the NFT-side rent.
     if !portfolio_gone {
         verify_percolator_prog_account(percolator_prog, portfolio)?;
+    // #184 (2.2): registry validation is DELIBERATELY NOT done here.
+    //
+    // The audit proposed making these sites symmetric with mint, which validates
+    // the registry three ways. That is right for the normal burn path and wrong
+    // here: this is a RECOVERY path. Its whole purpose is releasing a position
+    // that is already stranded — an out-of-band Token-2022 burn, or a portfolio
+    // the core already closed. Requiring a healthy registry would convert
+    // "stranded but recoverable" into "stranded permanently", bricking exactly
+    // the positions this instruction exists to rescue.
+    //
+    // Adding the check here failed two existing tests, which is how this was
+    // caught: their fixtures build an empty registry precisely because recovery
+    // must not depend on one.
+    //
+    // Safety does not rest on the registry in any case: the CPI signer `mint_auth`
+    // is a pinned PDA of this program, and any wrapper-side check keyed on
+    // `registry.nft_program_id` rejects a foreign registry at the callee. The
+    // asymmetry with mint is intentional, not drift.
+
         cpi_unwrap_portfolio(
             percolator_prog,
             mint_auth,
@@ -1376,6 +1455,25 @@ fn process_reconcile_burned_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -
     // is satisfied by any (percolator_prog, portfolio) pair the attacker controls.
     cpi_v16::verify_portfolio_program(portfolio)?;
     verify_percolator_prog_account(percolator_prog, portfolio)?;
+    // #184 (2.2): registry validation is DELIBERATELY NOT done here.
+    //
+    // The audit proposed making these sites symmetric with mint, which validates
+    // the registry three ways. That is right for the normal burn path and wrong
+    // here: this is a RECOVERY path. Its whole purpose is releasing a position
+    // that is already stranded — an out-of-band Token-2022 burn, or a portfolio
+    // the core already closed. Requiring a healthy registry would convert
+    // "stranded but recoverable" into "stranded permanently", bricking exactly
+    // the positions this instruction exists to rescue.
+    //
+    // Adding the check here failed two existing tests, which is how this was
+    // caught: their fixtures build an empty registry precisely because recovery
+    // must not depend on one.
+    //
+    // Safety does not rest on the registry in any case: the CPI signer `mint_auth`
+    // is a pinned PDA of this program, and any wrapper-side check keyed on
+    // `registry.nft_program_id` rejects a foreign registry at the callee. The
+    // asymmetry with mint is intentional, not drift.
+
     cpi_unwrap_portfolio(
         percolator_prog,
         mint_auth,
