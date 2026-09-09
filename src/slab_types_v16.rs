@@ -706,9 +706,36 @@ mod tests {
         );
     }
 
+    /// #184 (5.1) — LAYOUT_REVISION now tracks the layout it names.
+    ///
+    /// This test used to read `assert_eq!(LAYOUT_REVISION, 5)`: a constant asserted
+    /// against its own literal, which cannot fail and therefore guarded nothing.
+    /// The audit called the constant "declared and never used"; the truth was
+    /// narrower and worse — it WAS used, by a test that could not fail.
+    ///
+    /// Bound to a fingerprint of the sizes the revision describes, so changing any
+    /// of them without bumping LAYOUT_REVISION breaks the build. That is the only
+    /// property a layout-revision marker is for.
     #[test]
-    fn v17_layout_revision_is_5() {
-        assert_eq!(LAYOUT_REVISION, 5);
+    fn layout_revision_tracks_the_layout_it_names() {
+        // Revision 5 == this exact set of sizes. Change a size, bump the revision,
+        // and update this fingerprint — deliberately three edits, so it cannot
+        // happen by accident.
+        let fingerprint = [
+            size_of::<PortfolioAccountV16Account>(),
+            size_of::<ProvenanceHeaderV16Account>(),
+            size_of::<PortfolioLegV16Account>(),
+            size_of::<PortfolioSourceDomainV16Account>(),
+            size_of::<CloseProgressLedgerV16Account>(),
+            size_of::<HealthCertV16Account>(),
+            size_of::<ResolvedPayoutReceiptV16Account>(),
+        ];
+        let expected_for_revision_5 = [9227usize, 100, 144, 196, 184, 121, 66];
+        assert_eq!(
+            (LAYOUT_REVISION, fingerprint),
+            (5, expected_for_revision_5),
+            "the v17 layout changed without LAYOUT_REVISION being bumped (or vice versa)",
+        );
     }
 
     #[test]
