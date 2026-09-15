@@ -76,11 +76,24 @@ pub const MAGIC: u64 = 0x5045_5243_5631_3600;
 /// (`v16_program.rs`, `state` mod). This is the WRAPPER account's header
 /// version (bytes 8..10 of every wrapper-owned account, portfolio included)
 /// -- distinct from the NFT's OWN account version (`POSITION_NFT_V16_VERSION`
-/// in `state_v16.rs`, currently 2, unaffected by this change) and from the
-/// engine's `ProvenanceHeaderV16` guards (`V16_LAYOUT_DISCRIMINATOR` = 16,
-/// `V16_ACCOUNT_VERSION` = 1, both unchanged in the v17 engine -- confirmed
-/// via `~/v17/percolator/src/v16.rs`, not bumped by this change).
-pub const VERSION: u16 = 17;
+/// in `state_v16.rs`, currently 2, unaffected by this change).
+///
+/// N-1 / percolator-prog W-19: bumped 17 -> 18 IN LOCKSTEP with
+/// `percolator-prog` `fix/W-19` (`src/v16_program.rs:50`, `1734196f`), which
+/// raises the wrapper's own `VERSION` to 18 so that `check_header`
+/// (`v16_program.rs:1546`) fail-closed rejects every account stamped under the
+/// pre-layout-18 engine instead of misparsing it. The wrapper stamps this byte
+/// at `write_header` (`v16_program.rs:1530`) for all seven account kinds, and
+/// `decode_portfolio` below compares it for EXACT equality, so the two
+/// constants are one flag day: a wrapper at 18 and an NFT at 17 makes every
+/// NFT entry point that touches a portfolio return `BadVersion`.
+///
+/// This is a CROSS-PROGRAM constant. `percolator-prog/scripts/parity-check.sh`
+/// row `nft.header_version` compares it against the wrapper's `VERSION` for
+/// both the DEPLOYED and the CANDIDATE pair, and an unlisted divergence is
+/// `exit 1` (`tests/KNOWN_PARITY_DIVERGENCE.txt` records the P5 deploy that
+/// shipped this axis diverged and killed every nft portfolio path on devnet).
+pub const VERSION: u16 = 18;
 /// Account-kind discriminant for a portfolio. Byte 10.
 pub const KIND_PORTFOLIO: u8 = 2;
 /// Bytes consumed by the wrapper header before the engine POD begins.
