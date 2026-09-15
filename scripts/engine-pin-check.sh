@@ -347,8 +347,51 @@ DISC_PIN="$(git -C "$ENGINE_REPO" show "${SHA_PIN}:src/v16.rs" | sed -nE 's/^[[:
 printf '  V16_LAYOUT_DISCRIMINATOR   pin=%s  reference=%s\n' "$DISC_PIN" "$DISC_REF"
 
 echo
-cargo test --config "$PATCH_CFG" --test layout_parity_160
-TEST_RC=$?
+TEST_LOG="$(mktemp "${TMPDIR:-/tmp}/parity.XXXXXX")" || die "mktemp failed"
+cargo test --config "$PATCH_CFG" --test layout_parity_160 2>&1 | tee "$TEST_LOG"
+TEST_RC=${PIPESTATUS[0]}
+
+# N-3 gap 2. cargo exits 0 for "ran 6 tests, all passed" AND for "ran 0 tests" -- a filter
+# that matches nothing, a test file emptied or renamed, a `#[ignore]` sprayed over it. The
+# LOOP.md §5 trap ("`cargo test -- --exact` on the wrong name reports 0 passed; 0 failed")
+# is that shape, and a guard reading only the exit code cannot tell the two apart. Read the
+# COUNT. Anything that stops it being readable is exit 2 -- could not measure -- never a
+# green.
+EXPECTED_MIN_TESTS=6   # 5 offset/size tests + the constant-value test. Adding tests is fine.
+RUN_LINES="$(grep -cE '^running [0-9]+ tests?$' "$TEST_LOG" | tr -d ' ')"
+TEST_COUNT="$(sed -nE 's/^running ([0-9]+) tests?$/\1/p' "$TEST_LOG" | head -1)"
+RESULT_LINE="$(grep -E '^test result: ' "$TEST_LOG" | head -1)"
+rm -f "$TEST_LOG"
+if [ "$RUN_LINES" != "1" ] || [ -z "$TEST_COUNT" ] || [ -z "$RESULT_LINE" ]; then
+  die "the parity test did not run: found ${RUN_LINES} \`running N tests\` line(s) and $([ -n "$RESULT_LINE" ] && echo 1 || echo 0)
+    \`test result:\` line(s) in the cargo output above, expected exactly 1 of each. Either it
+    failed to COMPILE -- which is drift too, and a worse kind: a field the mirror names by
+    offset_of! no longer exists in the engine -- or the target/filter no longer selects it.
+    Read the cargo output above; do not treat this as green."
+fi
+# Every number out of the result line, not just the headline. cargo exits 0 for "ran 0 tests"
+# AND for "ran 6, ignored 6" -- in the second, `running 6 tests` is still printed, so a bare
+# count would wave it through while nothing at all was asserted.
+r_passed="$(printf '%s\n' "$RESULT_LINE"   | sed -nE 's/.*[^0-9]([0-9]+) passed.*/\1/p')"
+r_failed="$(printf '%s\n' "$RESULT_LINE"   | sed -nE 's/.*[^0-9]([0-9]+) failed.*/\1/p')"
+r_ignored="$(printf '%s\n' "$RESULT_LINE"  | sed -nE 's/.*[^0-9]([0-9]+) ignored.*/\1/p')"
+r_filtered="$(printf '%s\n' "$RESULT_LINE" | sed -nE 's/.*[^0-9]([0-9]+) filtered out.*/\1/p')"
+for v in "$r_passed" "$r_failed" "$r_ignored" "$r_filtered"; do
+  case "$v" in ''|*[!0-9]*) die "EXTRACTOR MISSED: cannot read the counts out of '${RESULT_LINE}'";; esac
+done
+r_ran=$((r_passed + r_failed))
+[ "$r_ran" -ge "$EXPECTED_MIN_TESTS" ] || die "the parity test EXECUTED only ${r_ran} test(s) (${r_passed} passed,
+    ${r_failed} failed), expected at least ${EXPECTED_MIN_TESTS}.  ${RESULT_LINE}
+    cargo exits 0 for an empty run, so this would otherwise have been reported as a PASS.
+    tests/layout_parity_160.rs is the whole measurement this job makes -- a shrunken one is not
+    a smaller check, it is a green light with nothing behind it."
+[ "$r_ignored" = "0" ] || die "${r_ignored} parity test(s) are #[ignore]d.  ${RESULT_LINE}
+    An ignored test still prints in \`running N tests\` and still exits 0. Un-ignore them or
+    this job asserts nothing."
+[ "$r_filtered" = "0" ] || die "${r_filtered} parity test(s) were filtered out.  ${RESULT_LINE}
+    This job must run the whole file; a filter makes the verdict about a subset."
+printf '  test count             %s executed, %s ignored, %s filtered (>= %s required)\n' \
+  "$r_ran" "$r_ignored" "$r_filtered" "$EXPECTED_MIN_TESTS"
 echo "::endgroup::"
 
 if [ "$TEST_RC" -ne 0 ]; then
