@@ -160,6 +160,48 @@ if [ "$PINNED" = "no" ]; then
     || die "cannot resolve '${REF_ENGINE:-HEAD}' in $ENGINE_REPO"
   if [ -n "${REF_ENGINE:-}" ]; then
     printf '  !! REF_ENGINE OVERRIDE in effect: %s -- this run is a demonstration, not a verdict\n' "$REF_ENGINE"
+    printf '  !! the default-branch confirmation below is SKIPPED for the same reason\n'
+  else
+    # N-3 gap 1. Everything above only establishes that NOBODY WROTE a `ref:`. It does not
+    # establish that what is checked out here IS the default branch -- a stale clone, a
+    # `git checkout` in an earlier step, or a `ref` supplied some other way would all still
+    # read PINNED=no while HEAD sits on something else entirely, and the job would then
+    # report a confident verdict about the wrong commit. Ask the remote.
+    LSR="$(git -C "$ENGINE_REPO" ls-remote --symref origin HEAD 2>/dev/null)" \
+      || die "cannot reach the engine remote to confirm its default branch.
+    Without that confirmation this job cannot tell whether the engine checked out here is the
+    engine percolator-prog compiles, and a guard that cannot tell must not report OK."
+    DEFAULT_BRANCH="$(printf '%s\n' "$LSR" | sed -nE 's#^ref:[[:space:]]+refs/heads/(.+)[[:space:]]+HEAD$#\1#p' | head -1)"
+    REMOTE_TIP="$(printf '%s\n' "$LSR" | sed -nE 's/^([0-9a-f]{40})[[:space:]]+HEAD$/\1/p' | head -1)"
+    [ -n "$DEFAULT_BRANCH" ] && [ -n "$REMOTE_TIP" ] \
+      || die "EXTRACTOR MISSED: cannot read the default branch and its tip out of \`git ls-remote --symref origin HEAD\`:
+${LSR}"
+    if [ "$SHA_ENGINE" = "$REMOTE_TIP" ]; then
+      printf '  default-branch check   OK -- HEAD == origin/%s tip %s\n' "$DEFAULT_BRANCH" "$REMOTE_TIP"
+    else
+      # Tolerated, and ONLY this: HEAD is on the default branch but behind its tip, which is
+      # what a push to the engine between our checkout step and this line looks like. The
+      # engine takes ~20 commits a day, a job runs for minutes, so demanding exact equality
+      # here would go red a few percent of the time for no defect -- and a guard that is red
+      # for no reason is a guard that gets switched off. Being ON the branch is the property;
+      # combined with the "no ref:" check above it means HEAD WAS the tip at checkout time.
+      git -C "$ENGINE_REPO" cat-file -e "${REMOTE_TIP}^{commit}" 2>/dev/null \
+        || git -C "$ENGINE_REPO" fetch --no-tags --quiet origin "$DEFAULT_BRANCH" >/dev/null 2>&1 || true
+      git -C "$ENGINE_REPO" cat-file -e "${REMOTE_TIP}^{commit}" 2>/dev/null \
+        || die "the engine remote's default branch tip ${REMOTE_TIP} could not be fetched, so
+    whether this checkout is on that branch cannot be decided."
+      git -C "$ENGINE_REPO" merge-base --is-ancestor "$SHA_ENGINE" "$REMOTE_TIP" 2>/dev/null \
+        || die "the engine checkout is NOT on the remote's default branch.
+    HEAD             ${SHA_ENGINE}
+    origin/${DEFAULT_BRANCH} tip  ${REMOTE_TIP}
+    HEAD is not an ancestor of it, so this checkout is some other branch, a fork, or a
+    rebased-away commit -- not the engine percolator-prog compiles. Everything this job
+    would print below would be a measurement against the wrong engine."
+      printf '  default-branch check   HEAD is %s commit(s) behind origin/%s (%s)\n' \
+        "$(git -C "$ENGINE_REPO" rev-list --count "${SHA_ENGINE}..${REMOTE_TIP}")" \
+        "$DEFAULT_BRANCH" "$REMOTE_TIP"
+      printf '                         -- on the branch, so the branch advanced mid-run; measuring HEAD.\n'
+    fi
   fi
 else
   MODE="pinned"
