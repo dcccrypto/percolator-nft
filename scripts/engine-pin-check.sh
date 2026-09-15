@@ -76,11 +76,22 @@
 
 set -uo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# Every directory this script compares or prints is CANONICAL -- no `..` segments, symlinks
+# resolved. The default engine path is `$ROOT/../percolator`, and `cargo metadata` reports the
+# canonical form, so comparing the two as strings said "[patch] applied to the wrong tree" for
+# the one directory that was right. That is what happened on the first real CI run (GH run
+# 34926926638): the check is correct, the comparison was not. It never showed up locally
+# because a local run passes ENGINE_REPO explicitly, and only CI uses the `..` default.
+canon() { ( CDPATH='' cd -- "$1" 2>/dev/null && pwd -P ); }
+
+ROOT="$(canon "$(dirname "$0")/..")" || exit 2
+[ -n "$ROOT" ] || { printf '::error::cannot resolve the repository root from %s\n' "$0" >&2; exit 2; }
 cd "$ROOT" || exit 2
 
-PROG_REPO="${PROG_REPO:-$ROOT/../percolator-prog}"
-ENGINE_REPO="${ENGINE_REPO:-$ROOT/../percolator}"
+PROG_REPO_IN="${PROG_REPO:-$ROOT/../percolator-prog}"
+ENGINE_REPO_IN="${ENGINE_REPO:-$ROOT/../percolator}"
+PROG_REPO="$(canon "$PROG_REPO_IN")"
+ENGINE_REPO="$(canon "$ENGINE_REPO_IN")"
 REF_PROG="${REF_PROG:-HEAD}"
 SELF_WORKFLOW="${SELF_WORKFLOW:-$ROOT/.github/workflows/test.yml}"
 EXTRACTOR="$ROOT/scripts/gha_checkout_ref.py"
@@ -96,6 +107,9 @@ cleanup() {
 
 command -v python3 >/dev/null 2>&1 || die "python3 not found -- scripts/gha_checkout_ref.py cannot run"
 [ -r "$EXTRACTOR" ] || die "$EXTRACTOR missing"
+[ -n "$PROG_REPO" ] \
+  || die "PROG_REPO='$PROG_REPO_IN' does not exist -- without percolator-prog there is nothing to tie the pin TO"
+[ -n "$ENGINE_REPO" ] || die "ENGINE_REPO='$ENGINE_REPO_IN' does not exist"
 git -C "$PROG_REPO" rev-parse --git-dir >/dev/null 2>&1 \
   || die "PROG_REPO='$PROG_REPO' is not a git repository -- without percolator-prog there is nothing to tie the pin TO"
 git -C "$ENGINE_REPO" rev-parse --git-dir >/dev/null 2>&1 \
@@ -245,6 +259,8 @@ else
     || die "cannot create a worktree of $ENGINE_REPO at ${SHA_ENGINE}"
   ENGINE_DIR="$WORKTREE"
 fi
+ENGINE_DIR="$(canon "$ENGINE_DIR")"
+[ -n "$ENGINE_DIR" ] || die "the engine source directory does not resolve"
 printf '  engine source          %s\n' "$ENGINE_DIR"
 
 PATCH_CFG="patch.\"${DEP_GIT}\".percolator.path=\"${ENGINE_DIR}\""
@@ -266,7 +282,20 @@ PROOF_MAN="$(printf '%s' "$PROOF" | cut -f2)"
 [ "$PROOF_SRC" = "None" ] || die "[patch] DID NOT APPLY: percolator still resolves to source '${PROOF_SRC}'.
     The test below would compare the mirror against the PINNED engine while this script
     reported the wrapper's -- vacuous, and worse than no check at all."
-[ "$PROOF_MAN" = "${ENGINE_DIR}/Cargo.toml" ] || die "[patch] applied to the wrong tree: ${PROOF_MAN}"
+# Compare DIRECTORIES, canonicalised on both sides, not the raw strings. cargo normalises the
+# path it is handed lexically (it collapses `..`) but does not resolve symlinks, and ENGINE_DIR
+# above is `pwd -P`, so the two agree only once both have been through the same treatment. The
+# first real CI run failed exactly here, on `<ws>/percolator-nft/../percolator` versus
+# `<ws>/percolator` -- one directory, two spellings. The CHECK is right and is kept; only the
+# comparison was wrong.
+[ "$(basename "$PROOF_MAN")" = "Cargo.toml" ] || die "[patch] resolved to a non-manifest path: ${PROOF_MAN}"
+PROOF_DIR="$(canon "$(dirname "$PROOF_MAN")")"
+[ -n "$PROOF_DIR" ] || die "[patch] resolved to a directory that does not exist: ${PROOF_MAN}"
+[ "$PROOF_DIR" = "$ENGINE_DIR" ] || die "[patch] applied to the wrong tree.
+    expected  ${ENGINE_DIR}
+    resolved  ${PROOF_DIR}   (from ${PROOF_MAN})
+    Both paths above are canonical (symlinks resolved, no '..'), so this is a genuinely
+    different directory and not a spelling difference."
 printf '  patch proof            percolator -> %s  (source=none)\n' "$PROOF_MAN"
 
 DISC_REF="$(sed -nE 's/^[[:space:]]*pub const V16_LAYOUT_DISCRIMINATOR[^=]*=[[:space:]]*([0-9_]+)[[:space:]]*;.*$/\1/p' "${ENGINE_DIR}/src/v16.rs" | head -1)"
