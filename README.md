@@ -125,7 +125,9 @@ Notes for integrators:
 ## v17 Layout Support
 
 The NFT program mirrors the converged v17 portfolio layout (`PortfolioAccountV16Account`,
-9227 bytes) to read position state directly without CPI. Struct field offsets are verified
+**9419 bytes** at engine layout 18; it was 9227 before N-1 re-vendored it, and this line
+still said 9227 afterwards) to read position state directly without CPI. Struct field
+offsets are verified
 for internal consistency via compile-time `const_assert!` macros — and, since #160,
 alignment with the live engine layout is verified too: `tests/layout_parity_160.rs` asserts
 total size, alignment, every field the NFT program reads, and every provenance-header field
@@ -139,6 +141,19 @@ The parity test is what fails in that case.
 The pin is deliberate — bumping it is a decision with a diff to read, not something that
 follows engine `main` on its own. It is a dev-dependency only: the deployed program keeps
 its zero-dependency mirror and does not link the engine.
+
+**And a pin is only a guard while it points at the engine we ship against (N-2).** Ours
+stopped: it sat at `99bc9c8d` while the shipping engine moved 228 commits through the
+layout-18 change, and because the pinned engine and the stale mirror were field-identical,
+every parity test stayed green while `legs`, `stale_state`, `liquidation_lock`,
+`close_progress` and `resolved_payout_receipt` were 192 bytes out. The test was comparing
+the mirror to a copy of itself. So CI now has a second job, `engine-pin`, which runs
+`scripts/engine-pin-check.sh`: it derives the engine percolator-prog actually compiles
+(from percolator-prog's own `ci.yml`, not from an assumption written here), re-runs
+`tests/layout_parity_160.rs` against THAT engine, and fails if the mirror has drifted from
+it or if the pin names a commit outside its history. "In sync" means layout-identical, not
+SHA-equal — the reasoning is in the script's header. The pinned test stays: it is the
+deterministic offline one, and the new job is the one that tracks a moving target.
 
 What that means concretely: the `const_assert!`s alone cannot detect the one failure that
 matters here — the mirror drifting from the engine. Under the exact change they exist to

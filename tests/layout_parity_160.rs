@@ -17,6 +17,16 @@
 //! These tests compare the mirror to the pinned real engine crate, so drift is a
 //! FAILING TEST rather than a silent misread. The pin is deliberate: bumping it is a
 //! decision with a diff to read, not something that follows `main` on its own.
+//!
+//! N-2 — WHAT THIS FILE CANNOT DO ON ITS OWN. A pin is a guard only while it points at
+//! the engine we ship against. Ours stopped: it sat at `99bc9c8d` while the shipping
+//! engine moved 228 commits through the layout-18 change, and because the stale pin and
+//! the stale mirror were field-identical, all of this was green while `legs`,
+//! `stale_state`, `liquidation_lock`, `close_progress` and `resolved_payout_receipt`
+//! were 192 bytes out. The test was comparing the mirror to a copy of itself.
+//! `scripts/engine-pin-check.sh` (CI job `engine-pin`) re-runs THIS FILE against the
+//! engine percolator-prog actually compiles, so the rot fails CI instead of accumulating.
+//! Both matter: this one is deterministic and offline, that one tracks a moving target.
 
 use core::mem::{align_of, offset_of, size_of};
 
@@ -154,6 +164,51 @@ fn every_leg_field_the_nft_program_reads_sits_at_the_same_offset() {
         offset_of!(EngineLeg, epoch_snap),
         "`leg.epoch_snap` offset drift — snapshotted at mint and logged by valuation; \
          layout 18 moved it 78 -> 86 by inserting kf_epoch_snap ahead of it"
+    );
+}
+
+/// N-2: offsets are not the whole layout. `decode_portfolio` compares two engine
+/// CONSTANTS for exact equality before it trusts a single byte — the account
+/// version and the layout discriminator — and a change to either is invisible to
+/// every offset assertion in this file.
+///
+/// Layout 16 → 18 moved the offsets AND the discriminator together, which is why
+/// the offset tests were enough to catch it once someone looked. They would not
+/// be enough next time: an engine that re-stamps `V16_LAYOUT_DISCRIMINATOR`
+/// without moving a field — a semantic re-issue of an identically shaped account
+/// — leaves all five tests above green while `decode_portfolio` rejects every
+/// live portfolio with `BadLayoutDiscriminator`. That is a green parity row over
+/// a dead program, which is exactly what N-1 was, so pin the values too.
+///
+/// `V16_MAX_PORTFOLIO_ASSETS_N` and `PORTFOLIO_SOURCE_DOMAIN_CAP` are here for a
+/// different reason: they are array bounds the mirror hard-codes rather than
+/// derives, so a change to them shows up in the total size — but only as a number
+/// that has to be diagnosed. Named, it diagnoses itself.
+#[test]
+fn the_constants_decode_portfolio_gates_on_have_the_same_values() {
+    assert_eq!(
+        percolator_nft::slab_types_v16::V16_LAYOUT_DISCRIMINATOR,
+        percolator::V16_LAYOUT_DISCRIMINATOR,
+        "`V16_LAYOUT_DISCRIMINATOR` value drift — decode_portfolio compares this for \
+         EXACT equality against the byte the wrapper stamped, so a mirror holding the \
+         old value refuses every live portfolio and the NFT feature goes inert"
+    );
+    assert_eq!(
+        percolator_nft::slab_types_v16::V16_ACCOUNT_VERSION,
+        percolator::V16_ACCOUNT_VERSION,
+        "`V16_ACCOUNT_VERSION` value drift — the provenance-header version gate"
+    );
+    assert_eq!(
+        percolator_nft::slab_types_v16::V16_MAX_PORTFOLIO_ASSETS_N,
+        percolator::V16_MAX_PORTFOLIO_ASSETS_N,
+        "`V16_MAX_PORTFOLIO_ASSETS_N` drift — the number of leg slots the mirror \
+         reserves; the eligibility scan walks all of them"
+    );
+    assert_eq!(
+        percolator_nft::slab_types_v16::PORTFOLIO_SOURCE_DOMAIN_CAP,
+        percolator::PORTFOLIO_SOURCE_DOMAIN_CAP,
+        "`PORTFOLIO_SOURCE_DOMAIN_CAP` drift — the inline source-domain array bound, \
+         which sits between `legs` and every transfer-gate flag"
     );
 }
 

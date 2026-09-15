@@ -48,3 +48,58 @@ jobs:
         run: |
           cargo build-sbf -- --features devnet
           test -f target/deploy/percolator_nft.so || { echo "no .so produced"; exit 1; }
+
+  # =========================================================================================
+  # N-2 — THE ENGINE PIN IS NOT ALLOWED TO ROT.
+  #
+  # The `test` job above runs tests/layout_parity_160.rs against the engine PINNED in
+  # Cargo.toml. That is a real check of the vendored mirror, and it was green for 228
+  # commits while the mirror was 192 bytes behind the engine we ship — because the pin and
+  # the mirror had drifted TOGETHER, so the test was comparing the mirror to a copy of
+  # itself. N-1 found that by hand. This job is the thing that would have found it.
+  #
+  # It runs the SAME test against the engine percolator-prog actually compiles, which it
+  # derives from percolator-prog's own ci.yml rather than assuming. See
+  # scripts/engine-pin-check.sh for what "in sync" means and why it is layout equality
+  # rather than SHA equality.
+  #
+  # This job CAN go red on a PR that changed nothing here — that is the point: it goes red
+  # when the engine moves the portfolio layout out from under the mirror, and the fix is to
+  # re-vendor (an N-1-shaped commit), not to relax the job.
+  # =========================================================================================
+  engine-pin:
+    name: engine pin tracks the engine the wrapper ships
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: checkout percolator-nft
+        uses: actions/checkout@v4
+        with: { path: percolator-nft }
+
+      # The wrapper is what decides which engine ships, so its workflow is the input.
+      # No `ref:`: percolator-prog's default branch, the same thing its own `parity` job
+      # means when it checks THIS repository out with no ref.
+      - name: checkout percolator-prog (the wrapper decides which engine ships)
+        uses: actions/checkout@v4
+        with: { repository: dcccrypto/percolator-prog, path: percolator-prog, token: '${{ secrets.GITHUB_TOKEN }}' }
+
+      # NO `ref:` HERE, DELIBERATELY, and scripts/engine-pin-check.sh VERIFIES that it is
+      # absent rather than trusting this comment: percolator-prog checks the engine out
+      # with no ref too, so the engine both jobs compile is this repository's default-branch
+      # tip. Adding a ref here would silently change which engine is measured, so the script
+      # hard-fails if this step ever gains one while percolator-prog has not.
+      #
+      # fetch-depth: 0 because the ancestry check walks back to the pinned commit, which is
+      # hundreds of commits deep whenever the pin has been left alone for a while — which is
+      # exactly the case this job exists for.
+      - name: checkout percolator (engine, default branch — same as the wrapper's CI)
+        uses: actions/checkout@v4
+        with: { repository: dcccrypto/percolator, path: percolator, fetch-depth: 0, token: '${{ secrets.GITHUB_TOKEN }}' }
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: percolator-nft }
+
+      - name: engine pin check (layout parity against the wrapper's engine)
+        working-directory: percolator-nft
+        run: ./scripts/engine-pin-check.sh
