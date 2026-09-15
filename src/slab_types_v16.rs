@@ -60,9 +60,29 @@ use core::mem::{align_of, offset_of, size_of};
 // LAYOUT REVISION
 // ════════════════════════════════════════════════════════════════════════════
 
-/// Bump whenever assertions are intentionally re-vendored against a new engine
-/// layout. Stamped into every minted NFT so re-vendoring invalidates older NFTs
-/// rather than silently decoding with wrong offsets.
+/// Bump whenever the assertions in this module are intentionally re-vendored
+/// against a new engine layout.
+///
+/// **N-2: it is not stamped anywhere, and it never was.** This constant is a
+/// source-level marker and nothing else. `grep -rn LAYOUT_REVISION` over this
+/// repository finds it in exactly two places, both in this file: the declaration
+/// here and `tests::layout_revision_tracks_the_layout_it_names`, which ties it to
+/// the measured layout. It is never written into a `PositionNftV16`
+/// account, never read by a handler, never sent on chain — so it CANNOT
+/// invalidate an already-minted NFT. The doc here used to claim "Stamped into
+/// every minted NFT so re-vendoring invalidates older NFTs rather than silently
+/// decoding with wrong offsets"; that sentence was false when it was written and
+/// was carried forward verbatim through revisions 4, 5 and 6.
+///
+/// What actually stops a wrong-offset decode is the pair of fail-closed gates in
+/// [`decode_portfolio`]: the wrapper header [`VERSION`] and the engine
+/// [`V16_LAYOUT_DISCRIMINATOR`], both compared for EXACT equality before any
+/// field is read. What stops the mirror from drifting in the first place is
+/// `tests/layout_parity_160.rs` against the pinned engine, plus
+/// `scripts/engine-pin-check.sh`, which re-runs that same test against the engine
+/// percolator-prog actually ships (N-2) so that a pin which stops tracking that
+/// engine turns CI red instead of rotting silently — the old pin rotted 228
+/// commits before N-1 caught it by hand.
 ///
 /// Revision 5: v17 layout — 9227-byte fixed `PortfolioAccountV16Account` with
 /// inline `source_domains` array + retained `capital`/`pnl`/`reserved_pnl` +
