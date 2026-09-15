@@ -61,6 +61,14 @@ crate-type = ["cdylib", "lib"]
 #
 # dev-dependency only — the deployed program keeps its zero-dependency mirror and
 # does not link the engine.
+#
+# N-1: bumped 99bc9c8d -> 2c38570a (the release-candidate engine, 228 commits on).
+# The old pin PREDATES engine bf2fda46 ("Adopt upstream 92ed4a1a: track K/F
+# settlement cohorts by generation (layout 18)"), so tests/layout_parity_160.rs was
+# comparing the mirror against an engine that no longer exists anywhere — green, and
+# blind to the 192 bytes of drift this branch fixes. A pin is only a guard while it
+# points at the engine we ship against; a STALE pin is the same vacuity the test was
+# written to kill, one level up.
 [dev-dependencies.percolator]
 git = "https://github.com/dcccrypto/percolator"
-rev = "99bc9c8d19c2f130b32bf0d5e867d1ad586f9517"
+rev = "2c38570a25a3bc81a3754b7086b11f4680acd127"

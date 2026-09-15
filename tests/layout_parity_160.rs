@@ -25,7 +25,7 @@ use percolator_nft::slab_types_v16::PortfolioAccountV16Account as MirrorPortfoli
 
 #[test]
 fn mirror_total_size_matches_the_engine() {
-    // The headline number. `EXPECTED_PORTFOLIO_ACCOUNT_SIZE` is 9227 and is asserted
+    // The headline number. `EXPECTED_PORTFOLIO_ACCOUNT_SIZE` is 9419 and is asserted
     // against the mirror at compile time — here it is asserted against the thing it
     // is supposed to describe.
     assert_eq!(
@@ -71,6 +71,89 @@ fn every_field_the_nft_program_reads_sits_at_the_same_offset() {
         offset_of!(MirrorPortfolio, capital),
         offset_of!(EnginePortfolio, capital),
         "`capital` offset drift — position valuation reads this"
+    );
+    // N-1: the three fields above all sit BEFORE every layout-18 insertion, so
+    // they still agreed while the mirror was 192 B short and `legs`,
+    // `stale_state` and `liquidation_lock` were all wrong. Only
+    // `mirror_total_size_matches_the_engine` caught it. A test named "every
+    // field the NFT program reads" that omits the transfer gate's own fields is
+    // the vacuity this file exists to prevent, so pin them too.
+    assert_eq!(
+        offset_of!(MirrorPortfolio, legs),
+        offset_of!(EnginePortfolio, legs),
+        "`legs` offset drift — active_leg_slot_for_asset, the market_id slot-reuse \
+         anchor and epoch_snap_at_mint are all read through this array"
+    );
+    assert_eq!(
+        offset_of!(MirrorPortfolio, stale_state),
+        offset_of!(EnginePortfolio, stale_state),
+        "`stale_state` offset drift — a transfer gate flag"
+    );
+    assert_eq!(
+        offset_of!(MirrorPortfolio, b_stale_state),
+        offset_of!(EnginePortfolio, b_stale_state),
+        "`b_stale_state` offset drift — a transfer gate flag"
+    );
+    assert_eq!(
+        offset_of!(MirrorPortfolio, liquidation_lock),
+        offset_of!(EnginePortfolio, liquidation_lock),
+        "`liquidation_lock` offset drift — a transfer gate flag"
+    );
+    assert_eq!(
+        offset_of!(MirrorPortfolio, rebalance_lock),
+        offset_of!(EnginePortfolio, rebalance_lock),
+        "`rebalance_lock` offset drift — a transfer gate flag"
+    );
+    assert_eq!(
+        offset_of!(MirrorPortfolio, close_progress),
+        offset_of!(EnginePortfolio, close_progress),
+        "`close_progress` offset drift — close_in_progress_for_asset reads this"
+    );
+    assert_eq!(
+        offset_of!(MirrorPortfolio, resolved_payout_receipt),
+        offset_of!(EnginePortfolio, resolved_payout_receipt),
+        "`resolved_payout_receipt` offset drift — the settled-position gate reads this"
+    );
+}
+
+/// The leg is the sub-struct layout 18 actually changed, and the NFT reads four
+/// of its fields. Pin its size and those offsets against the engine: a leg that
+/// is the wrong SIZE shifts every leg after slot 0 as well as `source_domains`
+/// and everything past it, which is how 128 of the 192 drifted bytes arose.
+#[test]
+fn every_leg_field_the_nft_program_reads_sits_at_the_same_offset() {
+    use percolator::PortfolioLegV16Account as EngineLeg;
+    use percolator_nft::slab_types_v16::PortfolioLegV16Account as MirrorLeg;
+    assert_eq!(
+        size_of::<MirrorLeg>(),
+        size_of::<EngineLeg>(),
+        "leg size drift — shifts every leg after slot 0 and the whole tail"
+    );
+    assert_eq!(
+        align_of::<MirrorLeg>(),
+        align_of::<EngineLeg>(),
+        "leg alignment drift"
+    );
+    assert_eq!(
+        offset_of!(MirrorLeg, active),
+        offset_of!(EngineLeg, active),
+        "`leg.active` offset drift — the eligibility scan reads this"
+    );
+    assert_eq!(
+        offset_of!(MirrorLeg, asset_index),
+        offset_of!(EngineLeg, asset_index),
+        "`leg.asset_index` offset drift — the eligibility scan matches on this"
+    );
+    assert_eq!(
+        offset_of!(MirrorLeg, market_id),
+        offset_of!(EngineLeg, market_id),
+        "`leg.market_id` offset drift — this is the slot-reuse anchor"
+    );
+    assert_eq!(
+        offset_of!(MirrorLeg, epoch_snap),
+        offset_of!(EngineLeg, epoch_snap),
+        "`leg.epoch_snap` offset drift — snapshotted at mint and logged by valuation; \
+         layout 18 moved it 78 -> 86 by inserting kf_epoch_snap ahead of it"
     );
 }
 
