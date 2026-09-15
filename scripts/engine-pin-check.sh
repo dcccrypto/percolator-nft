@@ -179,28 +179,35 @@ ${LSR}"
     if [ "$SHA_ENGINE" = "$REMOTE_TIP" ]; then
       printf '  default-branch check   OK -- HEAD == origin/%s tip %s\n' "$DEFAULT_BRANCH" "$REMOTE_TIP"
     else
-      # Tolerated, and ONLY this: HEAD is on the default branch but behind its tip, which is
-      # what a push to the engine between our checkout step and this line looks like. The
-      # engine takes ~20 commits a day, a job runs for minutes, so demanding exact equality
-      # here would go red a few percent of the time for no defect -- and a guard that is red
-      # for no reason is a guard that gets switched off. Being ON the branch is the property;
-      # combined with the "no ref:" check above it means HEAD WAS the tip at checkout time.
+      # STRICT. Not "on the branch somewhere" -- equal to the tip. An engine checkout seven
+      # commits behind the tip is precisely the silent-green this job exists to remove: the
+      # independent verifier demonstrated it (detached at 2c38570a, seven behind, reported
+      # `ancestry ok / layout=ok / OK: the vendored mirror matches the engine percolator-prog
+      # ships` and exited 0 -- green against the wrong commit). An ancestry-only check would
+      # print a note and still exit 0, i.e. a quieter version of the same thing.
+      #
+      # The known benign cause is a push to the engine between the checkout step and this
+      # line. It is named in the message so the reader re-runs instead of investigating; a
+      # re-run is cheap, and a guard that is occasionally loud for a good reason is worth
+      # much more than one that is quietly wrong.
+      ADVICE="this is what a push to the engine between the checkout step and now looks like;
+    re-run the job and it will clear."
       git -C "$ENGINE_REPO" cat-file -e "${REMOTE_TIP}^{commit}" 2>/dev/null \
         || git -C "$ENGINE_REPO" fetch --no-tags --quiet origin "$DEFAULT_BRANCH" >/dev/null 2>&1 || true
-      git -C "$ENGINE_REPO" cat-file -e "${REMOTE_TIP}^{commit}" 2>/dev/null \
-        || die "the engine remote's default branch tip ${REMOTE_TIP} could not be fetched, so
-    whether this checkout is on that branch cannot be decided."
-      git -C "$ENGINE_REPO" merge-base --is-ancestor "$SHA_ENGINE" "$REMOTE_TIP" 2>/dev/null \
-        || die "the engine checkout is NOT on the remote's default branch.
-    HEAD             ${SHA_ENGINE}
+      if git -C "$ENGINE_REPO" cat-file -e "${REMOTE_TIP}^{commit}" 2>/dev/null \
+         && git -C "$ENGINE_REPO" merge-base --is-ancestor "$SHA_ENGINE" "$REMOTE_TIP" 2>/dev/null; then
+        RELATION="HEAD is on origin/${DEFAULT_BRANCH} but $(git -C "$ENGINE_REPO" rev-list --count "${SHA_ENGINE}..${REMOTE_TIP}") commit(s) behind its tip --
+    ${ADVICE}
+    If a re-run does not clear it, this checkout is stale and every number below would be a
+    measurement of an engine the wrapper has already moved past."
+      else
+        RELATION="HEAD is not even an ancestor of that tip, so this checkout is some other
+    branch, a fork, or a rebased-away commit -- not the engine percolator-prog compiles."
+      fi
+      die "the engine checkout is NOT the remote's default-branch tip.
+    HEAD                          ${SHA_ENGINE}
     origin/${DEFAULT_BRANCH} tip  ${REMOTE_TIP}
-    HEAD is not an ancestor of it, so this checkout is some other branch, a fork, or a
-    rebased-away commit -- not the engine percolator-prog compiles. Everything this job
-    would print below would be a measurement against the wrong engine."
-      printf '  default-branch check   HEAD is %s commit(s) behind origin/%s (%s)\n' \
-        "$(git -C "$ENGINE_REPO" rev-list --count "${SHA_ENGINE}..${REMOTE_TIP}")" \
-        "$DEFAULT_BRANCH" "$REMOTE_TIP"
-      printf '                         -- on the branch, so the branch advanced mid-run; measuring HEAD.\n'
+    ${RELATION}"
     fi
   fi
 else
