@@ -30,16 +30,32 @@
 //! stores it as:
 //!
 //! ```text
-//!   [ 16-byte wrapper header ][ PortfolioAccountV16Account (9419 B) ][ inline matcher cfg tail ]
-//!     MAGIC u64 @0                fixed head                           104 B, ignored by NFT
+//!   [ 16-byte wrapper header ][ PortfolioAccountV16Account (9419 B) ][ inline matcher cfg tail ][ identity trailer ]
+//!     MAGIC u64 @0                fixed head                           104 B, ignored by NFT       24 B, ignored by NFT
 //!     VERSION u16 @8              starts at HEADER_LEN=16
 //!     kind   u8  @10
 //! ```
 //!
 //! (percolator-prog `PORTFOLIO_ACCOUNT_LEN` = 16 + 9419 + 104 = 9539 at layout 18.)
 //!
+//! **TB-1a portfolio-identity trailer (percolator-prog `sync/integration-v16`
+//! @ `a9318945`, `v16_program.rs:389-421`)**: three `u64` fields
+//! (`portfolio_id`, `expected_sequence`/`matcher_sequence`, `matcher_expiry_slot`)
+//! APPENDED after the existing 104-byte matcher-config tail — no existing field
+//! moves, the matcher config itself does not move, and the engine POD
+//! (`PortfolioAccountV16Account`, this file's byte-exact mirror) is untouched.
+//! `PORTFOLIO_ACCOUNT_LEN` grows 9539 -> **9563** (+24 B), entirely past the
+//! byte range `decode_portfolio` reads (see below), so NO OFFSET IN THIS FILE
+//! CHANGES. `decode_portfolio`'s only total-length check (`TooShort`, an
+//! inequality) already accepts any account `>= HEADER_LEN +
+//! EXPECTED_PORTFOLIO_ACCOUNT_SIZE`, so a 9563-byte account is accepted exactly
+//! as a 9539-byte one was — verified by
+//! `tests::decode_accepts_9563_byte_account_with_identity_trailer` below.
+//!
 //! [`decode_portfolio`] reads `HEADER_LEN .. HEADER_LEN + EXPECTED_PORTFOLIO_ACCOUNT_SIZE`
 //! (16 .. 9435) and bytemuck-casts it — field access by name removes all hand-computed offsets.
+//! Any bytes at or beyond 9435 (the 104 B matcher-config tail, and now the 24 B
+//! identity trailer past it) are ignored.
 //!
 //! ## BPF / host byte-identity
 //!
@@ -844,6 +860,71 @@ mod tests {
         assert_eq!(slot, 3);
         assert_eq!(acct.legs[slot].market_id.get(), 42);
         assert!(acct.active_leg_slot_for_asset(10).is_none());
+    }
+
+    /// TB-1a (percolator-prog `sync/integration-v16` @ `a9318945`,
+    /// `v16_program.rs:389-421`): the wrapper appends a 24 B portfolio-identity
+    /// trailer (`portfolio_id: u64`, `expected_sequence: u64`,
+    /// `matcher_expiry_slot: u64`) AFTER the existing 104 B matcher-config tail,
+    /// growing the on-chain account `PORTFOLIO_ACCOUNT_LEN` 9539 -> 9563. No
+    /// existing field moves and the engine POD this file mirrors is untouched —
+    /// `decode_portfolio` reads only `HEADER_LEN..HEADER_LEN+
+    /// EXPECTED_PORTFOLIO_ACCOUNT_SIZE` (16..9435), strictly before both the
+    /// matcher-config tail (9435..9539) and the new trailer (9539..9563).
+    ///
+    /// This builds a full 9563-byte account exactly as `a9318945` lays it out
+    /// — header + POD + 104 B matcher-config tail + 24 B identity trailer,
+    /// the trailer filled with non-zero sentinel bytes to prove they are
+    /// truly inert — and confirms: (1) the account is ACCEPTED (the `TooShort`
+    /// gate is `<`, not `==`, so it does not reject the "wrong" size), and
+    /// (2) every field the NFT's mint/burn/transfer-gate path reads (`owner`,
+    /// `active_leg_slot_for_asset` -> `market_id`, i.e. what `mint_leg_slot`
+    /// and `verify_bound_leg` consume) still decodes correctly. Proves the
+    /// +24B trailer is a pure tail-append that shifts nothing this decoder
+    /// touches.
+    #[test]
+    fn decode_accepts_9563_byte_account_with_identity_trailer() {
+        let owner = [9u8; 32];
+        let mut acct = empty_account();
+        acct.provenance_header.owner = owner;
+        acct.provenance_header.version = V16PodU16::new(V16_ACCOUNT_VERSION);
+        acct.provenance_header.layout_discriminator = V16PodU16::new(V16_LAYOUT_DISCRIMINATOR);
+        acct.owner = owner;
+        acct.legs[5].active = 1;
+        acct.legs[5].asset_index = V16PodU32::new(11);
+        acct.legs[5].market_id = V16PodU64::new(4242);
+
+        const MATCHER_CONFIG_TAIL_LEN: usize = 104;
+        const IDENTITY_TRAILER_LEN: usize = 24; // portfolio_id + expected_sequence + matcher_expiry_slot
+        let total_len = HEADER_LEN + EXPECTED_PORTFOLIO_ACCOUNT_SIZE
+            + MATCHER_CONFIG_TAIL_LEN
+            + IDENTITY_TRAILER_LEN;
+        assert_eq!(total_len, 9563, "must match a9318945 PORTFOLIO_ACCOUNT_LEN");
+
+        let mut buf = vec![0u8; total_len];
+        buf[0..8].copy_from_slice(&MAGIC.to_le_bytes());
+        buf[8..10].copy_from_slice(&VERSION.to_le_bytes());
+        buf[10] = KIND_PORTFOLIO;
+        let body = bytemuck::bytes_of(&acct);
+        buf[HEADER_LEN..HEADER_LEN + body.len()].copy_from_slice(body);
+        // Matcher-config tail: non-zero sentinel, must be ignored.
+        let config_off = HEADER_LEN + EXPECTED_PORTFOLIO_ACCOUNT_SIZE;
+        buf[config_off..config_off + MATCHER_CONFIG_TAIL_LEN].fill(0xAB);
+        // Identity trailer: non-zero sentinel u64s at the exact a9318945 offsets
+        // (portfolio_id, then expected_sequence, then matcher_expiry_slot),
+        // must also be ignored.
+        let trailer_off = config_off + MATCHER_CONFIG_TAIL_LEN;
+        buf[trailer_off..trailer_off + 8].copy_from_slice(&777u64.to_le_bytes()); // portfolio_id
+        buf[trailer_off + 8..trailer_off + 16].copy_from_slice(&888u64.to_le_bytes()); // expected_sequence
+        buf[trailer_off + 16..trailer_off + 24].copy_from_slice(&999u64.to_le_bytes()); // matcher_expiry_slot
+
+        let acct = decode_portfolio(&buf).expect("a 9563-byte account (with trailer) must decode");
+        assert_eq!(acct.owner(), owner);
+        let slot = acct
+            .active_leg_slot_for_asset(11)
+            .expect("mint_leg_slot's underlying scan must still find the leg");
+        assert_eq!(slot, 5);
+        assert_eq!(acct.legs[slot].market_id.get(), 4242);
     }
 
     #[test]
