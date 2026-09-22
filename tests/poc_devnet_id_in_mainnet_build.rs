@@ -40,9 +40,10 @@ const NFT_MINT: Pubkey = Pubkey::new_from_array([0x11; 32]);
 const SRC_ATA: Pubkey = Pubkey::new_from_array([0x71; 32]);
 const DST_ATA: Pubkey = Pubkey::new_from_array([0x72; 32]);
 /// The devnet wrapper id as a literal, so these tests can name it without
-/// depending on the gated constant existing in this build.
+/// depending on the gated constant existing in this build. v18 fresh-ID
+/// redeploy (2026-09-22): tracks `PERCOLATOR_DEVNET`'s new address.
 const DEVNET_WRAPPER_ID: Pubkey =
-    solana_program::pubkey!("DhSkE7uTb8HBUYYWF1xkxMYBGtLYJEoDq1tfBD7SnHcj");
+    solana_program::pubkey!("GnwdeQrAh4qzChJeVLrM21CXXWC1akjLH3DiijwzEEYZ");
 
 const ASSET_INDEX: u32 = 7;
 const MARKET_ID: u64 = 42;
