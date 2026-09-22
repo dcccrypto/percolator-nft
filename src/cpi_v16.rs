@@ -96,9 +96,13 @@ pub const PERCOLATOR_MAINNET: Pubkey =
 /// left on a mainnet allowlist is a standing grant to whoever holds that key.
 /// percolator-stake gates this same pair of ids the same way; percolator-prog
 /// documents the rule on its own `devnet` feature.
+///
+/// v18 coordinated fresh-ID redeploy (2026-09-22): the wrapper moves to a
+/// brand-new program address so no pre-existing v17 account survives under it.
+/// The prior devnet wrapper (`DhSkE7u…`, v17) is abandoned, not trusted.
 #[cfg(feature = "devnet")]
 pub const PERCOLATOR_DEVNET: Pubkey =
-    solana_program::pubkey!("DhSkE7uTb8HBUYYWF1xkxMYBGtLYJEoDq1tfBD7SnHcj");
+    solana_program::pubkey!("GnwdeQrAh4qzChJeVLrM21CXXWC1akjLH3DiijwzEEYZ");
 
 /// Verify the portfolio account is owned by a known Percolator wrapper program.
 /// Fail-closed: anything not on the allowlist is rejected. (v16 analog of v12
