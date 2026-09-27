@@ -90,6 +90,26 @@ percolator-nft (this program)
 - **GetPositionValue is fail-CLOSED**: every non-transferable condition returns
   errors, not `Ok(())`. Clients using `simulateTransaction` must check the error.
 
+### Burned-mint identity (integrator note, #184 item 3.3)
+
+Burn paths (`BurnPositionNft`, `EmergencyBurn`, `ReconcileBurnedNft`) close the
+mint via Token-2022 `close_account`, returning its rent. The mint keypair was
+generated client-side as a **fresh signer keypair** at `MintPositionNft` time
+(account 2). Solana close semantics mean whoever still holds that keypair — the
+original minter, **not necessarily the last holder** — can re-create an account
+at the same mint address afterwards, with themselves as mint and freeze
+authority, optionally carrying identical `Percolator Position` metadata.
+
+There is **no on-chain consequence**: the `PositionNft` PDA is keyed on
+`market_id` (strictly monotonic, never reused — #108), and `MintPositionNft`
+re-verifies the full provenance chain, so a re-created mint satisfies no
+program check. The exposure is off-chain only:
+
+> Indexers, marketplaces and UIs must NOT treat a mint address as durable
+> identity for a burned position. Key burned-position records on the
+> `PositionNft` PDA (or `market_id`), and treat any token supply that appears
+> at a previously burned mint address as untrusted look-alike data.
+
 ### GetPositionValue log contract
 
 The instruction returns nothing via CPI, so its logs are its API. Every response
