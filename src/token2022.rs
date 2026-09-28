@@ -237,8 +237,12 @@ pub const INITIALIZE_METADATA_POINTER_IX_LEN: usize = 66;
 ///   bytes 2..34  : authority        (OptionalNonZeroPubkey, 32 bytes, no option flag)
 ///   bytes 34..66 : metadata_address (OptionalNonZeroPubkey, 32 bytes, no option flag)
 ///
-/// Total: 66 bytes. A zero Pubkey encodes `None`; callers pass real PDA
-/// pubkeys so both fields are always `Some`.
+/// Total: 66 bytes. A zero Pubkey encodes `None`.
+///
+/// #184 (3.1): the mint path deliberately passes the ZERO pubkey as `authority`,
+/// making the pointer immutable. The previous wording here — "callers pass real PDA
+/// pubkeys so both fields are always `Some`" — is no longer true and was the reason
+/// the gratuitous authority went unnoticed.
 pub fn initialize_metadata_pointer(
     mint: &Pubkey,
     authority: &Pubkey,
