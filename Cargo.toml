@@ -44,6 +44,16 @@ blake3 = { git = "https://github.com/BLAKE3-team/BLAKE3", tag = "1.5.5" }
 crate-type = ["cdylib", "lib"]
 
 [dev-dependencies]
+# #184 (3.2): tests/mint_sizing_184_3_2.rs drives the REAL Token-2022 program under
+# LiteSVM to prove the mint path's account sizes are exact. litesvm 0.7 (NOT 0.6:
+# 0.6's runtime pins solana-account-info =2.2.1, which lacks the AccountInfo::resize
+# this crate uses). Individual solana-* crates rather than solana-sdk, for the same reason.
+litesvm = "0.7"
+solana-keypair = "2.2"
+solana-signer = "2.2"
+solana-transaction = "2.2"
+solana-rent = "2.2"
+solana-system-interface = { version = "1", features = ["bincode"] }
 
 # GH#160 — the REAL engine, pinned, so the vendored mirror in slab_types_v16.rs can
 # be checked against the layout it claims to mirror.
