@@ -211,6 +211,35 @@ const MINT_BASE_SIZE: u64 = 165;
 /// AccountType discriminator byte between base Mint data and TLV extensions.
 const ACCOUNT_TYPE_SIZE: u64 = 1;
 
+/// Token-metadata symbol written on every position NFT.
+pub const NFT_SYMBOL: &str = "PERC-POS";
+
+/// #184 (3.2): the two sizes the mint path allocates, as one pure function so a
+/// test can check them against the REAL Token-2022 program
+/// (`tests/mint_sizing_184_3_2.rs`) instead of trusting the arithmetic.
+///
+/// Returns `(mint_space, metadata_tlv_size)`:
+/// - `mint_space`: base Mint padded to the Account size (165), plus the AccountType
+///   byte, plus the three pre-mint extensions (MetadataPointer, TransferHook,
+///   MintCloseAuthority), each a `type(2) + length(2) + value` TLV. The account
+///   MUST be created at exactly this size. `InitializeMint2` requires the data
+///   length to equal the length implied by the initialized extensions, so any
+///   slack (the old `+ 128`) makes it fail with `InvalidAccountData`.
+/// - `metadata_tlv_size`: the embedded TokenMetadata TLV that
+///   `initialize_token_metadata` reallocs in afterwards. `type(2) + length(2) +
+///   update_authority(32) + mint(32) + name/symbol/uri (4-byte length prefix + bytes
+///   each) + additional_metadata (4-byte empty-vec length)`.
+pub fn mint_account_sizes(name: &str, symbol: &str, uri: &str) -> (u64, usize) {
+    let mint_space: u64 = MINT_BASE_SIZE
+        + ACCOUNT_TYPE_SIZE
+        + token2022::METADATA_POINTER_EXTENSION_SIZE
+        + token2022::TRANSFER_HOOK_EXTENSION_SIZE
+        + token2022::MINT_CLOSE_AUTHORITY_EXTENSION_SIZE;
+    let metadata_tlv_size: usize =
+        4 + 32 + 32 + (4 + name.len()) + (4 + symbol.len()) + (4 + uri.len()) + 4;
+    (mint_space, metadata_tlv_size)
+}
+
 /// percolator-prog `state::HEADER_LEN`: the 16-byte account header precedes the
 /// `NftRegistryV16` POD. (Same value already used locally for RepairExtraMetas.)
 const CORE_HEADER_LEN: usize = 16;
@@ -488,52 +517,29 @@ fn process_mint_position_nft(
     // ── Build metadata strings ──
     let direction = if snap_side == 0 { "LONG" } else { "SHORT" };
     let nft_name = alloc::format!("Percolator Position \u{2014} {}", direction);
-    const NFT_SYMBOL: &str = "PERC-POS";
     let nft_uri = "";
 
     // ── Create Token-2022 mint account ──
-    let mint_space: u64 = MINT_BASE_SIZE
-        + ACCOUNT_TYPE_SIZE
-        + token2022::METADATA_POINTER_EXTENSION_SIZE
-        + token2022::TRANSFER_HOOK_EXTENSION_SIZE
-        + token2022::MINT_CLOSE_AUTHORITY_EXTENSION_SIZE;
-    let metadata_tlv_size: usize = {
-        let name_len = 4 + nft_name.len();
-        let symbol_len = 4 + NFT_SYMBOL.len();
-        let uri_len = 4 + nft_uri.len();
-        4 + 32 + 32 + name_len + symbol_len + uri_len + 4
-    };
-    // #184 (3.2) NOT TAKEN — and the reason matters more than the 128 bytes.
-    //
-    // The report proposes dropping this slack, on the grounds that "both size
-    // terms are exact against `try_calculate_account_len` and `get_packed_len`".
-    // `metadata_tlv_size` is NOT computed that way: it is hand-rolled directly
-    // above as `4 + 32 + 32 + name_len + symbol_len + uri_len + 4`. If that
-    // arithmetic is off by a single byte, removing the slack turns every mint
-    // into AccountDataTooSmall — and #115 records that this already happened once,
-    // when only `mint_space` was allocated.
-    //
-    // There is no LiteSVM mint test to catch it either, so the change would ship
-    // unverified. The cost of keeping it is 890,880 lamports per NFT, RECOVERED at
-    // burn (the close sweeps the whole balance to the holder) — lockup, not loss.
-    // Trading a recoverable lockup for a chance of bricking minting is the wrong
-    // way round.
-    //
-    // To take it properly: replace the hand-rolled arithmetic with the real
-    // `get_packed_len`, and add a mint test. Then the slack is provably redundant
-    // rather than assumed to be.
-    let final_size = mint_space as usize + metadata_tlv_size + 128;
-    let mint_rent = rent.minimum_balance(final_size);
-    // #115: allocate `final_size` bytes (not just `mint_space`), because
-    // `mint_rent = rent.minimum_balance(final_size)` already pays for the
-    // full extent — allocating only `mint_space` here would cause the
-    // token-metadata TLV init to fail with AccountDataTooSmall.
+    let (mint_space, metadata_tlv_size) = mint_account_sizes(&nft_name, NFT_SYMBOL, nft_uri);
+    // Correct Token-2022 embedded-metadata-on-mint pattern (re-fixes #115, which
+    // was accidentally re-broken by a stale revert): `InitializeMint2` rejects the
+    // mint with `InvalidAccountData` if any uninitialized/zeroed bytes follow the
+    // three already-initialized pre-mint extensions (metadata pointer, transfer
+    // hook, mint-close-authority) — it tries to parse the trailing padding as a
+    // TLV entry. So the account MUST be created at EXACTLY `mint_space` (no
+    // metadata region, no slack) so `InitializeMint2` passes its scan. The
+    // metadata TLV is added AFTER `InitializeMint2` via `initialize_token_metadata`,
+    // which reallocs the account in-place; we pre-fund the extra rent-exempt
+    // lamports it needs for that larger `final_size` via a system transfer first.
+    let mint_space_rent = rent.minimum_balance(mint_space as usize);
+    let final_size = mint_space as usize + metadata_tlv_size;
+    let final_size_rent = rent.minimum_balance(final_size);
     invoke(
         &system_instruction::create_account(
             owner.key,
             nft_mint.key,
-            mint_rent,
-            final_size as u64,
+            mint_space_rent,
+            mint_space,
             &token2022::TOKEN_2022_PROGRAM_ID,
         ),
         &[owner.clone(), nft_mint.clone(), system_program.clone()],
@@ -575,17 +581,39 @@ fn process_mint_position_nft(
         std::slice::from_ref(nft_mint),
     )?;
 
+    // Pre-fund the mint account with the extra lamports needed for the metadata
+    // TLV realloc that token_metadata::Initialize performs in-place. This transfer
+    // is the SOLE funding path: Token-2022's Initialize handler reallocs but does
+    // NOT top up lamports itself (it assumes rent-exemption already holds), so this
+    // must run BEFORE the CPI below. The owner (payer) transfers the difference
+    // between the rent-exempt minimum for the full final size and what was
+    // deposited at create_account time above. Fail-closed: an under-fund reverts
+    // the tx on the end-of-tx rent invariant rather than losing funds silently.
+    let lamport_top_up = final_size_rent
+        .checked_sub(mint_space_rent)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
+    invoke(
+        &system_instruction::transfer(owner.key, nft_mint.key, lamport_top_up),
+        &[owner.clone(), nft_mint.clone(), system_program.clone()],
+    )?;
+
     let mint_auth_seeds: &[&[u8]] = &[MINT_AUTHORITY_SEED, &[mint_auth_bump]];
     invoke_signed(
         &token2022::initialize_token_metadata(
             nft_mint.key,
             mint_auth.key,
             mint_auth.key,
+            owner.key,
             &nft_name,
             NFT_SYMBOL,
             nft_uri,
         ),
-        &[nft_mint.clone(), mint_auth.clone()],
+        &[
+            nft_mint.clone(),
+            mint_auth.clone(),
+            owner.clone(),
+            system_program.clone(),
+        ],
         &[mint_auth_seeds],
     )?;
 
@@ -896,18 +924,27 @@ fn validate_nft_registry(
     // (a) canonical per-market PDA
     let (expected_registry, _) = cpi_v16::derive_nft_registry(percolator_prog_id, market_group);
     if *nft_registry.key != expected_registry {
-        msg!("{}: nft_registry is not the canonical per-market PDA (#109/#184)", ctx);
+        msg!(
+            "{}: nft_registry is not the canonical per-market PDA (#109/#184)",
+            ctx
+        );
         return Err(NftError::RegistryNotConfigured.into());
     }
     // (b) owned by the wrapper that owns the portfolio
     if *nft_registry.owner != *percolator_prog_id {
-        msg!("{}: nft_registry not owned by the percolator program (#109/#184)", ctx);
+        msg!(
+            "{}: nft_registry not owned by the percolator program (#109/#184)",
+            ctx
+        );
         return Err(NftError::RegistryNotConfigured.into());
     }
     // (c)+(d) length-guarded read; must register THIS nft program
     let registry_data = nft_registry.try_borrow_data()?;
     if !registry_registers_program(&registry_data, program_id) {
-        msg!("{}: nft_registry missing/short or registers a different NFT program (#109/#184)", ctx);
+        msg!(
+            "{}: nft_registry missing/short or registers a different NFT program (#109/#184)",
+            ctx
+        );
         return Err(NftError::RegistryNotConfigured.into());
     }
     Ok(())
@@ -978,7 +1015,7 @@ fn process_burn_position_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
         msg!("Burn rejected: nft_mint does not match PDA's recorded mint");
         return Err(NftError::InvalidNftPda.into());
     }
-    let asset_index_u16 = nft_state.asset_index.get() as u16;
+    let asset_index = nft_state.asset_index.get();
     let market_id_at_mint = nft_state.market_id_at_mint.get();
     // Take a copy for the slot-reuse check below.
     let nft_state_copy = *nft_state;
@@ -1091,7 +1128,7 @@ fn process_burn_position_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
     msg!(
         "PositionNft burned: portfolio={}, asset_index={}",
         portfolio.key,
-        asset_index_u16
+        asset_index
     );
     Ok(())
 }
@@ -1152,7 +1189,7 @@ fn process_emergency_burn(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
     }
 
     // ── Read and validate PositionNftV16 state ──
-    let (asset_index_u16, market_id_at_mint, nft_state_copy) = {
+    let (asset_index, market_id_at_mint, nft_state_copy) = {
         let pda_data = nft_pda.try_borrow_data()?;
         if pda_data.len() < POSITION_NFT_V16_LEN {
             return Err(ProgramError::InvalidAccountData);
@@ -1167,7 +1204,7 @@ fn process_emergency_burn(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
             return Err(NftError::InvalidNftPda.into());
         }
         (
-            nft_state.asset_index.get() as u16,
+            nft_state.asset_index.get(),
             nft_state.market_id_at_mint.get(),
             *nft_state,
         )
@@ -1273,24 +1310,24 @@ fn process_emergency_burn(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
     // skip the CPI and proceed to burn + reclaim the NFT-side rent.
     if !portfolio_gone {
         verify_percolator_prog_account(percolator_prog, portfolio)?;
-    // #184 (2.2): registry validation is DELIBERATELY NOT done here.
-    //
-    // The audit proposed making these sites symmetric with mint, which validates
-    // the registry three ways. That is right for the normal burn path and wrong
-    // here: this is a RECOVERY path. Its whole purpose is releasing a position
-    // that is already stranded — an out-of-band Token-2022 burn, or a portfolio
-    // the core already closed. Requiring a healthy registry would convert
-    // "stranded but recoverable" into "stranded permanently", bricking exactly
-    // the positions this instruction exists to rescue.
-    //
-    // Adding the check here failed two existing tests, which is how this was
-    // caught: their fixtures build an empty registry precisely because recovery
-    // must not depend on one.
-    //
-    // Safety does not rest on the registry in any case: the CPI signer `mint_auth`
-    // is a pinned PDA of this program, and any wrapper-side check keyed on
-    // `registry.nft_program_id` rejects a foreign registry at the callee. The
-    // asymmetry with mint is intentional, not drift.
+        // #184 (2.2): registry validation is DELIBERATELY NOT done here.
+        //
+        // The audit proposed making these sites symmetric with mint, which validates
+        // the registry three ways. That is right for the normal burn path and wrong
+        // here: this is a RECOVERY path. Its whole purpose is releasing a position
+        // that is already stranded — an out-of-band Token-2022 burn, or a portfolio
+        // the core already closed. Requiring a healthy registry would convert
+        // "stranded but recoverable" into "stranded permanently", bricking exactly
+        // the positions this instruction exists to rescue.
+        //
+        // Adding the check here failed two existing tests, which is how this was
+        // caught: their fixtures build an empty registry precisely because recovery
+        // must not depend on one.
+        //
+        // Safety does not rest on the registry in any case: the CPI signer `mint_auth`
+        // is a pinned PDA of this program, and any wrapper-side check keyed on
+        // `registry.nft_program_id` rejects a foreign registry at the callee. The
+        // asymmetry with mint is intentional, not drift.
 
         cpi_unwrap_portfolio(
             percolator_prog,
@@ -1334,7 +1371,7 @@ fn process_emergency_burn(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
     msg!(
         "PositionNft emergency burned: portfolio={}, asset_index={}",
         portfolio.key,
-        asset_index_u16
+        asset_index
     );
     Ok(())
 }
@@ -1592,7 +1629,7 @@ fn process_settle_funding(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
     }
 
     // ── Verify PDA address matches expected derivation (#108: market_id) ──
-    let asset_index_u16 = nft_state.asset_index.get() as u16;
+    let asset_index = nft_state.asset_index.get();
     let market_id_at_mint = nft_state.market_id_at_mint.get();
     let (expected_pda, _) = position_nft_pda(portfolio.key, market_id_at_mint, program_id);
     if *nft_pda.key != expected_pda {
@@ -1625,7 +1662,7 @@ fn process_settle_funding(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
     msg!(
         "Funding settled: portfolio={}, asset_index={}",
         portfolio.key,
-        asset_index_u16
+        asset_index
     );
     Ok(())
 }
