@@ -41,9 +41,9 @@ const SRC_ATA: Pubkey = Pubkey::new_from_array([0x71; 32]);
 const DST_ATA: Pubkey = Pubkey::new_from_array([0x72; 32]);
 /// The devnet wrapper id as a literal, so these tests can name it without
 /// depending on the gated constant existing in this build. v18 fresh-ID
-/// redeploy (2026-09-22): tracks `PERCOLATOR_DEVNET`'s new address.
+/// redeploy (2026-09-22), re-moved 2026-09-29 (v18.3): tracks `PERCOLATOR_DEVNET`.
 const DEVNET_WRAPPER_ID: Pubkey =
-    solana_program::pubkey!("GnwdeQrAh4qzChJeVLrM21CXXWC1akjLH3DiijwzEEYZ");
+    solana_program::pubkey!("ETDLAdiAyWnEUngspYczTXUceT6X8f92eZQvr8nmSkWB");
 
 const ASSET_INDEX: u32 = 7;
 const MARKET_ID: u64 = 42;

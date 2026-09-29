@@ -100,9 +100,12 @@ pub const PERCOLATOR_MAINNET: Pubkey =
 /// v18 coordinated fresh-ID redeploy (2026-09-22): the wrapper moves to a
 /// brand-new program address so no pre-existing v17 account survives under it.
 /// The prior devnet wrapper (`DhSkE7u…`, v17) is abandoned, not trusted.
+///
+/// v18.3 fresh-ID redeploy (2026-09-29): moves again to `ETDLAdi…`; the v18.0-v18.2
+/// wrapper (`GnwdeQr…`) and its damaged markets are abandoned, not trusted.
 #[cfg(feature = "devnet")]
 pub const PERCOLATOR_DEVNET: Pubkey =
-    solana_program::pubkey!("GnwdeQrAh4qzChJeVLrM21CXXWC1akjLH3DiijwzEEYZ");
+    solana_program::pubkey!("ETDLAdiAyWnEUngspYczTXUceT6X8f92eZQvr8nmSkWB");
 
 /// Verify the portfolio account is owned by a known Percolator wrapper program.
 /// Fail-closed: anything not on the allowlist is rejected. (v16 analog of v12
