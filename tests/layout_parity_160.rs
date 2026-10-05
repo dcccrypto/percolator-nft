@@ -35,7 +35,7 @@ use percolator_nft::slab_types_v16::PortfolioAccountV16Account as MirrorPortfoli
 
 #[test]
 fn mirror_total_size_matches_the_engine() {
-    // The headline number. `EXPECTED_PORTFOLIO_ACCOUNT_SIZE` is 9419 and is asserted
+    // The headline number. `EXPECTED_PORTFOLIO_ACCOUNT_SIZE` is 9947 (v2.2 / layout 19) and is asserted
     // against the mirror at compile time — here it is asserted against the thing it
     // is supposed to describe.
     assert_eq!(
@@ -255,4 +255,17 @@ fn the_provenance_header_itself_matches() {
         offset_of!(EngineHeader, layout_discriminator),
         "`layout_discriminator` offset drift"
     );
+}
+
+/// v2.2 (layout 19): the four band/rent fields appended to every leg. The NFT does not
+/// read them, but they fix the leg stride, so pin each offset against the real engine.
+#[test]
+fn v22_appended_leg_fields_sit_at_the_same_offset_as_the_engine() {
+    use percolator::PortfolioLegV16Account as EngineLeg;
+    use percolator_nft::slab_types_v16::PortfolioLegV16Account as MirrorLeg;
+    assert_eq!(offset_of!(MirrorLeg, band_epoch_snap), offset_of!(EngineLeg, band_epoch_snap));
+    assert_eq!(offset_of!(MirrorLeg, band_liq_pending), offset_of!(EngineLeg, band_liq_pending));
+    assert_eq!(offset_of!(MirrorLeg, rent_snap), offset_of!(EngineLeg, rent_snap));
+    assert_eq!(offset_of!(MirrorLeg, rent_carry), offset_of!(EngineLeg, rent_carry));
+    assert_eq!(size_of::<MirrorLeg>(), 185);
 }

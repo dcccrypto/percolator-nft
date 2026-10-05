@@ -50,7 +50,7 @@
 //! inequality) already accepts any account `>= HEADER_LEN +
 //! EXPECTED_PORTFOLIO_ACCOUNT_SIZE`, so a 9563-byte account is accepted exactly
 //! as a 9539-byte one was — verified by
-//! `tests::decode_accepts_9563_byte_account_with_identity_trailer` below.
+//! `tests::decode_accepts_10091_byte_account_with_identity_trailer` below.
 //!
 //! [`decode_portfolio`] reads `HEADER_LEN .. HEADER_LEN + EXPECTED_PORTFOLIO_ACCOUNT_SIZE`
 //! (16 .. 9435) and bytemuck-casts it — field access by name removes all hand-computed offsets.
@@ -116,7 +116,19 @@ use core::mem::{align_of, offset_of, size_of};
 /// misread in practice only because the discriminator check fails closed first.
 /// Ships in the same flag day as percolator-prog `fix/W-19` and the full
 /// devnet re-seed.
-pub const LAYOUT_REVISION: u32 = 6;
+///
+/// Revision 7 (v2.2 Wave B): **engine layout 19** — 9947-byte
+/// `PortfolioAccountV16Account`, 185-byte `PortfolioLegV16Account`,
+/// `V16_LAYOUT_DISCRIMINATOR` 19. Engine `4ceac24a` appended
+/// `band_epoch_snap: u64`, `band_liq_pending: u8`, `rent_snap: u128` and
+/// `rent_carry: u64` (+33 B) to every leg (x16 legs = +528 B). Nothing is inserted
+/// before `legs`, so `legs` still starts at 340 and the NFT's own reads (`owner`,
+/// `provenance_header`, leg `active/asset_index/market_id/side/basis_pos_q/
+/// f_snap/epoch_snap`) keep their offsets; `source_domains`, `health_cert`,
+/// `stale_state`, `b_stale_state`, `rebalance_lock`, `liquidation_lock`,
+/// `close_progress` and `resolved_payout_receipt` all moved +528. Wrapper
+/// `PORTFOLIO_ACCOUNT_LEN` 9563 -> 10091.
+pub const LAYOUT_REVISION: u32 = 7;
 
 // ════════════════════════════════════════════════════════════════════════════
 // WRAPPER ACCOUNT HEADER — percolator-prog/src/v16_program.rs constants
@@ -149,7 +161,14 @@ pub const MAGIC: u64 = 0x5045_5243_5631_3600;
 /// both the DEPLOYED and the CANDIDATE pair, and an unlisted divergence is
 /// `exit 1` (`tests/KNOWN_PARITY_DIVERGENCE.txt` records the P5 deploy that
 /// shipped this axis diverged and killed every nft portfolio path on devnet).
-pub const VERSION: u16 = 18;
+///
+/// v2.2 (Wave B, wrapper `f576bffc` / engine `4ceac24a`): 18 -> 19, in lockstep with
+/// `percolator-prog` `v16_program::state::VERSION = 19` and
+/// `V16_LAYOUT_DISCRIMINATOR = 19`. The bump alone is NOT enough — see
+/// `LAYOUT_REVISION` 7: the leg grew 152 -> 185 B, so a mirror carrying only the two
+/// new constants would pass both gates and then misread every leg after slot 0 and
+/// the whole tail (`stale_state`, `liquidation_lock`, `close_progress`, ...).
+pub const VERSION: u16 = 19;
 /// Account-kind discriminant for a portfolio. Byte 10.
 pub const KIND_PORTFOLIO: u8 = 2;
 /// Bytes consumed by the wrapper header before the engine POD begins.
@@ -167,7 +186,7 @@ pub const HEADER_LEN: usize = 16;
 /// this for EXACT equality, so it is the SECOND gate — after [`VERSION`] — that
 /// a layout-18 portfolio must clear. Bumping `VERSION` alone leaves the NFT
 /// rejecting every real portfolio with `BadLayoutDiscriminator`.
-pub const V16_LAYOUT_DISCRIMINATOR: u16 = 18;
+pub const V16_LAYOUT_DISCRIMINATOR: u16 = 19;
 /// `ProvenanceHeaderV16.version` must equal this.
 pub const V16_ACCOUNT_VERSION: u16 = 1;
 /// Number of leg slots in a portfolio's `legs` array (V16_MAX_PORTFOLIO_ASSETS_N).
@@ -231,14 +250,17 @@ const _: () = assert!(V16_ACTIVE_BITMAP_WORDS * 64 >= V16_MAX_PORTFOLIO_ASSETS_N
 
 pub const EXPECTED_PROVENANCE_HEADER_SIZE: usize = 100;
 /// N-1: 144 -> 152. Layout 18 inserted `kf_epoch_snap: u64` at offset 78.
-pub const EXPECTED_PORTFOLIO_LEG_SIZE: usize = 152;
+/// v2.2 (layout 19): 152 -> 185, four fields APPENDED (offsets 152/160/161/177).
+pub const EXPECTED_PORTFOLIO_LEG_SIZE: usize = 185;
 pub const EXPECTED_SOURCE_DOMAIN_SIZE: usize = 196;
 pub const EXPECTED_HEALTH_CERT_SIZE: usize = 121;
 pub const EXPECTED_CLOSE_PROGRESS_SIZE: usize = 184;
 pub const EXPECTED_RESOLVED_PAYOUT_RECEIPT_SIZE: usize = 66;
 /// N-1: 9227 -> 9419. +192 B = the four `funding_*_atoms_total` counters
 /// (4 x 16 B) plus `kf_epoch_snap` in all 16 legs (16 x 8 B).
-pub const EXPECTED_PORTFOLIO_ACCOUNT_SIZE: usize = 9419;
+/// v2.2 (layout 19): 9419 -> 9947. +528 B = 33 B of band/rent state in each of the
+/// 16 legs. On-chain `PORTFOLIO_ACCOUNT_LEN` = 16 + 9947 + 104 + 24 = 10091.
+pub const EXPECTED_PORTFOLIO_ACCOUNT_SIZE: usize = 9947;
 
 // ════════════════════════════════════════════════════════════════════════════
 // POD SCALAR WRAPPERS — byte arrays, align 1 (percolator/src/v16.rs:3181-3255)
@@ -399,6 +421,14 @@ pub struct PortfolioLegV16Account {
     pub b_epoch_snap: V16PodU64,
     pub b_stale: u8,
     pub stale: u8,
+    /// v2.2 (layout 19): per-epoch price-band certification snapshot. APPENDED, so no
+    /// pre-existing leg offset moves; the NFT does not read it, but it is vendored
+    /// because it sets the leg STRIDE (185 B) that every leg after slot 0 and the
+    /// whole account tail depend on.
+    pub band_epoch_snap: V16PodU64,
+    pub band_liq_pending: u8,
+    pub rent_snap: V16PodU128,
+    pub rent_carry: V16PodU64,
 }
 
 const _: () = assert!(size_of::<PortfolioLegV16Account>() == EXPECTED_PORTFOLIO_LEG_SIZE);
@@ -414,6 +444,11 @@ const _: () = assert!(offset_of!(PortfolioLegV16Account, kf_epoch_snap) == 78);
 const _: () = assert!(offset_of!(PortfolioLegV16Account, epoch_snap) == 86);
 const _: () = assert!(offset_of!(PortfolioLegV16Account, b_stale) == 150);
 const _: () = assert!(offset_of!(PortfolioLegV16Account, stale) == 151);
+// v2.2 / layout 19: four fields appended after `stale` (+33 B, leg 152 -> 185).
+const _: () = assert!(offset_of!(PortfolioLegV16Account, band_epoch_snap) == 152);
+const _: () = assert!(offset_of!(PortfolioLegV16Account, band_liq_pending) == 160);
+const _: () = assert!(offset_of!(PortfolioLegV16Account, rent_snap) == 161);
+const _: () = assert!(offset_of!(PortfolioLegV16Account, rent_carry) == 177);
 
 // ════════════════════════════════════════════════════════════════════════════
 // PortfolioSourceDomainV16Account — percolator/src/v16.rs:14842
@@ -611,16 +646,16 @@ const _: () = assert!(offset_of!(PortfolioAccountV16Account, last_fee_slot) == 3
 const _: () = assert!(offset_of!(PortfolioAccountV16Account, active_bitmap) == 332);
 // legs at 340 (was 276 before the funding_* insertion)
 const _: () = assert!(offset_of!(PortfolioAccountV16Account, legs) == 340);
-// source_domains: 340 + 152*16 = 340 + 2432 = 2772
-const _: () = assert!(offset_of!(PortfolioAccountV16Account, source_domains) == 2772);
-// health_cert: 2772 + 196*32 = 2772 + 6272 = 9044
-const _: () = assert!(offset_of!(PortfolioAccountV16Account, health_cert) == 9044);
-const _: () = assert!(offset_of!(PortfolioAccountV16Account, stale_state) == 9165);
-const _: () = assert!(offset_of!(PortfolioAccountV16Account, b_stale_state) == 9166);
-const _: () = assert!(offset_of!(PortfolioAccountV16Account, rebalance_lock) == 9167);
-const _: () = assert!(offset_of!(PortfolioAccountV16Account, liquidation_lock) == 9168);
-const _: () = assert!(offset_of!(PortfolioAccountV16Account, close_progress) == 9169);
-const _: () = assert!(offset_of!(PortfolioAccountV16Account, resolved_payout_receipt) == 9353);
+// source_domains: 340 + 185*16 = 340 + 2960 = 3300 (v2.2 / layout 19; was 2772 at layout 18)
+const _: () = assert!(offset_of!(PortfolioAccountV16Account, source_domains) == 3300);
+// health_cert: 3300 + 196*32 = 3300 + 6272 = 9572
+const _: () = assert!(offset_of!(PortfolioAccountV16Account, health_cert) == 9572);
+const _: () = assert!(offset_of!(PortfolioAccountV16Account, stale_state) == 9693);
+const _: () = assert!(offset_of!(PortfolioAccountV16Account, b_stale_state) == 9694);
+const _: () = assert!(offset_of!(PortfolioAccountV16Account, rebalance_lock) == 9695);
+const _: () = assert!(offset_of!(PortfolioAccountV16Account, liquidation_lock) == 9696);
+const _: () = assert!(offset_of!(PortfolioAccountV16Account, close_progress) == 9697);
+const _: () = assert!(offset_of!(PortfolioAccountV16Account, resolved_payout_receipt) == 9881);
 
 // ════════════════════════════════════════════════════════════════════════════
 // DECODE — mirrors percolator-prog `portfolio_wire`
@@ -779,7 +814,7 @@ mod tests {
 
     /// Build a minimal valid wrapper-framed portfolio buffer for an owner with a
     /// single active leg. Mirrors the wrapper's `[header][POD][tail]` framing.
-    /// Layout 18: the POD is 9419 B; the tail (inline matcher cfg) is ignored by NFT.
+    /// Layout 19: the POD is 9947 B; the tail (inline matcher cfg) is ignored by NFT.
     fn framed(owner: [u8; 32], asset_index: u32, market_id: u64) -> Vec<u8> {
         let mut acct = empty_account();
         acct.provenance_header.owner = owner;
@@ -803,10 +838,10 @@ mod tests {
     #[test]
     fn sizes_match_engine_ground_truth() {
         // These values must match the v17 engine's actual struct sizes.
-        // N-1: layout 18 (engine 2c38570a) — 9227 -> 9419, leg 144 -> 152.
-        assert_eq!(size_of::<PortfolioAccountV16Account>(), 9419);
+        // v2.2: layout 19 (engine 4ceac24a) — 9419 -> 9947, leg 152 -> 185.
+        assert_eq!(size_of::<PortfolioAccountV16Account>(), 9947);
         assert_eq!(size_of::<ProvenanceHeaderV16Account>(), 100);
-        assert_eq!(size_of::<PortfolioLegV16Account>(), 152);
+        assert_eq!(size_of::<PortfolioLegV16Account>(), 185);
         assert_eq!(size_of::<PortfolioSourceDomainV16Account>(), 196);
         assert_eq!(size_of::<CloseProgressLedgerV16Account>(), 184);
         assert_eq!(size_of::<HealthCertV16Account>(), 121);
@@ -830,7 +865,7 @@ mod tests {
     /// property a layout-revision marker is for.
     #[test]
     fn layout_revision_tracks_the_layout_it_names() {
-        // Revision 6 == this exact set of sizes. Change a size, bump the revision,
+        // Revision 7 == this exact set of sizes. Change a size, bump the revision,
         // and update this fingerprint — deliberately three edits, so it cannot
         // happen by accident.
         let fingerprint = [
@@ -842,10 +877,10 @@ mod tests {
             size_of::<HealthCertV16Account>(),
             size_of::<ResolvedPayoutReceiptV16Account>(),
         ];
-        let expected_for_revision_6 = [9419usize, 100, 152, 196, 184, 121, 66];
+        let expected_for_revision_7 = [9947usize, 100, 185, 196, 184, 121, 66];
         assert_eq!(
             (LAYOUT_REVISION, fingerprint),
-            (6, expected_for_revision_6),
+            (7, expected_for_revision_7),
             "the v17 layout changed without LAYOUT_REVISION being bumped (or vice versa)",
         );
     }
@@ -883,7 +918,7 @@ mod tests {
     /// +24B trailer is a pure tail-append that shifts nothing this decoder
     /// touches.
     #[test]
-    fn decode_accepts_9563_byte_account_with_identity_trailer() {
+    fn decode_accepts_10091_byte_account_with_identity_trailer() {
         let owner = [9u8; 32];
         let mut acct = empty_account();
         acct.provenance_header.owner = owner;
@@ -899,7 +934,7 @@ mod tests {
         let total_len = HEADER_LEN + EXPECTED_PORTFOLIO_ACCOUNT_SIZE
             + MATCHER_CONFIG_TAIL_LEN
             + IDENTITY_TRAILER_LEN;
-        assert_eq!(total_len, 9563, "must match a9318945 PORTFOLIO_ACCOUNT_LEN");
+        assert_eq!(total_len, 10091, "must match wrapper v2.2 PORTFOLIO_ACCOUNT_LEN (f576bffc)");
 
         let mut buf = vec![0u8; total_len];
         buf[0..8].copy_from_slice(&MAGIC.to_le_bytes());
@@ -918,13 +953,47 @@ mod tests {
         buf[trailer_off + 8..trailer_off + 16].copy_from_slice(&888u64.to_le_bytes()); // expected_sequence
         buf[trailer_off + 16..trailer_off + 24].copy_from_slice(&999u64.to_le_bytes()); // matcher_expiry_slot
 
-        let acct = decode_portfolio(&buf).expect("a 9563-byte account (with trailer) must decode");
+        let acct = decode_portfolio(&buf).expect("a 10091-byte account (with trailer) must decode");
         assert_eq!(acct.owner(), owner);
         let slot = acct
             .active_leg_slot_for_asset(11)
             .expect("mint_leg_slot's underlying scan must still find the leg");
         assert_eq!(slot, 5);
         assert_eq!(acct.legs[slot].market_id.get(), 4242);
+    }
+
+    /// v2.2 silent-misread guard. Writes the bytes the WRAPPER's layout puts at fixed
+    /// absolute offsets (hand-written from the engine/wrapper layout, NOT through this
+    /// file's own struct) and proves `decode_portfolio` reads them back as the
+    /// transfer-gate flags and as a leg in the LAST slot. A mirror whose leg stride is
+    /// stale (152 instead of 185) passes both version gates yet reads these from the
+    /// wrong bytes — leg 15 would be at 340+152*15 = 2620 instead of 3115, the
+    /// `liquidation_lock` byte at 16+9168 instead of 16+9696.
+    #[test]
+    fn v22_absolute_offsets_decode_to_the_bytes_the_wrapper_wrote() {
+        // Absolute account offsets under wrapper VERSION 19 / engine layout 19.
+        const LEG_STRIDE: usize = 185;
+        const LEGS_OFF: usize = HEADER_LEN + 340;
+        const STALE_STATE_OFF: usize = HEADER_LEN + 9693;
+        const LIQUIDATION_LOCK_OFF: usize = HEADER_LEN + 9696;
+        let owner = [3u8; 32];
+        let mut buf = framed(owner, 1, 1);
+        assert!(buf.len() >= HEADER_LEN + EXPECTED_PORTFOLIO_ACCOUNT_SIZE);
+        // leg slot 15: active, asset 77, market_id 31337 (little-endian at +1 / +5).
+        let l15 = LEGS_OFF + 15 * LEG_STRIDE;
+        buf[l15] = 1;
+        buf[l15 + 1..l15 + 5].copy_from_slice(&77u32.to_le_bytes());
+        buf[l15 + 5..l15 + 13].copy_from_slice(&31337u64.to_le_bytes());
+        buf[LIQUIDATION_LOCK_OFF] = 1;
+        let acct = decode_portfolio(&buf).expect("decode");
+        let slot = acct.active_leg_slot_for_asset(77).expect("leg 15 must be found");
+        assert_eq!(slot, 15);
+        assert_eq!(acct.legs[15].market_id.get(), 31337);
+        assert!(acct.portfolio_locked_or_stale(), "liquidation_lock byte must be read");
+        // and the stale flag byte, independently.
+        let mut buf2 = framed(owner, 1, 1);
+        buf2[STALE_STATE_OFF] = 1;
+        assert!(decode_portfolio(&buf2).unwrap().portfolio_locked_or_stale());
     }
 
     #[test]
@@ -1056,10 +1125,10 @@ mod tests {
             // residuals (3*16=48) + funding_* (4*16=64) [layout 18] +
             // fee_credits (16) + cancel_escrow (16) +
             // last_fee_slot (8) + bitmap (8) +
-            // legs (152*16=2432) [layout 18] + source_domains (196*32=6272) +
+            // legs (185*16=2960) [layout 19] + source_domains (196*32=6272) +
             // health_cert (121) + 4 lock/stale bytes + close_progress (184) +
             // resolved_receipt (66)
-            100 + 32 + 16 + 16 + 16 + 48 + 64 + 16 + 16 + 8 + 8 + 2432 + 6272 + 121 + 4 + 184 + 66
+            100 + 32 + 16 + 16 + 16 + 48 + 64 + 16 + 16 + 8 + 8 + 2960 + 6272 + 121 + 4 + 184 + 66
         );
     }
 }
