@@ -261,6 +261,17 @@ pub const EXPECTED_RESOLVED_PAYOUT_RECEIPT_SIZE: usize = 66;
 /// v2.2 (layout 19): 9419 -> 9947. +528 B = 33 B of band/rent state in each of the
 /// 16 legs. On-chain `PORTFOLIO_ACCOUNT_LEN` = 16 + 9947 + 104 + 24 = 10091.
 pub const EXPECTED_PORTFOLIO_ACCOUNT_SIZE: usize = 9947;
+/// Wrapper matcher-config tail after the engine POD, and the portfolio-identity trailer.
+pub const PORTFOLIO_MATCHER_CONFIG_LEN: usize = 104;
+pub const PORTFOLIO_IDENTITY_TRAILER_LEN: usize = 24;
+/// Exact on-chain length of a wrapper portfolio account (wrapper `PORTFOLIO_ACCOUNT_LEN`, v2.2).
+/// `decode_portfolio` requires EXACT equality: an inequality lets a constants-only bump (or a
+/// wrong-layout account) decode silently with every field after the legs shifted.
+pub const PORTFOLIO_ACCOUNT_LEN: usize = HEADER_LEN
+    + EXPECTED_PORTFOLIO_ACCOUNT_SIZE
+    + PORTFOLIO_MATCHER_CONFIG_LEN
+    + PORTFOLIO_IDENTITY_TRAILER_LEN;
+const _: () = assert!(PORTFOLIO_ACCOUNT_LEN == 10091);
 
 // ════════════════════════════════════════════════════════════════════════════
 // POD SCALAR WRAPPERS — byte arrays, align 1 (percolator/src/v16.rs:3181-3255)
@@ -667,6 +678,8 @@ const _: () = assert!(offset_of!(PortfolioAccountV16Account, resolved_payout_rec
 pub enum PortfolioDecodeError {
     /// Account data shorter than `HEADER_LEN + EXPECTED_PORTFOLIO_ACCOUNT_SIZE`.
     TooShort,
+    /// Account length != `PORTFOLIO_ACCOUNT_LEN` (longer than the pinned layout).
+    WrongLength,
     /// Wrapper header MAGIC mismatch — not a percolator-v16/v17 account.
     BadMagic,
     /// Wrapper header VERSION mismatch.
@@ -692,7 +705,7 @@ pub enum PortfolioDecodeError {
 /// body offset is the constant [`HEADER_LEN`] and field access is by name; no
 /// offset is ever hand-computed (closes the v12 layout-offset bug class).
 pub fn decode_portfolio(data: &[u8]) -> Result<&PortfolioAccountV16Account, PortfolioDecodeError> {
-    if data.len() < HEADER_LEN + EXPECTED_PORTFOLIO_ACCOUNT_SIZE {
+    if data.len() < HEADER_LEN {
         return Err(PortfolioDecodeError::TooShort);
     }
     let magic = u64::from_le_bytes([
@@ -707,6 +720,14 @@ pub fn decode_portfolio(data: &[u8]) -> Result<&PortfolioAccountV16Account, Port
     }
     if data[10] != KIND_PORTFOLIO {
         return Err(PortfolioDecodeError::BadKind);
+    }
+    // EXACT length, after the header gates (so EmergencyBurn still sees BadVersion on an old
+    // layout). A longer or shorter account is a different layout, never "close enough".
+    if data.len() < PORTFOLIO_ACCOUNT_LEN {
+        return Err(PortfolioDecodeError::TooShort);
+    }
+    if data.len() != PORTFOLIO_ACCOUNT_LEN {
+        return Err(PortfolioDecodeError::WrongLength);
     }
     let body = &data[HEADER_LEN..HEADER_LEN + EXPECTED_PORTFOLIO_ACCOUNT_SIZE];
     let account: &PortfolioAccountV16Account =
@@ -826,7 +847,7 @@ mod tests {
         acct.legs[3].market_id = V16PodU64::new(market_id);
 
         // Allocate enough for header + POD + small tail (simulate the matcher cfg tail).
-        let mut buf = vec![0u8; HEADER_LEN + EXPECTED_PORTFOLIO_ACCOUNT_SIZE + 104];
+        let mut buf = vec![0u8; PORTFOLIO_ACCOUNT_LEN];
         buf[0..8].copy_from_slice(&MAGIC.to_le_bytes());
         buf[8..10].copy_from_slice(&VERSION.to_le_bytes());
         buf[10] = KIND_PORTFOLIO;
@@ -1007,11 +1028,39 @@ mod tests {
         buf[10] = KIND_PORTFOLIO + 1;
         assert_eq!(decode_portfolio(&buf), Err(PortfolioDecodeError::BadKind));
 
-        let short = vec![0u8; HEADER_LEN + 10];
+        let short = vec![0u8; HEADER_LEN - 1];
         assert_eq!(
             decode_portfolio(&short),
             Err(PortfolioDecodeError::TooShort)
         );
+    }
+
+    /// W-M3: EXACT length. With a valid header, one byte short is TooShort and any excess is
+    /// WrongLength (the old `<` check accepted both). A v2.1 account (VERSION 18, 9563 B) still
+    /// reports BadVersion so EmergencyBurn's #110B fallback keeps working.
+    #[test]
+    fn decode_requires_the_exact_account_length() {
+        let owner = [1u8; 32];
+        let good = framed(owner, 1, 1);
+        assert_eq!(good.len(), PORTFOLIO_ACCOUNT_LEN);
+        assert!(decode_portfolio(&good).is_ok());
+        assert_eq!(
+            decode_portfolio(&good[..good.len() - 1]),
+            Err(PortfolioDecodeError::TooShort)
+        );
+        let mut long = good.clone();
+        long.push(0);
+        assert_eq!(decode_portfolio(&long), Err(PortfolioDecodeError::WrongLength));
+        // the pre-v2.2 body-only length (header + POD, no tail) is also refused
+        assert_eq!(
+            decode_portfolio(&good[..HEADER_LEN + EXPECTED_PORTFOLIO_ACCOUNT_SIZE]),
+            Err(PortfolioDecodeError::TooShort)
+        );
+        let mut v21 = vec![0u8; 9563];
+        v21[0..8].copy_from_slice(&MAGIC.to_le_bytes());
+        v21[8..10].copy_from_slice(&18u16.to_le_bytes());
+        v21[10] = KIND_PORTFOLIO;
+        assert_eq!(decode_portfolio(&v21), Err(PortfolioDecodeError::BadVersion));
     }
 
     #[test]
@@ -1021,11 +1070,12 @@ mod tests {
         acct.provenance_header.version = V16PodU16::new(V16_ACCOUNT_VERSION);
         acct.provenance_header.layout_discriminator = V16PodU16::new(V16_LAYOUT_DISCRIMINATOR);
         acct.owner = [2u8; 32]; // diverges from provenance owner
-        let mut buf = vec![0u8; HEADER_LEN + EXPECTED_PORTFOLIO_ACCOUNT_SIZE];
+        let mut buf = vec![0u8; PORTFOLIO_ACCOUNT_LEN];
         buf[0..8].copy_from_slice(&MAGIC.to_le_bytes());
         buf[8..10].copy_from_slice(&VERSION.to_le_bytes());
         buf[10] = KIND_PORTFOLIO;
-        buf[HEADER_LEN..].copy_from_slice(bytemuck::bytes_of(&acct));
+        buf[HEADER_LEN..HEADER_LEN + EXPECTED_PORTFOLIO_ACCOUNT_SIZE]
+            .copy_from_slice(bytemuck::bytes_of(&acct));
         assert_eq!(
             decode_portfolio(&buf),
             Err(PortfolioDecodeError::OwnerMismatch)
@@ -1040,11 +1090,12 @@ mod tests {
         acct.owner = owner;
         acct.provenance_header.version = V16PodU16::new(V16_ACCOUNT_VERSION);
         acct.provenance_header.layout_discriminator = V16PodU16::new(99); // wrong
-        let mut buf = vec![0u8; HEADER_LEN + EXPECTED_PORTFOLIO_ACCOUNT_SIZE];
+        let mut buf = vec![0u8; PORTFOLIO_ACCOUNT_LEN];
         buf[0..8].copy_from_slice(&MAGIC.to_le_bytes());
         buf[8..10].copy_from_slice(&VERSION.to_le_bytes());
         buf[10] = KIND_PORTFOLIO;
-        buf[HEADER_LEN..].copy_from_slice(bytemuck::bytes_of(&acct));
+        buf[HEADER_LEN..HEADER_LEN + EXPECTED_PORTFOLIO_ACCOUNT_SIZE]
+            .copy_from_slice(bytemuck::bytes_of(&acct));
         assert_eq!(
             decode_portfolio(&buf),
             Err(PortfolioDecodeError::BadLayoutDiscriminator)

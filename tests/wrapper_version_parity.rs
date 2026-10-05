@@ -9,7 +9,7 @@
 //! `../percolator-prog/src/v16_program.rs`. If neither exists the test SKIPS loudly unless
 //! `NFT_REQUIRE_WRAPPER_SRC=1`, which turns a missing sibling into a hard failure (CI sets it).
 
-use percolator_nft::slab_types_v16::{EXPECTED_PORTFOLIO_ACCOUNT_SIZE, HEADER_LEN, VERSION};
+use percolator_nft::slab_types_v16::{PORTFOLIO_ACCOUNT_LEN, VERSION};
 
 fn wrapper_src() -> Option<String> {
     let p = std::env::var("NFT_WRAPPER_SRC").unwrap_or_else(|_| {
@@ -47,10 +47,7 @@ fn nft_header_version_equals_the_wrapper_version() {
 
 #[test]
 fn portfolio_account_len_equals_header_plus_pod_plus_matcher_tail_and_trailer() {
-    // wrapper: PORTFOLIO_ACCOUNT_LEN = HEADER_LEN + PORTFOLIO_STATE_LEN + 104 (matcher cfg) + 24 (id trailer)
-    const MATCHER_CONFIG_LEN: usize = 104;
-    const IDENTITY_TRAILER_LEN: usize = 24;
-    let len = HEADER_LEN + EXPECTED_PORTFOLIO_ACCOUNT_SIZE + MATCHER_CONFIG_LEN + IDENTITY_TRAILER_LEN;
+    let len = PORTFOLIO_ACCOUNT_LEN; // exact length decode_portfolio requires
     assert_eq!(len, 10091);
     let Some(src) = wrapper_src() else { return };
     assert!(
