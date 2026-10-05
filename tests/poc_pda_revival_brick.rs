@@ -100,11 +100,11 @@ fn portfolio_buf(owner: [u8; 32]) -> Vec<u8> {
     a.legs[0].active = 1;
     a.legs[0].asset_index = sl::V16PodU32::new(ASSET_INDEX);
     a.legs[0].market_id = sl::V16PodU64::new(MARKET_ID);
-    let mut buf = vec![0u8; sl::HEADER_LEN + sl::EXPECTED_PORTFOLIO_ACCOUNT_SIZE];
+    let mut buf = vec![0u8; sl::PORTFOLIO_ACCOUNT_LEN];
     buf[0..8].copy_from_slice(&sl::MAGIC.to_le_bytes());
     buf[8..10].copy_from_slice(&sl::VERSION.to_le_bytes());
     buf[10] = sl::KIND_PORTFOLIO;
-    buf[sl::HEADER_LEN..].copy_from_slice(bytemuck::bytes_of(&a));
+    buf[sl::HEADER_LEN..sl::HEADER_LEN + sl::EXPECTED_PORTFOLIO_ACCOUNT_SIZE].copy_from_slice(bytemuck::bytes_of(&a));
     buf
 }
 
