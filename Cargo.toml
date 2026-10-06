@@ -75,4 +75,4 @@ crate-type = ["cdylib", "lib"]
 # exactly those four numbers the moment the pin moved, and is what proves the mirror update.
 [dev-dependencies.percolator]
 git = "https://github.com/dcccrypto/percolator"
-rev = "4ceac24ae81ad470663db38afeb3ece217b3b702"
+rev = "30b2ec20be48f4e6138b47dafb5b7208ff980aad"
