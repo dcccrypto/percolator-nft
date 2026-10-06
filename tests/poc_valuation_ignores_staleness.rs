@@ -117,11 +117,11 @@ fn portfolio_buf_with_market_id(state: Blocked, market_id: u64) -> Vec<u8> {
         }
     }
 
-    let mut buf = vec![0u8; sl::HEADER_LEN + sl::EXPECTED_PORTFOLIO_ACCOUNT_SIZE];
+    let mut buf = vec![0u8; sl::PORTFOLIO_ACCOUNT_LEN];
     buf[0..8].copy_from_slice(&sl::MAGIC.to_le_bytes());
     buf[8..10].copy_from_slice(&sl::VERSION.to_le_bytes());
     buf[10] = sl::KIND_PORTFOLIO;
-    buf[sl::HEADER_LEN..].copy_from_slice(bytemuck::bytes_of(&a));
+    buf[sl::HEADER_LEN..sl::HEADER_LEN + sl::EXPECTED_PORTFOLIO_ACCOUNT_SIZE].copy_from_slice(bytemuck::bytes_of(&a));
     buf
 }
 

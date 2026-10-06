@@ -69,6 +69,10 @@ crate-type = ["cdylib", "lib"]
 # blind to the 192 bytes of drift this branch fixes. A pin is only a guard while it
 # points at the engine we ship against; a STALE pin is the same vacuity the test was
 # written to kill, one level up.
+# v2.2 (Wave B): bumped 2c38570a -> 4ceac24a (dcccrypto/percolator #279, feat/v22-band-rent),
+# the engine wrapper f576bffc ships. Layout 19 appends band/rent state to every leg (+33 B,
+# 152 -> 185) and V16_LAYOUT_DISCRIMINATOR becomes 19; tests/layout_parity_160.rs went red on
+# exactly those four numbers the moment the pin moved, and is what proves the mirror update.
 [dev-dependencies.percolator]
 git = "https://github.com/dcccrypto/percolator"
-rev = "2c38570a25a3bc81a3754b7086b11f4680acd127"
+rev = "fe1a425e8ebfa842daffaed12fd5c8de88a60747"
