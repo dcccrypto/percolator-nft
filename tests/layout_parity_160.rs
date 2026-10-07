@@ -35,7 +35,7 @@ use percolator_nft::slab_types_v16::PortfolioAccountV16Account as MirrorPortfoli
 
 #[test]
 fn mirror_total_size_matches_the_engine() {
-    // The headline number. `EXPECTED_PORTFOLIO_ACCOUNT_SIZE` is 9947 (v2.2 / layout 19) and is asserted
+    // The headline number. `EXPECTED_PORTFOLIO_ACCOUNT_SIZE` is 10459 (v2.2 / layout 19, variant -rem) and is asserted
     // against the mirror at compile time — here it is asserted against the thing it
     // is supposed to describe.
     assert_eq!(
@@ -267,5 +267,10 @@ fn v22_appended_leg_fields_sit_at_the_same_offset_as_the_engine() {
     assert_eq!(offset_of!(MirrorLeg, band_liq_pending), offset_of!(EngineLeg, band_liq_pending));
     assert_eq!(offset_of!(MirrorLeg, rent_snap), offset_of!(EngineLeg, rent_snap));
     assert_eq!(offset_of!(MirrorLeg, rent_carry), offset_of!(EngineLeg, rent_carry));
-    assert_eq!(size_of::<MirrorLeg>(), 185);
+    // variant -rem: the per-leg K/F remainders are INSERTED after f_snap, so the engine offsets shift
+    assert_eq!(offset_of!(MirrorLeg, k_rem_num), offset_of!(EngineLeg, k_rem_num));
+    assert_eq!(offset_of!(MirrorLeg, f_rem_num), offset_of!(EngineLeg, f_rem_num));
+    assert_eq!(offset_of!(MirrorLeg, kf_epoch_snap), offset_of!(EngineLeg, kf_epoch_snap));
+    assert_eq!(size_of::<MirrorLeg>(), 217);
+    assert_eq!(size_of::<MirrorLeg>(), size_of::<EngineLeg>());
 }

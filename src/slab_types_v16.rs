@@ -128,7 +128,7 @@ use core::mem::{align_of, offset_of, size_of};
 /// `stale_state`, `b_stale_state`, `rebalance_lock`, `liquidation_lock`,
 /// `close_progress` and `resolved_payout_receipt` all moved +528. Wrapper
 /// `PORTFOLIO_ACCOUNT_LEN` 9563 -> 10091.
-pub const LAYOUT_REVISION: u32 = 7;
+pub const LAYOUT_REVISION: u32 = 8; // variant -rem: per-leg K/F remainders (leg 217 B, portfolio POD 10,459 B)
 
 // ════════════════════════════════════════════════════════════════════════════
 // WRAPPER ACCOUNT HEADER — percolator-prog/src/v16_program.rs constants
@@ -251,7 +251,7 @@ const _: () = assert!(V16_ACTIVE_BITMAP_WORDS * 64 >= V16_MAX_PORTFOLIO_ASSETS_N
 pub const EXPECTED_PROVENANCE_HEADER_SIZE: usize = 100;
 /// N-1: 144 -> 152. Layout 18 inserted `kf_epoch_snap: u64` at offset 78.
 /// v2.2 (layout 19): 152 -> 185, four fields APPENDED (offsets 152/160/161/177).
-pub const EXPECTED_PORTFOLIO_LEG_SIZE: usize = 185;
+pub const EXPECTED_PORTFOLIO_LEG_SIZE: usize = 217; // variant -rem: 185 + 32 (k_rem_num, f_rem_num after f_snap)
 pub const EXPECTED_SOURCE_DOMAIN_SIZE: usize = 196;
 pub const EXPECTED_HEALTH_CERT_SIZE: usize = 121;
 pub const EXPECTED_CLOSE_PROGRESS_SIZE: usize = 184;
@@ -260,7 +260,7 @@ pub const EXPECTED_RESOLVED_PAYOUT_RECEIPT_SIZE: usize = 66;
 /// (4 x 16 B) plus `kf_epoch_snap` in all 16 legs (16 x 8 B).
 /// v2.2 (layout 19): 9419 -> 9947. +528 B = 33 B of band/rent state in each of the
 /// 16 legs. On-chain `PORTFOLIO_ACCOUNT_LEN` = 16 + 9947 + 104 + 24 = 10091.
-pub const EXPECTED_PORTFOLIO_ACCOUNT_SIZE: usize = 9947;
+pub const EXPECTED_PORTFOLIO_ACCOUNT_SIZE: usize = 10459; // variant -rem: 9947 + 16 legs x 32
 /// Wrapper matcher-config tail after the engine POD, and the portfolio-identity trailer.
 pub const PORTFOLIO_MATCHER_CONFIG_LEN: usize = 104;
 pub const PORTFOLIO_IDENTITY_TRAILER_LEN: usize = 24;
@@ -271,7 +271,7 @@ pub const PORTFOLIO_ACCOUNT_LEN: usize = HEADER_LEN
     + EXPECTED_PORTFOLIO_ACCOUNT_SIZE
     + PORTFOLIO_MATCHER_CONFIG_LEN
     + PORTFOLIO_IDENTITY_TRAILER_LEN;
-const _: () = assert!(PORTFOLIO_ACCOUNT_LEN == 10091);
+const _: () = assert!(PORTFOLIO_ACCOUNT_LEN == 10603);
 
 // ════════════════════════════════════════════════════════════════════════════
 // POD SCALAR WRAPPERS — byte arrays, align 1 (percolator/src/v16.rs:3181-3255)
@@ -419,6 +419,12 @@ pub struct PortfolioLegV16Account {
     pub a_basis: V16PodU128,
     pub k_snap: V16PodI128,
     pub f_snap: V16PodI128,
+    /// v2.2 combined release, variant -rem (engine #281, upstream a74b81b2): per-leg K/F settlement
+    /// remainders, INSERTED right after `f_snap` (+32 B). Every later leg field moves +32, and the
+    /// leg stride becomes 217 B. The NFT does not read them; they are vendored because the offsets
+    /// after them (and every later leg) ARE read.
+    pub k_rem_num: V16PodU128,
+    pub f_rem_num: V16PodU128,
     /// Layout 18 (engine `bf2fda46`, upstream `92ed4a1a`): the K/F settlement
     /// cohort generation this leg's `k_snap`/`f_snap` were taken in. INSERTED
     /// before `epoch_snap`, so it shifts `epoch_snap` and every field after it
@@ -451,15 +457,20 @@ const _: () = assert!(offset_of!(PortfolioLegV16Account, side) == 13);
 const _: () = assert!(offset_of!(PortfolioLegV16Account, basis_pos_q) == 14);
 // N-1 / layout 18: kf_epoch_snap took offset 78; epoch_snap moved 78 -> 86 and
 // b_stale / stale moved 142/143 -> 150/151.
-const _: () = assert!(offset_of!(PortfolioLegV16Account, kf_epoch_snap) == 78);
-const _: () = assert!(offset_of!(PortfolioLegV16Account, epoch_snap) == 86);
-const _: () = assert!(offset_of!(PortfolioLegV16Account, b_stale) == 150);
-const _: () = assert!(offset_of!(PortfolioLegV16Account, stale) == 151);
-// v2.2 / layout 19: four fields appended after `stale` (+33 B, leg 152 -> 185).
-const _: () = assert!(offset_of!(PortfolioLegV16Account, band_epoch_snap) == 152);
-const _: () = assert!(offset_of!(PortfolioLegV16Account, band_liq_pending) == 160);
-const _: () = assert!(offset_of!(PortfolioLegV16Account, rent_snap) == 161);
-const _: () = assert!(offset_of!(PortfolioLegV16Account, rent_carry) == 177);
+const _: () = assert!(offset_of!(PortfolioLegV16Account, f_snap) == 62);
+// variant -rem: the two remainders sit at 78 / 94, so kf_epoch_snap moves 78 -> 110 (+32) and every
+// later field with it.
+const _: () = assert!(offset_of!(PortfolioLegV16Account, k_rem_num) == 78);
+const _: () = assert!(offset_of!(PortfolioLegV16Account, f_rem_num) == 94);
+const _: () = assert!(offset_of!(PortfolioLegV16Account, kf_epoch_snap) == 110);
+const _: () = assert!(offset_of!(PortfolioLegV16Account, epoch_snap) == 118);
+const _: () = assert!(offset_of!(PortfolioLegV16Account, b_stale) == 182);
+const _: () = assert!(offset_of!(PortfolioLegV16Account, stale) == 183);
+// v2.2 / layout 19: four fields appended after `stale` (+33 B), shifted +32 by the remainders.
+const _: () = assert!(offset_of!(PortfolioLegV16Account, band_epoch_snap) == 184);
+const _: () = assert!(offset_of!(PortfolioLegV16Account, band_liq_pending) == 192);
+const _: () = assert!(offset_of!(PortfolioLegV16Account, rent_snap) == 193);
+const _: () = assert!(offset_of!(PortfolioLegV16Account, rent_carry) == 209);
 
 // ════════════════════════════════════════════════════════════════════════════
 // PortfolioSourceDomainV16Account — percolator/src/v16.rs:14842
@@ -658,15 +669,15 @@ const _: () = assert!(offset_of!(PortfolioAccountV16Account, active_bitmap) == 3
 // legs at 340 (was 276 before the funding_* insertion)
 const _: () = assert!(offset_of!(PortfolioAccountV16Account, legs) == 340);
 // source_domains: 340 + 185*16 = 340 + 2960 = 3300 (v2.2 / layout 19; was 2772 at layout 18)
-const _: () = assert!(offset_of!(PortfolioAccountV16Account, source_domains) == 3300);
-// health_cert: 3300 + 196*32 = 3300 + 6272 = 9572
-const _: () = assert!(offset_of!(PortfolioAccountV16Account, health_cert) == 9572);
-const _: () = assert!(offset_of!(PortfolioAccountV16Account, stale_state) == 9693);
-const _: () = assert!(offset_of!(PortfolioAccountV16Account, b_stale_state) == 9694);
-const _: () = assert!(offset_of!(PortfolioAccountV16Account, rebalance_lock) == 9695);
-const _: () = assert!(offset_of!(PortfolioAccountV16Account, liquidation_lock) == 9696);
-const _: () = assert!(offset_of!(PortfolioAccountV16Account, close_progress) == 9697);
-const _: () = assert!(offset_of!(PortfolioAccountV16Account, resolved_payout_receipt) == 9881);
+const _: () = assert!(offset_of!(PortfolioAccountV16Account, source_domains) == 3812);
+// health_cert: 3812 + 196*32 = 3812 + 6272 = 10084 (variant -rem: legs end at 340 + 217*16 = 3812)
+const _: () = assert!(offset_of!(PortfolioAccountV16Account, health_cert) == 10084);
+const _: () = assert!(offset_of!(PortfolioAccountV16Account, stale_state) == 10205);
+const _: () = assert!(offset_of!(PortfolioAccountV16Account, b_stale_state) == 10206);
+const _: () = assert!(offset_of!(PortfolioAccountV16Account, rebalance_lock) == 10207);
+const _: () = assert!(offset_of!(PortfolioAccountV16Account, liquidation_lock) == 10208);
+const _: () = assert!(offset_of!(PortfolioAccountV16Account, close_progress) == 10209);
+const _: () = assert!(offset_of!(PortfolioAccountV16Account, resolved_payout_receipt) == 10393);
 
 // ════════════════════════════════════════════════════════════════════════════
 // DECODE — mirrors percolator-prog `portfolio_wire`
@@ -860,9 +871,9 @@ mod tests {
     fn sizes_match_engine_ground_truth() {
         // These values must match the v17 engine's actual struct sizes.
         // v2.2: layout 19 (engine 4ceac24a) — 9419 -> 9947, leg 152 -> 185.
-        assert_eq!(size_of::<PortfolioAccountV16Account>(), 9947);
+        assert_eq!(size_of::<PortfolioAccountV16Account>(), 10459);
         assert_eq!(size_of::<ProvenanceHeaderV16Account>(), 100);
-        assert_eq!(size_of::<PortfolioLegV16Account>(), 185);
+        assert_eq!(size_of::<PortfolioLegV16Account>(), 217);
         assert_eq!(size_of::<PortfolioSourceDomainV16Account>(), 196);
         assert_eq!(size_of::<CloseProgressLedgerV16Account>(), 184);
         assert_eq!(size_of::<HealthCertV16Account>(), 121);
@@ -898,10 +909,10 @@ mod tests {
             size_of::<HealthCertV16Account>(),
             size_of::<ResolvedPayoutReceiptV16Account>(),
         ];
-        let expected_for_revision_7 = [9947usize, 100, 185, 196, 184, 121, 66];
+        let expected_for_revision_8 = [10459usize, 100, 217, 196, 184, 121, 66];
         assert_eq!(
             (LAYOUT_REVISION, fingerprint),
-            (7, expected_for_revision_7),
+            (8, expected_for_revision_8),
             "the v17 layout changed without LAYOUT_REVISION being bumped (or vice versa)",
         );
     }
@@ -955,7 +966,7 @@ mod tests {
         let total_len = HEADER_LEN + EXPECTED_PORTFOLIO_ACCOUNT_SIZE
             + MATCHER_CONFIG_TAIL_LEN
             + IDENTITY_TRAILER_LEN;
-        assert_eq!(total_len, 10091, "must match wrapper v2.2 PORTFOLIO_ACCOUNT_LEN (f576bffc)");
+        assert_eq!(total_len, 10603, "must match wrapper v2.2 -rem PORTFOLIO_ACCOUNT_LEN");
 
         let mut buf = vec![0u8; total_len];
         buf[0..8].copy_from_slice(&MAGIC.to_le_bytes());
@@ -993,10 +1004,10 @@ mod tests {
     #[test]
     fn v22_absolute_offsets_decode_to_the_bytes_the_wrapper_wrote() {
         // Absolute account offsets under wrapper VERSION 19 / engine layout 19.
-        const LEG_STRIDE: usize = 185;
+        const LEG_STRIDE: usize = 217;
         const LEGS_OFF: usize = HEADER_LEN + 340;
-        const STALE_STATE_OFF: usize = HEADER_LEN + 9693;
-        const LIQUIDATION_LOCK_OFF: usize = HEADER_LEN + 9696;
+        const STALE_STATE_OFF: usize = HEADER_LEN + 10205;
+        const LIQUIDATION_LOCK_OFF: usize = HEADER_LEN + 10208;
         let owner = [3u8; 32];
         let mut buf = framed(owner, 1, 1);
         assert!(buf.len() >= HEADER_LEN + EXPECTED_PORTFOLIO_ACCOUNT_SIZE);
@@ -1176,10 +1187,10 @@ mod tests {
             // residuals (3*16=48) + funding_* (4*16=64) [layout 18] +
             // fee_credits (16) + cancel_escrow (16) +
             // last_fee_slot (8) + bitmap (8) +
-            // legs (185*16=2960) [layout 19] + source_domains (196*32=6272) +
+            // legs (217*16=3472) [layout 19 + remainders] + source_domains (196*32=6272) +
             // health_cert (121) + 4 lock/stale bytes + close_progress (184) +
             // resolved_receipt (66)
-            100 + 32 + 16 + 16 + 16 + 48 + 64 + 16 + 16 + 8 + 8 + 2960 + 6272 + 121 + 4 + 184 + 66
+            100 + 32 + 16 + 16 + 16 + 48 + 64 + 16 + 16 + 8 + 8 + 3472 + 6272 + 121 + 4 + 184 + 66
         );
     }
 }
