@@ -101,11 +101,11 @@ fn portfolio_buf() -> Vec<u8> {
     a.provenance_header.layout_discriminator = sl::V16PodU16::new(sl::V16_LAYOUT_DISCRIMINATOR);
     a.owner = mint_auth.to_bytes();
     // Terminal: no active leg — the EmergencyBurn-eligible shape.
-    let mut buf = vec![0u8; sl::HEADER_LEN + sl::EXPECTED_PORTFOLIO_ACCOUNT_SIZE];
+    let mut buf = vec![0u8; sl::PORTFOLIO_ACCOUNT_LEN];
     buf[0..8].copy_from_slice(&sl::MAGIC.to_le_bytes());
     buf[8..10].copy_from_slice(&sl::VERSION.to_le_bytes());
     buf[10] = sl::KIND_PORTFOLIO;
-    buf[sl::HEADER_LEN..].copy_from_slice(bytemuck::bytes_of(&a));
+    buf[sl::HEADER_LEN..sl::HEADER_LEN + sl::EXPECTED_PORTFOLIO_ACCOUNT_SIZE].copy_from_slice(bytemuck::bytes_of(&a));
     buf
 }
 

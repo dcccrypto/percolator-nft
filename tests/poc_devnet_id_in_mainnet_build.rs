@@ -43,7 +43,7 @@ const DST_ATA: Pubkey = Pubkey::new_from_array([0x72; 32]);
 /// depending on the gated constant existing in this build. v18 fresh-ID
 /// redeploy (2026-09-22), re-moved 2026-09-29 (v18.3): tracks `PERCOLATOR_DEVNET`.
 const DEVNET_WRAPPER_ID: Pubkey =
-    solana_program::pubkey!("ETDLAdiAyWnEUngspYczTXUceT6X8f92eZQvr8nmSkWB");
+    solana_program::pubkey!("5NGgnU2j315Ci2tso8VJDEthaVExuiKG3tn4xnur28xe");
 
 const ASSET_INDEX: u32 = 7;
 const MARKET_ID: u64 = 42;
@@ -94,11 +94,11 @@ fn portfolio_buf(escrow_owner: [u8; 32]) -> Vec<u8> {
     a.legs[0].active = 1;
     a.legs[0].asset_index = sl::V16PodU32::new(ASSET_INDEX);
     a.legs[0].market_id = sl::V16PodU64::new(MARKET_ID);
-    let mut buf = vec![0u8; sl::HEADER_LEN + sl::EXPECTED_PORTFOLIO_ACCOUNT_SIZE];
+    let mut buf = vec![0u8; sl::PORTFOLIO_ACCOUNT_LEN];
     buf[0..8].copy_from_slice(&sl::MAGIC.to_le_bytes());
     buf[8..10].copy_from_slice(&sl::VERSION.to_le_bytes());
     buf[10] = sl::KIND_PORTFOLIO;
-    buf[sl::HEADER_LEN..].copy_from_slice(bytemuck::bytes_of(&a));
+    buf[sl::HEADER_LEN..sl::HEADER_LEN + sl::EXPECTED_PORTFOLIO_ACCOUNT_SIZE].copy_from_slice(bytemuck::bytes_of(&a));
     buf
 }
 
