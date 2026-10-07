@@ -105,7 +105,7 @@ pub const PERCOLATOR_MAINNET: Pubkey =
 /// wrapper (`GnwdeQr…`) and its damaged markets are abandoned, not trusted.
 #[cfg(feature = "devnet")]
 pub const PERCOLATOR_DEVNET: Pubkey =
-    solana_program::pubkey!("ETDLAdiAyWnEUngspYczTXUceT6X8f92eZQvr8nmSkWB");
+    solana_program::pubkey!("5NGgnU2j315Ci2tso8VJDEthaVExuiKG3tn4xnur28xe");
 
 /// Verify the portfolio account is owned by a known Percolator wrapper program.
 /// Fail-closed: anything not on the allowlist is rejected. (v16 analog of v12
