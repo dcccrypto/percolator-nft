@@ -48,7 +48,7 @@ fn nft_header_version_equals_the_wrapper_version() {
 #[test]
 fn portfolio_account_len_equals_header_plus_pod_plus_matcher_tail_and_trailer() {
     let len = PORTFOLIO_ACCOUNT_LEN; // exact length decode_portfolio requires
-    assert_eq!(len, 10091);
+    assert_eq!(len, 10603);
     let Some(src) = wrapper_src() else { return };
     assert!(
         src.contains(&format!("assert!(PORTFOLIO_ACCOUNT_LEN == {len})")),
