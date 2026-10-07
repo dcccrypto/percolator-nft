@@ -101,11 +101,13 @@ pub const PERCOLATOR_MAINNET: Pubkey =
 /// brand-new program address so no pre-existing v17 account survives under it.
 /// The prior devnet wrapper (`DhSkE7u…`, v17) is abandoned, not trusted.
 ///
-/// v18.3 fresh-ID redeploy (2026-09-29): moves again to `ETDLAdi…`; the v18.0-v18.2
+/// v2.1 fresh-ID deploy (2026-10-05): the wrapper is `5NGgnU2j…` (v18.3 `ETDLAdi…` is abandoned, and the
+/// stake program trusts the SAME id: percolator-ops artifacts/v22-combination-2026-10-06/check-program-id-pins.py
+/// fails the build if they ever disagree). v18.3 fresh-ID redeploy (2026-09-29): moved to `ETDLAdi…`; the v18.0-v18.2
 /// wrapper (`GnwdeQr…`) and its damaged markets are abandoned, not trusted.
 #[cfg(feature = "devnet")]
 pub const PERCOLATOR_DEVNET: Pubkey =
-    solana_program::pubkey!("ETDLAdiAyWnEUngspYczTXUceT6X8f92eZQvr8nmSkWB");
+    solana_program::pubkey!("5NGgnU2j315Ci2tso8VJDEthaVExuiKG3tn4xnur28xe");
 
 /// Verify the portfolio account is owned by a known Percolator wrapper program.
 /// Fail-closed: anything not on the allowlist is rejected. (v16 analog of v12

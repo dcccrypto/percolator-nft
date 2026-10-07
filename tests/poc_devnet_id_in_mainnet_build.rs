@@ -43,7 +43,7 @@ const DST_ATA: Pubkey = Pubkey::new_from_array([0x72; 32]);
 /// depending on the gated constant existing in this build. v18 fresh-ID
 /// redeploy (2026-09-22), re-moved 2026-09-29 (v18.3): tracks `PERCOLATOR_DEVNET`.
 const DEVNET_WRAPPER_ID: Pubkey =
-    solana_program::pubkey!("ETDLAdiAyWnEUngspYczTXUceT6X8f92eZQvr8nmSkWB");
+    solana_program::pubkey!("5NGgnU2j315Ci2tso8VJDEthaVExuiKG3tn4xnur28xe");
 
 const ASSET_INDEX: u32 = 7;
 const MARKET_ID: u64 = 42;
