@@ -219,7 +219,7 @@ pub const V16_ACTIVE_BITMAP_WORDS: usize = V16_MAX_PORTFOLIO_ASSETS_N.div_ceil(6
 /// trade an asset identifier `>= WRAPPER_MAX_PORTFOLIO_ASSETS` (#94). Eligibility
 /// is therefore decided by `active_leg_slot_for_asset` (a scan for a matching
 /// active leg), never by comparing `asset_index` to this count.
-pub const WRAPPER_MAX_PORTFOLIO_ASSETS: u16 = 14;
+pub const WRAPPER_MAX_PORTFOLIO_ASSETS: u16 = 4;
 
 /// v17: source-domains are now a fixed inline sparse array of this capacity.
 /// Production: 2 * V16_MAX_PORTFOLIO_ASSETS_N = 32.

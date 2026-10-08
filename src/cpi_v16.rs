@@ -168,7 +168,7 @@ pub fn verify_portfolio_account_id(
 /// a `u32` — engine `v16.rs:2606`), which is independent of, and `>=`,
 /// `WRAPPER_MAX_PORTFOLIO_ASSETS` (the per-portfolio *active-leg count* cap;
 /// engine asserts `max_portfolio_assets <= max_market_slots`, `v16.rs:1975`).
-/// Earlier code rejected any `asset_index >= WRAPPER_MAX_PORTFOLIO_ASSETS (14)`,
+/// Earlier code rejected any `asset_index >= WRAPPER_MAX_PORTFOLIO_ASSETS (4 since percolator-prog#546; was 14)`,
 /// which wrongly rejected legitimate positions on asset identifiers `>= 14` in
 /// market groups with more than 14 assets (#94). The leg scan below is the
 /// correct and sufficient gate: it succeeds iff an active leg genuinely trades
@@ -374,7 +374,7 @@ mod tests {
         assert_eq!(mint_leg_slot(&p, &owner, 10), Err(NftError::LegNotActive));
     }
 
-    /// Regression for #94: an `asset_index >= WRAPPER_MAX_PORTFOLIO_ASSETS (14)`
+    /// Regression for #94: an `asset_index >= WRAPPER_MAX_PORTFOLIO_ASSETS (4 since percolator-prog#546; was 14)`
     /// is a legitimate asset identifier in a market group with more than 14
     /// assets (the engine validates `asset_index < config.max_market_slots`, a
     /// `u32` — NOT against the per-portfolio active-leg count). The old code
@@ -408,7 +408,7 @@ mod tests {
         );
         // The constant itself remains the per-portfolio active-leg cap, not an
         // asset-id domain bound (referenced to keep this invariant explicit).
-        const { assert!(WRAPPER_MAX_PORTFOLIO_ASSETS == 14) };
+        const { assert!(WRAPPER_MAX_PORTFOLIO_ASSETS == 4) };
     }
 
     #[test]
