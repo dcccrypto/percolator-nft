@@ -41,7 +41,7 @@ fn sym_nft() -> PositionNftV16 {
 /// K-N1: `mint_leg_slot` is owner-gated and returns the FIRST active leg of the asset; it errors
 /// exactly with `NotNftHolder` (wrong caller) or `LegNotActive` (no such active leg).
 #[kani::proof]
-#[kani::unwind(18)]
+#[kani::unwind(34)]
 fn kani_audit1017_n1_mint_requires_owner_and_active_leg() {
     let p = sym_portfolio();
     let caller: [u8; 32] = kani::any();
@@ -170,6 +170,7 @@ fn kani_audit1017_n4_transfer_gate_safety() {
 
 /// K-N5: a decoded portfolio is trusted only if its provenance id IS the passed account key.
 #[kani::proof]
+#[kani::unwind(34)]
 fn kani_audit1017_n5_portfolio_id_binds_to_key() {
     let mut p: PortfolioAccountV16Account = Zeroable::zeroed();
     p.provenance_header.portfolio_account_id = kani::any();
