@@ -574,3 +574,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(kani)]
+#[path = "kani_audit_1017.rs"]
+mod kani_audit_1017;
