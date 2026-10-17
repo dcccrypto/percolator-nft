@@ -365,6 +365,13 @@ fn process_mint_position_nft(
     let snap_market_id = leg.market_id.get();
     let snap_epoch_snap = leg.epoch_snap.get();
     let snap_owner = p.owner();
+    // S1-2: stamp the portfolio INCARNATION (market group + wrapper-assigned permanent id) so
+    // this NFT can never authorize a later incarnation of the same portfolio keypair.
+    let (snap_inc_group, snap_inc_id) = cpi_v16::bind_incarnation(
+        &p.provenance_header.market_group_id,
+        slab_types_v16::read_portfolio_id(&portfolio_data),
+    )
+    .map_err(ProgramError::from)?;
     let market_group = Pubkey::new_from_array(p.provenance_header.market_group_id);
     // The percolator program id is the wrapper that OWNS the portfolio account.
     let percolator_prog_id: Pubkey = *portfolio.owner;
@@ -482,6 +489,8 @@ fn process_mint_position_nft(
     nft_state.epoch_snap_at_mint = slab_types_v16::V16PodU64::new(snap_epoch_snap);
     nft_state.position_owner_at_mint = snap_owner;
     nft_state.last_holder = owner.key.to_bytes(); // #138: minter is the first holder
+    nft_state.portfolio_market_group = snap_inc_group; // S1-2
+    nft_state.portfolio_id_at_mint = slab_types_v16::V16PodU64::new(snap_inc_id); // S1-2
     nft_state.minted_at = slab_types_v16::V16PodI64::new(clock.unix_timestamp);
     drop(pda_data);
 
@@ -1011,6 +1020,15 @@ fn process_burn_position_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -> P
             msg!("BurnPositionNft: portfolio_account_id mismatch (#110C)");
             return Err(NftError::InvalidNftPda.into());
         }
+        // S1-2: a stale NFT (earlier incarnation of this portfolio keypair) must never release
+        // the CURRENT incarnation's escrow. Its holder reclaims the NFT-side rent through
+        // EmergencyBurn, which skips the release for a stale NFT.
+        cpi_v16::verify_portfolio_incarnation(
+            &p.provenance_header.market_group_id,
+            slab_types_v16::read_portfolio_id(&portfolio_data),
+            &nft_state_copy,
+        )
+        .map_err(ProgramError::from)?;
         let _slot = cpi_v16::verify_bound_leg(p, &nft_state_copy).map_err(ProgramError::from)?;
     }
 
@@ -1203,6 +1221,11 @@ fn process_emergency_burn(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
     // is rejected, never silently skipping the unwrap on a live escrow. The core
     // only closes value-empty portfolios, so this never abandons recoverable funds.
     let portfolio_gone = portfolio.data_is_empty() || portfolio.lamports() == 0;
+    // S1-2: set when the portfolio is live but this NFT belongs to an EARLIER incarnation of the
+    // same keypair. A stale NFT is burned and its NFT-side accounts reclaimed exactly like one
+    // whose portfolio is gone, but it has NO authority over the live portfolio: the unwrap below
+    // is skipped, so the current incarnation's escrow (and its holder) is untouched.
+    let mut stale_incarnation = false;
 
     // ── Check emergency burn eligibility (position flat / no active leg) ──
     if portfolio_gone {
@@ -1219,7 +1242,19 @@ fn process_emergency_burn(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
                     msg!("EmergencyBurn: portfolio_account_id mismatch (#110C)");
                     return Err(NftError::InvalidNftPda.into());
                 }
-                cpi_v16::emergency_burn_ok(p, &nft_state_copy).map_err(ProgramError::from)?;
+                if cpi_v16::verify_portfolio_incarnation(
+                    &p.provenance_header.market_group_id,
+                    slab_types_v16::read_portfolio_id(&portfolio_data),
+                    &nft_state_copy,
+                )
+                .is_err()
+                {
+                    msg!("EmergencyBurn: NFT belongs to an earlier incarnation of this portfolio — burning without touching the live portfolio (S1-2)");
+                    stale_incarnation = true;
+                } else {
+                    cpi_v16::emergency_burn_ok(p, &nft_state_copy)
+                        .map_err(ProgramError::from)?;
+                }
             }
             // #110B, NARROWED: only a genuine layout migration may bypass the
             // eligibility gate.
@@ -1276,7 +1311,7 @@ fn process_emergency_burn(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
     // #131: if the core already closed the bound portfolio (portfolio_gone) there
     // is no account left to unwrap — the escrow was released by that closure — so
     // skip the CPI and proceed to burn + reclaim the NFT-side rent.
-    if !portfolio_gone {
+    if !portfolio_gone && !stale_incarnation {
         verify_percolator_prog_account(percolator_prog, portfolio)?;
     // #184 (2.2): registry validation is DELIBERATELY NOT done here.
     //
@@ -1393,7 +1428,7 @@ fn process_reconcile_burned_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -
     }
 
     // ── Read the bound PositionNft state ──
-    let (recorded_portfolio, recorded_mint, market_id_at_mint, last_holder) = {
+    let (recorded_portfolio, recorded_mint, market_id_at_mint, last_holder, nft_state_copy) = {
         let data = nft_pda.try_borrow_data()?;
         if data.len() < POSITION_NFT_V16_LEN {
             return Err(ProgramError::InvalidAccountData);
@@ -1405,6 +1440,7 @@ fn process_reconcile_burned_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -
             nft_state.nft_mint,
             nft_state.market_id_at_mint.get(),
             nft_state.last_holder,
+            *nft_state,
         )
     };
 
@@ -1460,6 +1496,23 @@ fn process_reconcile_burned_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -
     // is satisfied by any (percolator_prog, portfolio) pair the attacker controls.
     cpi_v16::verify_portfolio_program(portfolio)?;
     verify_percolator_prog_account(percolator_prog, portfolio)?;
+    // S1-2: if the live portfolio is a LATER incarnation of this keypair, this NFT was never the
+    // escrow's token (the escrow now belongs to the new incarnation's NFT and its holder). Do
+    // not release it to this NFT's last holder; only reclaim the dead NFT-side accounts below.
+    // An undecodable portfolio (unknown layout) keeps the existing behaviour: the unwrap CPI
+    // below decides, and reverts on a non-escrowed / foreign portfolio.
+    let stale_incarnation = {
+        let portfolio_data = portfolio.try_borrow_data()?;
+        match slab_types_v16::decode_portfolio(&portfolio_data) {
+            Ok(p) => cpi_v16::verify_portfolio_incarnation(
+                &p.provenance_header.market_group_id,
+                slab_types_v16::read_portfolio_id(&portfolio_data),
+                &nft_state_copy,
+            )
+            .is_err(),
+            Err(_) => false,
+        }
+    };
     // #184 (2.2): registry validation is DELIBERATELY NOT done here.
     //
     // The audit proposed making these sites symmetric with mint, which validates
@@ -1479,14 +1532,18 @@ fn process_reconcile_burned_nft(program_id: &Pubkey, accounts: &[AccountInfo]) -
     // `registry.nft_program_id` rejects a foreign registry at the callee. The
     // asymmetry with mint is intentional, not drift.
 
-    cpi_unwrap_portfolio(
-        percolator_prog,
-        mint_auth,
-        portfolio,
-        nft_registry,
-        last_holder_ai.key,
-        mint_auth_bump,
-    )?;
+    if stale_incarnation {
+        msg!("ReconcileBurnedNft: NFT belongs to an earlier incarnation of this portfolio — live portfolio left escrowed (S1-2)");
+    } else {
+        cpi_unwrap_portfolio(
+            percolator_prog,
+            mint_auth,
+            portfolio,
+            nft_registry,
+            last_holder_ai.key,
+            mint_auth_bump,
+        )?;
+    }
 
     // ── #182: optionally reclaim the mint + ExtraAccountMetaList rent ──
     // #102 stopped this leak for BurnPositionNft/EmergencyBurn. ReconcileBurnedNft
@@ -1618,6 +1675,12 @@ fn process_settle_funding(program_id: &Pubkey, accounts: &[AccountInfo]) -> Prog
     let p = slab_types_v16::decode_portfolio(&portfolio_data).map_err(cpi_v16::map_decode_err)?;
 
     cpi_v16::verify_portfolio_account_id(p, portfolio.key, "SettleFunding")?;
+    cpi_v16::verify_portfolio_incarnation(
+        &p.provenance_header.market_group_id,
+        slab_types_v16::read_portfolio_id(&portfolio_data),
+        &nft_state_copy,
+    )
+    .map_err(ProgramError::from)?;
     let slot = cpi_v16::verify_bound_leg(p, &nft_state_copy).map_err(ProgramError::from)?;
 
     // Update f_snap snapshot to current leg value.

@@ -32,7 +32,7 @@ fn main() {
     // Keys are emitted in sorted order to match the committed spec, which the
     // SDK writes with sorted keys. Sorting here rather than relying on
     // declaration order keeps the diff stable when a field is added.
-    let offsets: [(&str, usize); 14] = [
+    let offsets: [(&str, usize); 16] = [
         ("asset_index", offset_of!(PositionNftV16, asset_index)),
         (
             "basis_pos_q_at_mint",
@@ -62,6 +62,15 @@ fn main() {
         (
             "portfolio_account",
             offset_of!(PositionNftV16, portfolio_account),
+        ),
+        // S1-2: incarnation binding (appended after last_holder; 199 -> 239 B).
+        (
+            "portfolio_id_at_mint",
+            offset_of!(PositionNftV16, portfolio_id_at_mint),
+        ),
+        (
+            "portfolio_market_group",
+            offset_of!(PositionNftV16, portfolio_market_group),
         ),
         (
             "position_owner_at_mint",

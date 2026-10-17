@@ -273,6 +273,31 @@ pub const PORTFOLIO_ACCOUNT_LEN: usize = HEADER_LEN
     + PORTFOLIO_IDENTITY_TRAILER_LEN;
 const _: () = assert!(PORTFOLIO_ACCOUNT_LEN == 10603);
 
+/// Offset of the wrapper's permanent `portfolio_id: u64` (the first word of the 24 B identity
+/// trailer: `portfolio_id`, `expected_sequence`, `matcher_expiry_slot`). Wrapper
+/// `constants::PORTFOLIO_ID_OFF`.
+pub const PORTFOLIO_ID_OFF: usize =
+    HEADER_LEN + EXPECTED_PORTFOLIO_ACCOUNT_SIZE + PORTFOLIO_MATCHER_CONFIG_LEN;
+const _: () = assert!(PORTFOLIO_ID_OFF == 10579);
+
+/// S1-2: the portfolio INCARNATION id the wrapper assigned at `InitPortfolio`
+/// (`allocate_portfolio_id`: market-scoped, monotonic, never reused, never 0). A closed-and-
+/// recreated portfolio KEYPAIR gets a fresh id, so `(market_group_id, portfolio_id)` names one
+/// incarnation of one account; the account key alone does not.
+///
+/// `None` when the slice is too short for the trailer or the id is 0 (never a valid id; an
+/// unallocated trailer must not be bindable). Callers pass the full account data that already
+/// passed [`decode_portfolio`] (exact length), so a short slice is unreachable there.
+pub fn read_portfolio_id(data: &[u8]) -> Option<u64> {
+    let bytes = data.get(PORTFOLIO_ID_OFF..PORTFOLIO_ID_OFF + 8)?;
+    let id = u64::from_le_bytes(bytes.try_into().ok()?);
+    if id == 0 {
+        None
+    } else {
+        Some(id)
+    }
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // POD SCALAR WRAPPERS — byte arrays, align 1 (percolator/src/v16.rs:3181-3255)
 // ════════════════════════════════════════════════════════════════════════════

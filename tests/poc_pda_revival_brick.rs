@@ -50,6 +50,8 @@ const NFT_MINT: Pubkey = Pubkey::new_from_array([0x11; 32]);
 
 const ASSET_INDEX: u32 = 7;
 const MARKET_ID: u64 = 42;
+/// S1-2: portfolio incarnation id used by the fixtures (nonzero, as the wrapper allocates).
+const PORTFOLIO_INCARNATION: u64 = 7;
 /// Rent-exempt minimum for a 199-byte account, (128 + 199) * 3480 * 2 — what an
 /// attacker credits back in ix1 to keep the account from being reaped.
 const PDA_RENT: u64 = 2_275_920;
@@ -101,6 +103,8 @@ fn portfolio_buf(owner: [u8; 32]) -> Vec<u8> {
     a.legs[0].asset_index = sl::V16PodU32::new(ASSET_INDEX);
     a.legs[0].market_id = sl::V16PodU64::new(MARKET_ID);
     let mut buf = vec![0u8; sl::PORTFOLIO_ACCOUNT_LEN];
+    // S1-2: the wrapper-assigned permanent portfolio id (incarnation) the NFT is bound to.
+    buf[sl::PORTFOLIO_ID_OFF..sl::PORTFOLIO_ID_OFF + 8].copy_from_slice(&PORTFOLIO_INCARNATION.to_le_bytes());
     buf[0..8].copy_from_slice(&sl::MAGIC.to_le_bytes());
     buf[8..10].copy_from_slice(&sl::VERSION.to_le_bytes());
     buf[10] = sl::KIND_PORTFOLIO;
@@ -117,6 +121,8 @@ fn live_nft_pda_buf(bump: u8) -> Vec<u8> {
     s.nft_mint = NFT_MINT.to_bytes();
     s.asset_index = sl::V16PodU32::new(ASSET_INDEX);
     s.market_id_at_mint = sl::V16PodU64::new(MARKET_ID);
+    s.portfolio_market_group = MARKET_GROUP.to_bytes();
+    s.portfolio_id_at_mint = sl::V16PodU64::new(PORTFOLIO_INCARNATION);
     s.last_holder = OWNER.to_bytes();
     bytemuck::bytes_of(&s).to_vec()
 }

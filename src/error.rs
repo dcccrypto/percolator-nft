@@ -77,6 +77,11 @@ pub enum NftError {
     /// (cross-margin) portfolio would convey the un-tokenized legs too. Reject when
     /// the portfolio has more than one active leg.
     MultiLegNotWrappable = 27,
+
+    /// S1-2: the NFT was minted against an EARLIER incarnation of this portfolio keypair
+    /// (the account was closed and re-created: `(market_group, portfolio_id)` at mint differs
+    /// from the live portfolio's). A stale NFT confers no authority over the current incarnation.
+    StalePortfolioIncarnation = 28,
 }
 
 impl From<NftError> for ProgramError {

@@ -27,8 +27,10 @@ use crate::slab_types_v16::{V16PodI128, V16PodI64, V16PodU32, V16PodU64};
 /// `"PERCNFT\0"` little-endian (unchanged from v12 — same family of accounts).
 pub const POSITION_NFT_V16_MAGIC: u64 = 0x5045_5243_4E46_5400;
 
-/// PositionNft state-layout version. v12 = 1; v16 = 2.
-pub const POSITION_NFT_V16_VERSION: u8 = 2;
+/// PositionNft state-layout version. v12 = 1; v16 = 2; S1-2 (incarnation binding, 199 -> 239 B) = 3.
+/// Version-2 accounts (199 B) fail closed everywhere: they are shorter than the struct and carry
+/// the wrong version byte.
+pub const POSITION_NFT_V16_VERSION: u8 = 3;
 
 /// PDA seed prefix for PositionNft accounts (unchanged from v12).
 pub const POSITION_NFT_SEED: &[u8] = b"position_nft";
@@ -39,7 +41,7 @@ pub const MINT_AUTHORITY_SEED: &[u8] = b"mint_authority";
 /// Size of `PositionNftV16` account data.
 pub const POSITION_NFT_V16_LEN: usize = core::mem::size_of::<PositionNftV16>();
 
-/// On-chain state for a v16 Position NFT. 199 bytes (align 1).
+/// On-chain state for a v16 Position NFT. 239 bytes (align 1).
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct PositionNftV16 {
@@ -82,8 +84,18 @@ pub struct PositionNftV16 {
     /// token is burned OUT-OF-BAND (a direct Token-2022 Burn that skips
     /// BurnPositionNft, leaving the escrow unreleased), `ReconcileBurnedNft` reads
     /// this to release the stranded position back to the last holder. Occupies the
-    /// former `_reserved` headroom — no layout change (still 199 bytes).
+    /// former `_reserved` headroom — no layout change at the time (S1-2 later appended the incarnation binding: 199 -> 239 bytes).
     pub last_holder: [u8; 32],
+
+    // ── S1-2: portfolio INCARNATION binding (appended; every earlier offset is unchanged) ──
+    /// `provenance_header.market_group_id` of the portfolio at mint. `portfolio_id` is allocated
+    /// per market group, so the pair names one incarnation.
+    pub portfolio_market_group: [u8; 32],
+    /// The wrapper's permanent `portfolio_id` of the portfolio at mint (never 0). A portfolio
+    /// keypair that is closed and re-created gets a NEW id, so an NFT minted against the earlier
+    /// incarnation can never match the current one. Without this the NFT bound only the account
+    /// KEY and a leftover NFT of an old incarnation authorized the new one (audit 2026-10-17 S1-2).
+    pub portfolio_id_at_mint: V16PodU64,
 }
 
 impl PositionNftV16 {
@@ -93,7 +105,7 @@ impl PositionNftV16 {
     }
 }
 
-const _: () = assert!(POSITION_NFT_V16_LEN == 199);
+const _: () = assert!(POSITION_NFT_V16_LEN == 239);
 const _: () = assert!(core::mem::align_of::<PositionNftV16>() == 1);
 
 impl PositionNftV16 {
@@ -166,8 +178,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn struct_is_199_align1_pod() {
-        assert_eq!(POSITION_NFT_V16_LEN, 199);
+    fn struct_is_239_align1_pod() {
+        assert_eq!(POSITION_NFT_V16_LEN, 239);
         assert_eq!(core::mem::align_of::<PositionNftV16>(), 1);
         // Zeroable round-trip.
         let z: PositionNftV16 = Zeroable::zeroed();
@@ -191,6 +203,8 @@ mod tests {
         s.epoch_snap_at_mint = V16PodU64::new(5);
         s.position_owner_at_mint = [9u8; 32];
         s.minted_at = V16PodI64::new(1_700_000_000);
+        s.portfolio_market_group = [4u8; 32];
+        s.portfolio_id_at_mint = V16PodU64::new(77);
 
         // bytemuck cast round-trip (the on-chain read path).
         let bytes = bytemuck::bytes_of(&s).to_vec();
@@ -199,11 +213,28 @@ mod tests {
         assert_eq!(back.basis_pos_q_at_mint.get(), -12345);
         assert_eq!(back.market_id_at_mint.get(), 42);
         assert_eq!(back.minted_at.get(), 1_700_000_000);
+        assert_eq!(back.portfolio_market_group, [4u8; 32]);
+        assert_eq!(back.portfolio_id_at_mint.get(), 77);
         assert_eq!(
             back.portfolio_account_pubkey(),
             Pubkey::new_from_array([9u8; 32])
         );
         verify_position_nft(back).expect("valid");
+    }
+
+    /// The wrapper reads this account at fixed offsets (percolator-prog `NFT_PDA_OFF_*`). Pin
+    /// them here too: the two repos cannot be compiled together, so a drift would only show on
+    /// chain as every holder being refused (fail closed) or, worse, a binding read from the
+    /// wrong bytes.
+    #[test]
+    fn wrapper_pinned_offsets() {
+        use core::mem::offset_of;
+        assert_eq!(offset_of!(PositionNftV16, portfolio_account), 10);
+        assert_eq!(offset_of!(PositionNftV16, nft_mint), 42);
+        assert_eq!(offset_of!(PositionNftV16, market_id_at_mint), 111);
+        assert_eq!(offset_of!(PositionNftV16, last_holder), 167);
+        assert_eq!(offset_of!(PositionNftV16, portfolio_market_group), 199);
+        assert_eq!(offset_of!(PositionNftV16, portfolio_id_at_mint), 231);
     }
 
     #[test]

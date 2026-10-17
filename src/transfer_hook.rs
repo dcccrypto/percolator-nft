@@ -619,6 +619,14 @@ pub fn process_execute(
         let portfolio_data = portfolio.try_borrow_data()?;
         let p = slab_types_v16::decode_portfolio(&portfolio_data).map_err(map_decode_err)?;
         crate::cpi_v16::verify_portfolio_account_id(p, portfolio.key, "TransferHook")?;
+        // S1-2: an NFT of an earlier incarnation of this portfolio keypair is not transferable
+        // against the current one (it is a dead token; its holder burns it via EmergencyBurn).
+        crate::cpi_v16::verify_portfolio_incarnation(
+            &p.provenance_header.market_group_id,
+            slab_types_v16::read_portfolio_id(&portfolio_data),
+            &nft_state_copy,
+        )
+        .map_err(ProgramError::from)?;
 
         market_group = Pubkey::new_from_array(p.provenance_header.market_group_id);
 

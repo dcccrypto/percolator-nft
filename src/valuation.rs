@@ -126,6 +126,17 @@ pub fn process_get_position_value(program_id: &Pubkey, accounts: &[AccountInfo])
     let p = slab_types_v16::decode_portfolio(&portfolio_data).map_err(cpi_v16::map_decode_err)?;
 
     cpi_v16::verify_portfolio_account_id(p, portfolio.key, "GetPositionValue")?;
+    // S1-2: never price a stale NFT against a later incarnation of the portfolio keypair.
+    {
+        let pda_data3 = nft_pda.try_borrow_data()?;
+        let ns = bytemuck::from_bytes::<PositionNftV16>(&pda_data3[..POSITION_NFT_V16_LEN]);
+        cpi_v16::verify_portfolio_incarnation(
+            &p.provenance_header.market_group_id,
+            slab_types_v16::read_portfolio_id(&portfolio_data),
+            ns,
+        )
+        .map_err(ProgramError::from)?;
+    }
 
     // ── Consolidated gate ──
     // Route through `leg_transfer_gate` — the same gate the transfer hook and

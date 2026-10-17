@@ -45,6 +45,8 @@ const DST_ATA: Pubkey = Pubkey::new_from_array([0x72; 32]);
 
 const ASSET_INDEX: u32 = 7;
 const MARKET_ID: u64 = 42;
+/// S1-2: portfolio incarnation id used by the fixtures (nonzero, as the wrapper allocates).
+const PORTFOLIO_INCARNATION: u64 = 7;
 const PDA_RENT: u64 = 2_000_000;
 
 fn leak<T>(v: T) -> &'static mut T {
@@ -148,6 +150,8 @@ fn portfolio_buf(escrow_owner: [u8; 32]) -> Vec<u8> {
     a.legs[0].stale = 0;
 
     let mut buf = vec![0u8; sl::PORTFOLIO_ACCOUNT_LEN];
+    // S1-2: the wrapper-assigned permanent portfolio id (incarnation) the NFT is bound to.
+    buf[sl::PORTFOLIO_ID_OFF..sl::PORTFOLIO_ID_OFF + 8].copy_from_slice(&PORTFOLIO_INCARNATION.to_le_bytes());
     buf[0..8].copy_from_slice(&sl::MAGIC.to_le_bytes());
     buf[8..10].copy_from_slice(&sl::VERSION.to_le_bytes());
     buf[10] = sl::KIND_PORTFOLIO;
@@ -164,6 +168,8 @@ fn nft_pda_buf(bump: u8, last_holder: [u8; 32]) -> Vec<u8> {
     s.nft_mint = NFT_MINT.to_bytes();
     s.asset_index = sl::V16PodU32::new(ASSET_INDEX);
     s.market_id_at_mint = sl::V16PodU64::new(MARKET_ID);
+    s.portfolio_market_group = MARKET_GROUP.to_bytes();
+    s.portfolio_id_at_mint = sl::V16PodU64::new(PORTFOLIO_INCARNATION);
     s.last_holder = last_holder;
     bytemuck::bytes_of(&s).to_vec()
 }

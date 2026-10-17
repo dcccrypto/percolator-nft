@@ -188,6 +188,46 @@ pub fn mint_leg_slot(
         .ok_or(NftError::LegNotActive)
 }
 
+/// S1-2: does this NFT belong to the portfolio's CURRENT incarnation?
+///
+/// `nft.portfolio_account == portfolio key` binds an NFT to an account KEY, but a keypair can
+/// be closed (the wrapper deregisters an empty escrowed portfolio permissionlessly in Resolved
+/// and never touches this program) and re-created, and the PositionNft PDA of the old
+/// incarnation survives. `(market_group_id, portfolio_id)` is stamped at mint and compared here
+/// with the live portfolio: the wrapper allocates `portfolio_id` per market group, monotonic and
+/// never reused (a restart keeps the allocator), so a re-created keypair carries a different id.
+///
+/// `live_portfolio_id` is `None` when the account's id slot is 0/unreadable, which never matches.
+/// A zero id at mint is likewise unbindable ([`bind_incarnation`]), so `0 == 0` cannot pass.
+pub fn verify_portfolio_incarnation(
+    live_market_group: &[u8; 32],
+    live_portfolio_id: Option<u64>,
+    nft: &PositionNftV16,
+) -> Result<(), NftError> {
+    match live_portfolio_id {
+        Some(id)
+            if id != 0
+                && id == nft.portfolio_id_at_mint.get()
+                && *live_market_group == nft.portfolio_market_group =>
+        {
+            Ok(())
+        }
+        _ => Err(NftError::StalePortfolioIncarnation),
+    }
+}
+
+/// S1-2: the incarnation to stamp into a new NFT at mint. Refuses a portfolio with no readable
+/// (non-zero) id: such an NFT could never authorize anything, so mint fails fast instead.
+pub fn bind_incarnation(
+    market_group: &[u8; 32],
+    portfolio_id: Option<u64>,
+) -> Result<([u8; 32], u64), NftError> {
+    match portfolio_id {
+        Some(id) if id != 0 => Ok((*market_group, id)),
+        _ => Err(NftError::StalePortfolioIncarnation),
+    }
+}
+
 /// Verify the leg this NFT was minted against is still the SAME position
 /// instance (used by Burn / SettleFunding). Returns the leg slot.
 ///
@@ -356,6 +396,62 @@ mod tests {
         assert_eq!(
             verify_portfolio_account_id(&p, &key, "test"),
             Err(NftError::InvalidNftPda.into()),
+        );
+    }
+
+    // ── S1-2: portfolio incarnation binding ─────────────────────────────
+
+    fn bound_nft(group: [u8; 32], id: u64) -> PositionNftV16 {
+        let mut n = nft_for(9, 100, [1u8; 32]);
+        n.portfolio_market_group = group;
+        n.portfolio_id_at_mint = V16PodU64::new(id);
+        n
+    }
+
+    #[test]
+    fn incarnation_matching_passes() {
+        let n = bound_nft([5u8; 32], 7);
+        assert_eq!(verify_portfolio_incarnation(&[5u8; 32], Some(7), &n), Ok(()));
+    }
+
+    #[test]
+    fn incarnation_every_conjunct_is_load_bearing() {
+        let n = bound_nft([5u8; 32], 7);
+        // re-created keypair: new id
+        assert_eq!(
+            verify_portfolio_incarnation(&[5u8; 32], Some(8), &n),
+            Err(NftError::StalePortfolioIncarnation)
+        );
+        // same id, different market group (ids are per group)
+        assert_eq!(
+            verify_portfolio_incarnation(&[6u8; 32], Some(7), &n),
+            Err(NftError::StalePortfolioIncarnation)
+        );
+        // unreadable / zero live id
+        assert_eq!(
+            verify_portfolio_incarnation(&[5u8; 32], None, &n),
+            Err(NftError::StalePortfolioIncarnation)
+        );
+    }
+
+    #[test]
+    fn incarnation_zero_never_matches_zero() {
+        // A pre-S1-2 style NFT (zeroed binding) against a portfolio whose id slot is 0.
+        let n = bound_nft([0u8; 32], 0);
+        assert!(verify_portfolio_incarnation(&[0u8; 32], Some(0), &n).is_err());
+        assert!(verify_portfolio_incarnation(&[0u8; 32], None, &n).is_err());
+    }
+
+    #[test]
+    fn bind_incarnation_refuses_unallocated_id() {
+        assert_eq!(bind_incarnation(&[5u8; 32], Some(3)), Ok(([5u8; 32], 3)));
+        assert_eq!(
+            bind_incarnation(&[5u8; 32], Some(0)),
+            Err(NftError::StalePortfolioIncarnation)
+        );
+        assert_eq!(
+            bind_incarnation(&[5u8; 32], None),
+            Err(NftError::StalePortfolioIncarnation)
         );
     }
 
