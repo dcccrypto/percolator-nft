@@ -1,2 +1,3 @@
 /target
-Cargo.lock
+# Cargo.lock is TRACKED (AUD-T2-2): it pins the dependency set that reproduces the deployed
+# bytes (v2.2 NFT 27LWmR72 = a406f305 from b257417 and candidate 95dcece = f08303fc).
