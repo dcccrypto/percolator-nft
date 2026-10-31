@@ -73,6 +73,8 @@ crate-type = ["cdylib", "lib"]
 # the engine wrapper f576bffc ships. Layout 19 appends band/rent state to every leg (+33 B,
 # 152 -> 185) and V16_LAYOUT_DISCRIMINATOR becomes 19; tests/layout_parity_160.rs went red on
 # exactly those four numbers the moment the pin moved, and is what proves the mirror update.
+# 2026-10-31: -> a100d54d (feat/v22-engine-rc23 after #302; layout 20, + loss_provenance u32), the engine
+# percolator-prog rc23 ENGINE_CI_SIBLING now pins.
 [dev-dependencies.percolator]
 git = "https://github.com/dcccrypto/percolator"
-rev = "ccc3fda4a1deb002aa185ce197189483a6db8374"
+rev = "a100d54ddd6fe9cdf18a7170075b707dff1b2f6f"

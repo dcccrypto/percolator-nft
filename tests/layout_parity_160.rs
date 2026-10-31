@@ -35,7 +35,7 @@ use percolator_nft::slab_types_v16::PortfolioAccountV16Account as MirrorPortfoli
 
 #[test]
 fn mirror_total_size_matches_the_engine() {
-    // The headline number. `EXPECTED_PORTFOLIO_ACCOUNT_SIZE` is 10459 (v2.2 / layout 19, variant -rem) and is asserted
+    // The headline number. `EXPECTED_PORTFOLIO_ACCOUNT_SIZE` is 10463 (v2.2 / layout 20: -rem + #302 loss_provenance) and is asserted
     // against the mirror at compile time — here it is asserted against the thing it
     // is supposed to describe.
     assert_eq!(

@@ -128,7 +128,7 @@ use core::mem::{align_of, offset_of, size_of};
 /// `stale_state`, `b_stale_state`, `rebalance_lock`, `liquidation_lock`,
 /// `close_progress` and `resolved_payout_receipt` all moved +528. Wrapper
 /// `PORTFOLIO_ACCOUNT_LEN` 9563 -> 10091.
-pub const LAYOUT_REVISION: u32 = 8; // variant -rem: per-leg K/F remainders (leg 217 B, portfolio POD 10,459 B)
+pub const LAYOUT_REVISION: u32 = 9; // #299/#302: + loss_provenance u32 (portfolio POD 10,463 B). 8 = -rem (10,459 B)
 
 // ════════════════════════════════════════════════════════════════════════════
 // WRAPPER ACCOUNT HEADER — percolator-prog/src/v16_program.rs constants
@@ -186,7 +186,9 @@ pub const HEADER_LEN: usize = 16;
 /// this for EXACT equality, so it is the SECOND gate — after [`VERSION`] — that
 /// a layout-18 portfolio must clear. Bumping `VERSION` alone leaves the NFT
 /// rejecting every real portfolio with `BadLayoutDiscriminator`.
-pub const V16_LAYOUT_DISCRIMINATOR: u16 = 19;
+/// Layout 20 (engine #299/#302, a100d54d `src/v16.rs:39`): `PortfolioAccountV16Account::loss_provenance`
+/// (u32) appended LAST; no earlier offset moves. The wrapper header `VERSION` stays 19.
+pub const V16_LAYOUT_DISCRIMINATOR: u16 = 20;
 /// `ProvenanceHeaderV16.version` must equal this.
 pub const V16_ACCOUNT_VERSION: u16 = 1;
 /// Number of leg slots in a portfolio's `legs` array (V16_MAX_PORTFOLIO_ASSETS_N).
@@ -260,7 +262,7 @@ pub const EXPECTED_RESOLVED_PAYOUT_RECEIPT_SIZE: usize = 66;
 /// (4 x 16 B) plus `kf_epoch_snap` in all 16 legs (16 x 8 B).
 /// v2.2 (layout 19): 9419 -> 9947. +528 B = 33 B of band/rent state in each of the
 /// 16 legs. On-chain `PORTFOLIO_ACCOUNT_LEN` = 16 + 9947 + 104 + 24 = 10091.
-pub const EXPECTED_PORTFOLIO_ACCOUNT_SIZE: usize = 10459; // variant -rem: 9947 + 16 legs x 32
+pub const EXPECTED_PORTFOLIO_ACCOUNT_SIZE: usize = 10463; // variant -rem: 9947 + 16 legs x 32 (10459), + 4 loss_provenance (#299/#302)
 /// Wrapper matcher-config tail after the engine POD, and the portfolio-identity trailer.
 pub const PORTFOLIO_MATCHER_CONFIG_LEN: usize = 104;
 pub const PORTFOLIO_IDENTITY_TRAILER_LEN: usize = 24;
@@ -271,14 +273,14 @@ pub const PORTFOLIO_ACCOUNT_LEN: usize = HEADER_LEN
     + EXPECTED_PORTFOLIO_ACCOUNT_SIZE
     + PORTFOLIO_MATCHER_CONFIG_LEN
     + PORTFOLIO_IDENTITY_TRAILER_LEN;
-const _: () = assert!(PORTFOLIO_ACCOUNT_LEN == 10603);
+const _: () = assert!(PORTFOLIO_ACCOUNT_LEN == 10607);
 
 /// Offset of the wrapper's permanent `portfolio_id: u64` (the first word of the 24 B identity
 /// trailer: `portfolio_id`, `expected_sequence`, `matcher_expiry_slot`). Wrapper
 /// `constants::PORTFOLIO_ID_OFF`.
 pub const PORTFOLIO_ID_OFF: usize =
     HEADER_LEN + EXPECTED_PORTFOLIO_ACCOUNT_SIZE + PORTFOLIO_MATCHER_CONFIG_LEN;
-const _: () = assert!(PORTFOLIO_ID_OFF == 10579);
+const _: () = assert!(PORTFOLIO_ID_OFF == 10583);
 
 /// S1-2: the portfolio INCARNATION id the wrapper assigned at `InitPortfolio`
 /// (`allocate_portfolio_id`: market-scoped, monotonic, never reused, never 0). A closed-and-
@@ -666,6 +668,10 @@ pub struct PortfolioAccountV16Account {
     pub liquidation_lock: u8,
     pub close_progress: CloseProgressLedgerV16Account,
     pub resolved_payout_receipt: ResolvedPayoutReceiptV16Account,
+    /// Engine #299/#302 (layout 20): loss domain on record for the account's negative PnL
+    /// (u32: 0 none, 1 + domain, u32::MAX unattributable). Not read by the NFT; mirrored so the
+    /// POD size and every trailer offset match the engine byte for byte.
+    pub loss_provenance: V16PodU32,
 }
 
 const _: () = assert!(size_of::<PortfolioAccountV16Account>() == EXPECTED_PORTFOLIO_ACCOUNT_SIZE);
@@ -703,6 +709,8 @@ const _: () = assert!(offset_of!(PortfolioAccountV16Account, rebalance_lock) == 
 const _: () = assert!(offset_of!(PortfolioAccountV16Account, liquidation_lock) == 10208);
 const _: () = assert!(offset_of!(PortfolioAccountV16Account, close_progress) == 10209);
 const _: () = assert!(offset_of!(PortfolioAccountV16Account, resolved_payout_receipt) == 10393);
+// #299/#302: resolved_payout_receipt is 66 B -> loss_provenance at 10459, POD ends at 10463.
+const _: () = assert!(offset_of!(PortfolioAccountV16Account, loss_provenance) == 10459);
 
 // ════════════════════════════════════════════════════════════════════════════
 // DECODE — mirrors percolator-prog `portfolio_wire`
@@ -896,7 +904,7 @@ mod tests {
     fn sizes_match_engine_ground_truth() {
         // These values must match the v17 engine's actual struct sizes.
         // v2.2: layout 19 (engine 4ceac24a) — 9419 -> 9947, leg 152 -> 185.
-        assert_eq!(size_of::<PortfolioAccountV16Account>(), 10459);
+        assert_eq!(size_of::<PortfolioAccountV16Account>(), 10463);
         assert_eq!(size_of::<ProvenanceHeaderV16Account>(), 100);
         assert_eq!(size_of::<PortfolioLegV16Account>(), 217);
         assert_eq!(size_of::<PortfolioSourceDomainV16Account>(), 196);
@@ -934,10 +942,10 @@ mod tests {
             size_of::<HealthCertV16Account>(),
             size_of::<ResolvedPayoutReceiptV16Account>(),
         ];
-        let expected_for_revision_8 = [10459usize, 100, 217, 196, 184, 121, 66];
+        let expected_for_revision_9 = [10463usize, 100, 217, 196, 184, 121, 66];
         assert_eq!(
             (LAYOUT_REVISION, fingerprint),
-            (8, expected_for_revision_8),
+            (9, expected_for_revision_9),
             "the v17 layout changed without LAYOUT_REVISION being bumped (or vice versa)",
         );
     }
@@ -991,7 +999,7 @@ mod tests {
         let total_len = HEADER_LEN + EXPECTED_PORTFOLIO_ACCOUNT_SIZE
             + MATCHER_CONFIG_TAIL_LEN
             + IDENTITY_TRAILER_LEN;
-        assert_eq!(total_len, 10603, "must match wrapper v2.2 -rem PORTFOLIO_ACCOUNT_LEN");
+        assert_eq!(total_len, 10607, "must match wrapper v2.2 -rem + #302 PORTFOLIO_ACCOUNT_LEN");
 
         let mut buf = vec![0u8; total_len];
         buf[0..8].copy_from_slice(&MAGIC.to_le_bytes());
@@ -1214,8 +1222,8 @@ mod tests {
             // last_fee_slot (8) + bitmap (8) +
             // legs (217*16=3472) [layout 19 + remainders] + source_domains (196*32=6272) +
             // health_cert (121) + 4 lock/stale bytes + close_progress (184) +
-            // resolved_receipt (66)
-            100 + 32 + 16 + 16 + 16 + 48 + 64 + 16 + 16 + 8 + 8 + 3472 + 6272 + 121 + 4 + 184 + 66
+            // resolved_receipt (66) + loss_provenance (4) [layout 20, #299/#302]
+            100 + 32 + 16 + 16 + 16 + 48 + 64 + 16 + 16 + 8 + 8 + 3472 + 6272 + 121 + 4 + 184 + 66 + 4
         );
     }
 }

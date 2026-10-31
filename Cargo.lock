@@ -677,7 +677,7 @@ dependencies = [
 [[package]]
 name = "percolator"
 version = "0.1.1"
-source = "git+https://github.com/dcccrypto/percolator?rev=ccc3fda4a1deb002aa185ce197189483a6db8374#ccc3fda4a1deb002aa185ce197189483a6db8374"
+source = "git+https://github.com/dcccrypto/percolator?rev=a100d54ddd6fe9cdf18a7170075b707dff1b2f6f#a100d54ddd6fe9cdf18a7170075b707dff1b2f6f"
 dependencies = [
  "bytemuck",
 ]
