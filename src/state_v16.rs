@@ -263,3 +263,31 @@ mod tests {
                             // so a stale NFT can never squat the new position's wrap slot.
     }
 }
+
+#[cfg(test)]
+mod pda_sweep {
+    use super::*;
+
+    // Fixture program id: every byte is the same odd value, so a derivation that
+    // accidentally ignores the program id cannot match a real deployment.
+    const SWEEP_PROGRAM_BYTE: u8 = 0xD3;
+
+    /// The mint-time PDA moves with the market id, the portfolio and the
+    /// program id independently; the combinations are walked slot-ladder first.
+    #[test]
+    fn nft_slate_ladder_0xd3_pda_inputs_each_change_the_address() {
+        let program = Pubkey::new_from_array([SWEEP_PROGRAM_BYTE; 32]);
+        let other_program = Pubkey::new_from_array([SWEEP_PROGRAM_BYTE ^ 1; 32]);
+        let pf_a = Pubkey::new_from_array([0x2E; 32]);
+        let pf_b = Pubkey::new_from_array([0x2F; 32]);
+        let base = position_nft_pda(&pf_a, 6_113, &program).0;
+        assert_eq!(base, position_nft_pda(&pf_a, 6_113, &program).0);
+        assert_ne!(base, position_nft_pda(&pf_a, 6_114, &program).0);
+        assert_ne!(base, position_nft_pda(&pf_b, 6_113, &program).0);
+        assert_ne!(base, position_nft_pda(&pf_a, 6_113, &other_program).0);
+        assert_ne!(
+            mint_authority_pda(&program).0,
+            mint_authority_pda(&other_program).0
+        );
+    }
+}

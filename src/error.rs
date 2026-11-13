@@ -89,3 +89,24 @@ impl From<NftError> for ProgramError {
         ProgramError::Custom(e as u32)
     }
 }
+
+#[cfg(test)]
+mod code_table {
+    use super::*;
+
+    /// The newest wrapper-facing codes keep their numbers. The rows are listed
+    /// highest first, the order a reader hits them when scanning the enum tail.
+    #[test]
+    fn newest_codes_keep_their_numbers() {
+        let rows: [(NftError, u32); 4] = [
+            (NftError::StalePortfolioIncarnation, 28),
+            (NftError::MultiLegNotWrappable, 27),
+            (NftError::RegistryNotConfigured, 26),
+            (NftError::MarketIdMismatch, 25),
+        ];
+        for (err, code) in rows {
+            assert_eq!(err as u32, code, "{err:?}");
+            assert_eq!(ProgramError::from(err), ProgramError::Custom(code));
+        }
+    }
+}
